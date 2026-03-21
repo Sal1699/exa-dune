@@ -1,0 +1,2240 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>exa-dune v2.4.0 — Manuale Operativo</title>
+<style>
+:root {
+  --bg: #0d1117; --bg2: #161b22; --bg3: #21262d;
+  --border: #30363d; --accent: #58a6ff; --accent2: #3fb950;
+  --warn: #d29922; --danger: #f85149; --purple: #bc8cff;
+  --text: #e6edf3; --muted: #8b949e; --code-bg: #1f2428;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; font-size: 14px; line-height: 1.7; }
+.cover { background: linear-gradient(135deg, #0d1117 0%, #161b22 40%, #1a2332 100%); min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 60px 40px; page-break-after: always; border-bottom: 3px solid var(--accent); }
+.cover-badge { background: var(--accent); color: #000; font-size: 11px; font-weight: 700; letter-spacing: 2px; padding: 4px 14px; border-radius: 20px; text-transform: uppercase; margin-bottom: 30px; display: inline-block; }
+.cover h1 { font-size: 72px; font-weight: 900; letter-spacing: -2px; background: linear-gradient(135deg, var(--accent), var(--purple)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; line-height: 1; margin-bottom: 8px; }
+.cover .subtitle { font-size: 22px; color: var(--muted); margin-bottom: 40px; }
+.cover .version { font-size: 16px; color: var(--accent2); font-weight: 700; margin-bottom: 16px; }
+.cover .desc { max-width: 600px; color: var(--muted); font-size: 15px; line-height: 1.8; margin-bottom: 50px; }
+.cover-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; max-width: 700px; margin-bottom: 60px; }
+.cover-stat { background: var(--bg3); border: 1px solid var(--border); border-radius: 10px; padding: 20px 10px; text-align: center; }
+.cover-stat .num { font-size: 32px; font-weight: 900; color: var(--accent); }
+.cover-stat .lbl { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-top: 4px; }
+.cover-footer { font-size: 12px; color: var(--muted); border-top: 1px solid var(--border); padding-top: 20px; width: 100%; max-width: 700px; }
+.confidenziale { color: var(--danger); font-weight: 700; letter-spacing: 2px; font-size: 13px; margin-top: 8px; }
+
+.toc-page { padding: 60px 80px; page-break-after: always; }
+.toc-page h2 { font-size: 28px; font-weight: 800; color: var(--accent); border-bottom: 2px solid var(--border); padding-bottom: 12px; margin-bottom: 30px; }
+.toc-section { margin-bottom: 8px; }
+.toc-section a { color: var(--text); text-decoration: none; display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px dotted var(--border); }
+.toc-section a:hover { color: var(--accent); }
+.toc-section a .pg { color: var(--muted); font-size: 12px; }
+.toc-h1 { font-size: 15px; font-weight: 700; color: var(--accent); }
+.toc-h2 { font-size: 13px; padding-left: 20px; color: var(--muted); }
+
+.page { padding: 50px 80px; }
+.page-break { page-break-before: always; }
+h1.section { font-size: 32px; font-weight: 800; color: var(--accent); margin-bottom: 10px; padding-bottom: 12px; border-bottom: 2px solid var(--border); }
+h2.sub { font-size: 22px; font-weight: 700; color: var(--text); margin: 30px 0 12px 0; padding-left: 14px; border-left: 4px solid var(--accent); }
+h3.subsub { font-size: 16px; font-weight: 700; color: var(--accent2); margin: 22px 0 8px 0; }
+p { margin-bottom: 12px; }
+ul, ol { margin: 10px 0 16px 24px; }
+li { margin-bottom: 6px; }
+
+.callout { border-radius: 8px; padding: 16px 20px; margin: 18px 0; border-left: 4px solid; }
+.callout.info { background: #1c2d3f; border-color: var(--accent); }
+.callout.warn { background: #2d2008; border-color: var(--warn); }
+.callout.danger { background: #2d1117; border-color: var(--danger); }
+.callout.tip { background: #0f2d1c; border-color: var(--accent2); }
+.callout .label { font-size: 11px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: 6px; }
+.callout.info .label { color: var(--accent); }
+.callout.warn .label { color: var(--warn); }
+.callout.danger .label { color: var(--danger); }
+.callout.tip .label { color: var(--accent2); }
+
+pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 18px 20px; overflow-x: auto; margin: 14px 0; font-family: 'Consolas', 'Courier New', monospace; font-size: 13px; line-height: 1.6; }
+code { background: var(--code-bg); border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; font-family: 'Consolas', 'Courier New', monospace; font-size: 12px; color: var(--accent); }
+.cmd { color: #79c0ff; }
+.flag { color: #d2a8ff; }
+.arg { color: #a8dadc; }
+.comment { color: var(--muted); font-style: italic; }
+.ok { color: var(--accent2); }
+.err { color: var(--danger); }
+
+table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 13px; }
+th { background: var(--bg3); color: var(--accent); text-align: left; padding: 10px 14px; border: 1px solid var(--border); font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+td { padding: 9px 14px; border: 1px solid var(--border); vertical-align: top; }
+tr:nth-child(even) td { background: var(--bg2); }
+.tag { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 700; }
+.tag.red { background: #3d1418; color: var(--danger); }
+.tag.yellow { background: #2d2008; color: var(--warn); }
+.tag.green { background: #0f2d1c; color: var(--accent2); }
+.tag.blue { background: #0d2040; color: var(--accent); }
+.tag.purple { background: #1e1230; color: var(--purple); }
+
+.flag-table td:first-child { color: var(--purple); font-family: monospace; white-space: nowrap; }
+.flag-table td:nth-child(2) { color: var(--muted); font-size: 12px; }
+
+.phase-box { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; margin: 10px 0; padding: 16px 20px; position: relative; }
+.phase-box .phase-num { position: absolute; top: -12px; left: 16px; background: var(--accent); color: #000; font-size: 11px; font-weight: 800; padding: 2px 10px; border-radius: 10px; }
+.phase-box h4 { color: var(--accent); margin-bottom: 8px; padding-top: 6px; font-size: 15px; }
+
+.cmd-header { background: var(--bg3); border: 1px solid var(--border); border-radius: 10px 10px 0 0; padding: 14px 20px; display: flex; align-items: center; gap: 12px; margin-top: 30px; }
+.cmd-header .cmd-name { font-size: 20px; font-weight: 800; color: var(--accent); font-family: monospace; }
+.cmd-header .cmd-desc { color: var(--muted); font-size: 13px; }
+.cmd-body { background: var(--bg2); border: 1px solid var(--border); border-top: none; border-radius: 0 0 10px 10px; padding: 20px; margin-bottom: 20px; }
+
+.scenario { background: var(--bg3); border: 1px solid var(--accent); border-radius: 10px; padding: 20px; margin: 20px 0; }
+.scenario .sc-title { color: var(--accent); font-weight: 700; font-size: 15px; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+.scenario .device { background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; font-size: 12px; color: var(--purple); font-family: monospace; }
+
+.glossary-entry { border-bottom: 1px solid var(--border); padding: 12px 0; }
+.glossary-entry .term { color: var(--accent); font-weight: 700; font-size: 15px; font-family: monospace; }
+.glossary-entry .def { color: var(--muted); margin-top: 4px; }
+
+.cheatsheet { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.cs-block { background: var(--bg3); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
+.cs-block h4 { color: var(--accent2); font-size: 12px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px; }
+.cs-block pre { margin: 0; font-size: 11px; background: var(--bg); border: none; padding: 8px; }
+
+.port-badge { display: inline-block; background: var(--bg3); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; font-family: monospace; font-size: 12px; color: var(--warn); margin: 2px; }
+.flow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 14px 0; }
+.flow-step { background: var(--bg3); border: 1px solid var(--border); border-radius: 6px; padding: 8px 16px; font-size: 13px; font-weight: 600; }
+.flow-arrow { color: var(--accent); font-size: 18px; }
+</style>
+</head>
+<body>
+
+<!-- COVER PAGE -->
+<div class="cover">
+  <div class="cover-badge">Uso Interno — Laboratorio Personale</div>
+  <h1>exa-dune</h1>
+  <div class="subtitle">Framework Multi-Protocollo per Penetration Testing</div>
+  <div class="version">Versione 2.4.0 — Marzo 2026</div>
+  <div class="desc">
+    Manuale operativo completo per l'utilizzo di exa-dune in ambienti IoT e VoIP.
+    Questo documento copre tutte le funzionalità della versione 2.4.0, incluso il sistema
+    di pipeline automatizzata, le wordlist integrate, il modulo ONVIF, l'installer automatico,
+    i report HTML/PDF professionali con copia automatica su Desktop, e molto altro.
+    Progettato per essere accessibile anche ai principianti.
+  </div>
+  <div class="cover-grid">
+    <div class="cover-stat"><div class="num">30</div><div class="lbl">Subcomandi</div></div>
+    <div class="cover-stat"><div class="num">24</div><div class="lbl">Wordlist Disponibili</div></div>
+    <div class="cover-stat"><div class="num">25+</div><div class="lbl">Porte Mappate</div></div>
+    <div class="cover-stat"><div class="num">5</div><div class="lbl">Fasi Pipeline</div></div>
+  </div>
+  <div class="cover-footer">
+    <div>Autore: Security Lab — Piattaforma: Kali Linux 6.18</div>
+    <div class="confidenziale">⚠ CONFIDENZIALE — USO ESCLUSIVAMENTE IN AMBIENTI AUTORIZZATI ⚠</div>
+  </div>
+</div>
+
+<!-- TABLE OF CONTENTS -->
+<div class="toc-page">
+  <h2>Indice dei Contenuti</h2>
+  <div class="toc-section"><a href="#intro"><span class="toc-h1">1. Introduzione e Concetti Base</span><span class="pg">3</span></a></div>
+  <div class="toc-section"><a href="#install"><span class="toc-h1">2. Installazione e Configurazione</span><span class="pg">5</span></a></div>
+  <div class="toc-section"><a href="#arch"><span class="toc-h1">3. Architettura del Tool</span><span class="pg">7</span></a></div>
+  <div class="toc-section"><a href="#flags"><span class="toc-h1">4. Flag Globali e Opzioni Comuni</span><span class="pg">9</span></a></div>
+  <div class="toc-section"><a href="#wordlists"><span class="toc-h1">5. Wordlist Integrate</span><span class="pg">11</span></a></div>
+  <div class="toc-section"><a href="#scan"><span class="toc-h1">6. Subcomandi di Scansione e Ricognizione</span><span class="pg">13</span></a></div>
+  <div class="toc-section"><a href="#scan-cmd"><span class="toc-h2">6.1 scan — Scansione di Rete</span><span class="pg">13</span></a></div>
+  <div class="toc-section"><a href="#dns-cmd"><span class="toc-h2">6.2 dns — Enumerazione DNS</span><span class="pg">15</span></a></div>
+  <div class="toc-section"><a href="#web-cmd"><span class="toc-h2">6.3 web — Audit Web/HTTP</span><span class="pg">16</span></a></div>
+  <div class="toc-section"><a href="#http-cmd"><span class="toc-h2">6.4 http — Analisi Header HTTP</span><span class="pg">18</span></a></div>
+  <div class="toc-section"><a href="#ssl-cmd"><span class="toc-h2">6.5 ssl — Analisi Certificati TLS</span><span class="pg">19</span></a></div>
+  <div class="toc-section"><a href="#voip"><span class="toc-h1">7. Subcomandi VoIP e Multimedia</span><span class="pg">20</span></a></div>
+  <div class="toc-section"><a href="#sip-cmd"><span class="toc-h2">7.1 sip — Enumerazione SIP</span><span class="pg">20</span></a></div>
+  <div class="toc-section"><a href="#rtsp-cmd"><span class="toc-h2">7.2 rtsp — Streaming RTSP</span><span class="pg">22</span></a></div>
+  <div class="toc-section"><a href="#brute"><span class="toc-h1">8. Subcomandi Brute-Force e Credenziali</span><span class="pg">24</span></a></div>
+  <div class="toc-section"><a href="#ssh-cmd"><span class="toc-h2">8.1 ssh — Brute Force SSH</span><span class="pg">24</span></a></div>
+  <div class="toc-section"><a href="#ftp-cmd"><span class="toc-h2">8.2 ftp — Brute Force FTP</span><span class="pg">25</span></a></div>
+  <div class="toc-section"><a href="#telnet-cmd"><span class="toc-h2">8.3 telnet — Brute Force Telnet</span><span class="pg">26</span></a></div>
+  <div class="toc-section"><a href="#creds-cmd"><span class="toc-h2">8.4 creds — Credenziali IoT/VoIP</span><span class="pg">27</span></a></div>
+  <div class="toc-section"><a href="#rdp-cmd"><span class="toc-h2">8.5 rdp — Remote Desktop Protocol</span><span class="pg">28</span></a></div>
+  <div class="toc-section"><a href="#vnc-cmd"><span class="toc-h2">8.6 vnc — Virtual Network Computing</span><span class="pg">29</span></a></div>
+  <div class="toc-section"><a href="#smb-cmd"><span class="toc-h2">8.7 smb — Condivisioni SMB/CIFS</span><span class="pg">30</span></a></div>
+  <div class="toc-section"><a href="#proto"><span class="toc-h1">9. Subcomandi Protocolli Industriali/IoT</span><span class="pg">31</span></a></div>
+  <div class="toc-section"><a href="#snmp-cmd"><span class="toc-h2">9.1 snmp — Simple Network Management Protocol</span><span class="pg">31</span></a></div>
+  <div class="toc-section"><a href="#mqtt-cmd"><span class="toc-h2">9.2 mqtt — Message Queuing</span><span class="pg">33</span></a></div>
+  <div class="toc-section"><a href="#modbus-cmd"><span class="toc-h2">9.3 modbus — Protocollo Industriale</span><span class="pg">34</span></a></div>
+  <div class="toc-section"><a href="#redis-cmd"><span class="toc-h2">9.4 redis — Database Redis</span><span class="pg">35</span></a></div>
+  <div class="toc-section"><a href="#ldap-cmd"><span class="toc-h2">9.5 ldap — Servizi LDAP</span><span class="pg">36</span></a></div>
+  <div class="toc-section"><a href="#upnp-cmd"><span class="toc-h2">9.6 upnp — Universal Plug and Play</span><span class="pg">37</span></a></div>
+  <div class="toc-section"><a href="#tftp-cmd"><span class="toc-h2">9.7 tftp — Trivial File Transfer</span><span class="pg">38</span></a></div>
+  <div class="toc-section"><a href="#coap-cmd"><span class="toc-h2">9.8 coap — IoT CoAP Protocol</span><span class="pg">39</span></a></div>
+  <div class="toc-section"><a href="#ipmi-cmd"><span class="toc-h2">9.9 ipmi — Server Management</span><span class="pg">40</span></a></div>
+  <div class="toc-section"><a href="#adv"><span class="toc-h1">10. Subcomandi Avanzati</span><span class="pg">41</span></a></div>
+  <div class="toc-section"><a href="#js-cmd"><span class="toc-h2">10.1 js — Analisi JavaScript</span><span class="pg">41</span></a></div>
+  <div class="toc-section"><a href="#fw-cmd"><span class="toc-h2">10.2 fw — Firmware Analysis</span><span class="pg">42</span></a></div>
+  <div class="toc-section"><a href="#post-cmd"><span class="toc-h2">10.3 post — Post-Exploitation</span><span class="pg">43</span></a></div>
+  <div class="toc-section"><a href="#auto-cmd"><span class="toc-h2">10.4 auto — Automazione</span><span class="pg">45</span></a></div>
+  <div class="toc-section"><a href="#report-cmd"><span class="toc-h2">10.5 report — Generazione Report</span><span class="pg">46</span></a></div>
+  <div class="toc-section"><a href="#onvif-cmd"><span class="toc-h2">10.6 onvif — Telecamere ONVIF</span><span class="pg">47</span></a></div>
+  <div class="toc-section"><a href="#install-cmd"><span class="toc-h2">10.7 install — Installazione Tool</span><span class="pg">48</span></a></div>
+  <div class="toc-section"><a href="#wordlists-cmd"><span class="toc-h2">10.8 wordlists — Download Wordlist</span><span class="pg">49</span></a></div>
+  <div class="toc-section"><a href="#pipeline"><span class="toc-h1">11. Pipeline Automatizzata</span><span class="pg">50</span></a></div>
+  <div class="toc-section"><a href="#scenarios"><span class="toc-h1">12. Scenari Pratici di Laboratorio</span><span class="pg">55</span></a></div>
+  <div class="toc-section"><a href="#glossary"><span class="toc-h1">13. Glossario per Principianti</span><span class="pg">61</span></a></div>
+  <div class="toc-section"><a href="#cheatsheet"><span class="toc-h1">14. Cheat Sheet Rapido</span><span class="pg">65</span></a></div>
+  <div class="toc-section"><a href="#changelog"><span class="toc-h1">15. Changelog e Versioni</span><span class="pg">68</span></a></div>
+</div>
+
+
+<!-- SECTION 1: INTRO -->
+<div class="page page-break" id="intro">
+<h1 class="section">1. Introduzione e Concetti Base</h1>
+
+<h2 class="sub">1.1 Cos'è exa-dune?</h2>
+<p>
+<strong>exa-dune</strong> è un framework di penetration testing scritto in Bash, progettato specificamente
+per ambienti <strong>IoT</strong> (Internet of Things) e <strong>VoIP</strong> (Voice over IP). È uno strumento
+a riga di comando che integra e coordina numerosi tool di sicurezza già presenti su Kali Linux,
+presentandoli attraverso un'interfaccia unificata e semplice.
+</p>
+<div class="callout info">
+  <div class="label">Cos'è il Penetration Testing?</div>
+  Il penetration testing (o "pentest") è il processo autorizzato di testare la sicurezza di un sistema
+  informatico simulando gli attacchi di un hacker reale. L'obiettivo è trovare le vulnerabilità
+  <em>prima</em> che lo facciano i malintenzionati, per poi poterle correggere.
+</div>
+
+<h2 class="sub">1.2 Cosa può fare exa-dune?</h2>
+<ul>
+  <li><strong>Scansione di rete</strong> — Trova dispositivi attivi, porte aperte e servizi esposti</li>
+  <li><strong>Brute-force delle credenziali</strong> — Testa username e password su molti protocolli</li>
+  <li><strong>Audit di protocolli specifici</strong> — SIP/VoIP, SNMP, MQTT, Modbus, RTSP e altri</li>
+  <li><strong>Analisi web</strong> — Trova directory nascoste, vulnerabilità LFI, header mancanti</li>
+  <li><strong>Analisi firmware</strong> — Estrae e analizza firmware di dispositivi IoT</li>
+  <li><strong>Pipeline automatizzata</strong> — Esegue scan → analisi → attacchi → report in sequenza</li>
+  <li><strong>Generazione report PDF</strong> — Produce report professionali pronti per la documentazione</li>
+</ul>
+
+<h2 class="sub">1.3 Concetti Fondamentali</h2>
+<h3 class="subsub">Porta di Rete</h3>
+<p>
+Una <strong>porta</strong> è come una "porta d'ingresso" virtuale su un dispositivo di rete. Ogni servizio
+usa una porta specifica: il web usa la porta 80 (HTTP) o 443 (HTTPS), SSH usa la 22, VoIP/SIP usa la 5060.
+Esistono 65535 porte; alcune sono standardizzate, altre usate liberamente dai produttori.
+</p>
+<h3 class="subsub">Protocollo</h3>
+<p>
+Un <strong>protocollo</strong> è il "linguaggio" che due dispositivi usano per comunicare. SSH è un
+protocollo sicuro per accesso remoto; SIP è il protocollo per le telefonate VoIP; SNMP serve a
+gestire dispositivi di rete da remoto.
+</p>
+<h3 class="subsub">Brute Force</h3>
+<p>
+Il <strong>brute force</strong> consiste nel provare molte combinazioni di username e password fino a
+trovare quella corretta. È efficace quando si usano password deboli o di default (come "admin/admin").
+exa-dune include oltre 119 password e 43 username pre-integrati.
+</p>
+<h3 class="subsub">Wordlist</h3>
+<p>
+Una <strong>wordlist</strong> è una lista di parole (username, password, percorsi web, community string)
+usata durante gli attacchi automatizzati. exa-dune v2.4.0 include 7 wordlist integrate direttamente
+nel codice, quindi funziona anche senza SecLists installato.
+</p>
+
+<div class="callout danger">
+  <div class="label">Avviso Legale</div>
+  exa-dune deve essere utilizzato <strong>esclusivamente</strong> su sistemi di cui si è proprietari
+  o per cui si ha un'esplicita autorizzazione scritta. L'uso non autorizzato è illegale in Italia
+  (art. 615-ter, 617-quater, 640-ter c.p.) e nella maggior parte dei paesi. Questo strumento
+  è destinato a laboratori personali isolati.
+</div>
+
+<h2 class="sub">1.4 Architettura del Laboratorio Supportata</h2>
+<table>
+  <tr><th>Rete</th><th>Scopo</th><th>Dispositivi Tipici</th></tr>
+  <tr><td><code>192.168.1.0/24</code></td><td>Rete principale lab</td><td>VoIP phones, gateway, telecamere</td></tr>
+  <tr><td><code>192.168.2.0/24</code></td><td>Rete secondaria lab</td><td>IoT sensors, switch, access point</td></tr>
+  <tr><td><code>192.168.x.100</code></td><td>Kali Linux (attaccante)</td><td>Macchina con exa-dune</td></tr>
+</table>
+</div>
+
+<!-- SECTION 2: INSTALL -->
+<div class="page page-break" id="install">
+<h1 class="section">2. Installazione e Configurazione</h1>
+
+<h2 class="sub">2.1 Requisiti di Sistema</h2>
+<table>
+  <tr><th>Componente</th><th>Requisito</th><th>Note</th></tr>
+  <tr><td>Sistema Operativo</td><td>Kali Linux (consigliato)</td><td>Tutte le dipendenze pre-installate</td></tr>
+  <tr><td>Shell</td><td>Bash 4.4+</td><td>Richiede array associativi</td></tr>
+  <tr><td>Privilegi</td><td>root</td><td>Necessario per scansioni raw socket</td></tr>
+  <tr><td>RAM</td><td>512 MB min</td><td>2 GB consigliati per pipeline completa</td></tr>
+  <tr><td>Disco</td><td>1 GB libero</td><td>Per output scan e report</td></tr>
+</table>
+
+<h2 class="sub">2.2 Dipendenze</h2>
+<p>exa-dune utilizza automaticamente i tool disponibili su Kali Linux:</p>
+<table>
+  <tr><th>Tool</th><th>Funzione</th><th>Protocollo</th></tr>
+  <tr><td><code>nmap</code></td><td>Scansione porte e rilevamento servizi</td><td>TCP/UDP</td></tr>
+  <tr><td><code>hydra</code></td><td>Brute force credenziali</td><td>SSH, FTP, HTTP, SIP…</td></tr>
+  <tr><td><code>svmap / svwar / svcrack</code></td><td>Enumerazione e attacco SIP</td><td>SIP/VoIP</td></tr>
+  <tr><td><code>snmpwalk / snmpbulkwalk</code></td><td>Lettura MIB SNMP</td><td>SNMP</td></tr>
+  <tr><td><code>mosquitto_sub / mosquitto_pub</code></td><td>Client MQTT</td><td>MQTT</td></tr>
+  <tr><td><code>nikto</code></td><td>Scanner vulnerabilità web</td><td>HTTP/HTTPS</td></tr>
+  <tr><td><code>ffuf / gobuster</code></td><td>Directory/path fuzzing</td><td>HTTP</td></tr>
+  <tr><td><code>openssl / testssl.sh</code></td><td>Analisi certificati TLS</td><td>TLS/SSL</td></tr>
+  <tr><td><code>binwalk</code></td><td>Analisi e estrazione firmware</td><td>Binario</td></tr>
+  <tr><td><code>weasyprint</code></td><td>Conversione HTML→PDF</td><td>—</td></tr>
+</table>
+
+<h2 class="sub">2.3 Installazione</h2>
+<pre><span class="comment"># 1. Copia lo script nella directory di lavoro</span>
+cp exa-dune /root/pentest/exa-dune
+
+<span class="comment"># 2. Rendi eseguibile</span>
+chmod +x /root/pentest/exa-dune
+
+<span class="comment"># 3. (Opzionale) Aggiungi al PATH per usarlo ovunque</span>
+echo 'export PATH="$PATH:/root/pentest"' >> ~/.zshrc
+source ~/.zshrc
+
+<span class="comment"># 4. Verifica installazione</span>
+exa-dune --version
+<span class="ok"># Output: exa-dune v2.4.0</span>
+
+<span class="comment"># 5. Verifica dipendenze PDF</span>
+which weasyprint
+<span class="ok"># /usr/bin/weasyprint</span></pre>
+
+<h2 class="sub">2.4 Prima Esecuzione</h2>
+<pre><span class="comment"># Visualizza aiuto generale</span>
+exa-dune --help
+
+<span class="comment"># Testa con dry-run (nessuna azione reale)</span>
+exa-dune scan <span class="flag">--target</span> <span class="arg">192.168.1.0/24</span> <span class="flag">--dry-run</span>
+
+<span class="comment"># Verifica che le wordlist integrate funzionino</span>
+exa-dune creds <span class="flag">--target</span> <span class="arg">192.168.1.1</span> <span class="flag">--dry-run</span></pre>
+
+<h2 class="sub">2.5 Directory di Output</h2>
+<p>Per convenzione, tutti gli output vanno in sottodirectory con timestamp:</p>
+<pre>/root/pentest/
+├── exa-dune            <span class="comment"># Script principale</span>
+├── scans/              <span class="comment"># Output nmap (.nmap, .xml, .gnmap)</span>
+│   └── scan_20260321_143022/
+├── reports/            <span class="comment"># Report HTML e PDF</span>
+│   └── REPORT_20260321_143500.pdf
+└── scripts/            <span class="comment"># Script ausiliari</span></pre>
+
+<div class="callout tip">
+  <div class="label">Suggerimento</div>
+  Crea sempre una directory di output dedicata con <code>mkdir -p /root/pentest/scans</code>
+  prima di iniziare un'engagement. Questo mantiene ordinato il filesystem e facilita
+  la generazione dei report.
+</div>
+</div>
+
+<!-- SECTION 3: ARCH -->
+<div class="page page-break" id="arch">
+<h1 class="section">3. Architettura del Tool</h1>
+
+<h2 class="sub">3.1 Struttura dei Comandi</h2>
+<p>Ogni invocazione di exa-dune segue questa struttura:</p>
+<pre>exa-dune <span class="cmd">&lt;subcomando&gt;</span> [<span class="flag">flag globali</span>] [<span class="flag">flag specifici</span>] [<span class="arg">argomenti</span>]</pre>
+<p>Esempio:</p>
+<pre>exa-dune <span class="cmd">ssh</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--user</span> <span class="arg">root</span> <span class="flag">--output-dir</span> <span class="arg">/root/pentest/scans</span> <span class="flag">--verbose</span></pre>
+
+<h2 class="sub">3.2 I 29 Subcomandi</h2>
+<table>
+  <tr><th>Categoria</th><th>Subcomando</th><th>Funzione</th></tr>
+  <tr><td rowspan="5"><span class="tag blue">Ricognizione</span></td><td><code>scan</code></td><td>Scansione porte con nmap</td></tr>
+  <tr><td><code>dns</code></td><td>Enumerazione sottodomini e DNS</td></tr>
+  <tr><td><code>web</code></td><td>Directory fuzzing e audit web</td></tr>
+  <tr><td><code>http</code></td><td>Analisi header HTTP/sicurezza</td></tr>
+  <tr><td><code>ssl</code></td><td>Analisi certificati TLS/SSL</td></tr>
+  <tr><td rowspan="2"><span class="tag purple">VoIP</span></td><td><code>sip</code></td><td>Enumerazione SIP, registrazioni, crack</td></tr>
+  <tr><td><code>rtsp</code></td><td>Scansione stream RTSP (telecamere)</td></tr>
+  <tr><td rowspan="7"><span class="tag red">Brute Force</span></td><td><code>ssh</code></td><td>Brute force SSH</td></tr>
+  <tr><td><code>ftp</code></td><td>Brute force FTP</td></tr>
+  <tr><td><code>telnet</code></td><td>Brute force Telnet</td></tr>
+  <tr><td><code>creds</code></td><td>Default credentials IoT/VoIP</td></tr>
+  <tr><td><code>rdp</code></td><td>Brute force Remote Desktop</td></tr>
+  <tr><td><code>vnc</code></td><td>Brute force VNC</td></tr>
+  <tr><td><code>smb</code></td><td>Enumerazione e brute SMB</td></tr>
+  <tr><td rowspan="9"><span class="tag yellow">Protocolli IoT</span></td><td><code>snmp</code></td><td>Community brute, MIB walk</td></tr>
+  <tr><td><code>mqtt</code></td><td>Subscribe/publish MQTT</td></tr>
+  <tr><td><code>modbus</code></td><td>Lettura registri Modbus/TCP</td></tr>
+  <tr><td><code>redis</code></td><td>Accesso Redis non autenticato</td></tr>
+  <tr><td><code>ldap</code></td><td>Enumerazione LDAP</td></tr>
+  <tr><td><code>upnp</code></td><td>Discovery UPnP</td></tr>
+  <tr><td><code>tftp</code></td><td>Download file via TFTP</td></tr>
+  <tr><td><code>coap</code></td><td>GET risorse CoAP</td></tr>
+  <tr><td><code>ipmi</code></td><td>Dump hash IPMI/BMC</td></tr>
+  <tr><td rowspan="6"><span class="tag green">Avanzati</span></td><td><code>js</code></td><td>Analisi JavaScript per segreti</td></tr>
+  <tr><td><code>fw</code></td><td>Analisi firmware binari</td></tr>
+  <tr><td><code>post</code></td><td>Post-exploitation</td></tr>
+  <tr><td><code>auto</code></td><td>Automazione multi-target</td></tr>
+  <tr><td><code>report</code></td><td>Generazione report PDF</td></tr>
+  <tr><td><code>pipeline</code></td><td>Pipeline scan→attacco→report</td></tr>
+</table>
+
+<h2 class="sub">3.3 Flusso di Esecuzione</h2>
+<div class="flow">
+  <div class="flow-step">Target</div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-step">scan</div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-step">Suggerimenti</div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-step">Attacchi</div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-step">Post-Exploit</div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-step">report PDF</div>
+</div>
+<p>Con il subcomando <code>pipeline</code>, questo flusso viene eseguito <em>automaticamente</em> con un singolo comando.</p>
+</div>
+
+
+<!-- SECTION 4: FLAGS -->
+<div class="page page-break" id="flags">
+<h1 class="section">4. Flag Globali e Opzioni Comuni</h1>
+<p>I flag globali possono essere usati con <strong>qualsiasi</strong> subcomando di exa-dune.</p>
+
+<table class="flag-table">
+  <tr><th>Flag</th><th>Valore</th><th>Descrizione</th></tr>
+  <tr><td>--target / -t</td><td>IP / CIDR / hostname</td><td>Target dell'operazione (obbligatorio nella maggior parte dei comandi)</td></tr>
+  <tr><td>--output-dir / -o</td><td>percorso directory</td><td>Directory dove salvare tutti gli output. Viene creata se non esiste.</td></tr>
+  <tr><td>--verbose / -v</td><td>—</td><td>Mostra output dettagliato di tutti i comandi eseguiti</td></tr>
+  <tr><td>--dry-run</td><td>—</td><td>Simula l'esecuzione senza eseguire azioni reali. Mostra solo i comandi che verrebbero eseguiti.</td></tr>
+  <tr><td>--stealth</td><td>—</td><td>Modalità silenziosa: scan più lento (T2), pacchetti ridotti, meno log. Riduce visibilità su IDS/IPS.</td></tr>
+  <tr><td>--timeout</td><td>secondi</td><td>Timeout massimo per ogni operazione (default: 300s)</td></tr>
+  <tr><td>--port / -p</td><td>numero porta</td><td>Specifica porta non standard per il servizio target</td></tr>
+  <tr><td>--user / -u</td><td>username</td><td>Username singolo per brute force (invece della wordlist)</td></tr>
+  <tr><td>--pass / -P</td><td>password</td><td>Password singola per brute force (invece della wordlist)</td></tr>
+  <tr><td>--user-list</td><td>file</td><td>File wordlist utenti personalizzato</td></tr>
+  <tr><td>--pass-list</td><td>file</td><td>File wordlist password personalizzato</td></tr>
+  <tr><td>--threads</td><td>numero</td><td>Thread paralleli per brute force (default: 4)</td></tr>
+  <tr><td>--version</td><td>—</td><td>Mostra versione di exa-dune ed esce</td></tr>
+  <tr><td>--help / -h</td><td>—</td><td>Mostra aiuto per il subcomando corrente</td></tr>
+</table>
+
+<h2 class="sub">4.1 Esempi di Flag Combinati</h2>
+<pre><span class="comment"># Brute force SSH silenzioso, output su disco, 8 thread</span>
+exa-dune <span class="cmd">ssh</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> \
+         <span class="flag">--stealth</span> \
+         <span class="flag">--threads</span> <span class="arg">8</span> \
+         <span class="flag">--output-dir</span> <span class="arg">/root/pentest/scans</span> \
+         <span class="flag">--verbose</span>
+
+<span class="comment"># Test credenziale specifica senza brute force</span>
+exa-dune <span class="cmd">ssh</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> \
+         <span class="flag">--user</span> <span class="arg">admin</span> \
+         <span class="flag">--pass</span> <span class="arg">admin1234</span>
+
+<span class="comment"># Dry run: vedi cosa farebbe senza eseguire</span>
+exa-dune <span class="cmd">web</span> <span class="flag">--target</span> <span class="arg">192.168.1.100</span> <span class="flag">--dry-run</span> <span class="flag">--verbose</span></pre>
+
+<h2 class="sub">4.2 Codici di Uscita</h2>
+<table>
+  <tr><th>Codice</th><th>Significato</th></tr>
+  <tr><td><code>0</code></td><td>Successo — operazione completata senza errori</td></tr>
+  <tr><td><code>1</code></td><td>Errore generico — argomenti mancanti o tool non disponibile</td></tr>
+  <tr><td><code>2</code></td><td>Target non raggiungibile</td></tr>
+  <tr><td><code>3</code></td><td>Nessun risultato trovato (es. brute force fallito)</td></tr>
+</table>
+</div>
+
+<!-- SECTION 5: WORDLISTS -->
+<div class="page page-break" id="wordlists">
+<h1 class="section">5. Wordlist Integrate</h1>
+<p>
+exa-dune v2.4.0 include 7 categorie di wordlist direttamente nel codice sorgente (embedded), più 24 wordlist aggiuntive da SecLists disponibili via <code>exa-dune wordlists</code>.
+Questo significa che il tool è <strong>completamente autosufficiente</strong>: funziona anche senza
+SecLists installato. Le wordlist esterne (se presenti) vengono comunque preferite perché più complete.
+</p>
+
+<h2 class="sub">5.1 Gerarchia di Fallback</h2>
+<p>Per ogni tipo di wordlist, exa-dune cerca in questo ordine:</p>
+<pre>1. File personalizzato (--user-list / --pass-list / flag specifico)
+2. SecLists su /usr/share/seclists/
+3. Wordlist Kali predefinite (/usr/share/wordlists/)
+4. ⟶ <span class="ok">Wordlist integrata nel tool (sempre disponibile)</span></pre>
+
+<h2 class="sub">5.2 Le 7 Wordlist Integrate</h2>
+<table>
+  <tr><th>Funzione</th><th>Voce</th><th>Contenuto</th><th>Fonte Base</th></tr>
+  <tr><td><code>_wl_users()</code></td><td>43 username</td><td>admin, root, user, guest, voip, sip, ubnt, cisco, pi…</td><td>SecLists top-usernames + IoT-specifici</td></tr>
+  <tr><td><code>_wl_pass()</code></td><td>119 password</td><td>admin, password, 123456, Admin1234, 7ujMko0admin, raspberry…</td><td>SecLists best110 + pattern IoT/VoIP</td></tr>
+  <tr><td><code>_wl_web()</code></td><td>70 percorsi</td><td>/admin, /cgi-bin/, /api/, /config, /firmware, /stream…</td><td>dirb + percorsi CGI VoIP/camera</td></tr>
+  <tr><td><code>_wl_snmp()</code></td><td>70 community</td><td>public, private, community, cisco, manager, ilmi…</td><td>SecLists SNMP + vendor-specifici</td></tr>
+  <tr><td><code>_wl_lfi()</code></td><td>29 payload LFI</td><td>../etc/passwd, ../../etc/shadow, /proc/version…</td><td>Path traversal comuni</td></tr>
+  <tr><td><code>_wl_dns()</code></td><td>57 sottodomini</td><td>www, mail, admin, voip, sip, api, dev, staging…</td><td>SecLists subdomains-top1mil (estratto)</td></tr>
+  <tr><td><code>_wl_iot_creds()</code></td><td>65 coppie user:pass</td><td>admin:admin, ubnt:ubnt, root:vizxv, pi:raspberry…</td><td>Default credentials vendor IoT/VoIP</td></tr>
+</table>
+
+<h2 class="sub">5.3 Wordlist IoT/VoIP Dettaglio</h2>
+<p>La wordlist <code>_wl_iot_creds()</code> copre le credenziali di default dei principali vendor:</p>
+<table>
+  <tr><th>Vendor / Dispositivo</th><th>Username</th><th>Password</th></tr>
+  <tr><td>Generico</td><td>admin</td><td>admin, password, 1234, (vuota)</td></tr>
+  <tr><td>Ubiquiti (UniFi, AirOS)</td><td>ubnt</td><td>ubnt</td></tr>
+  <tr><td>Raspberry Pi</td><td>pi</td><td>raspberry</td></tr>
+  <tr><td>Mirai botnet targets</td><td>root</td><td>vizxv, xc3511, 888888, 666666</td></tr>
+  <tr><td>APC UPS</td><td>apc</td><td>apc</td></tr>
+  <tr><td>Cisco</td><td>cisco</td><td>cisco, (vuota)</td></tr>
+  <tr><td>Huawei</td><td>root</td><td>admin, huawei, Huawei12#$</td></tr>
+  <tr><td>AudioCodes</td><td>Admin</td><td>Admin, admin</td></tr>
+  <tr><td>Generic VoIP</td><td>voip, sip</td><td>voip, sip, 1234</td></tr>
+  <tr><td>Supervisor</td><td>supervisor</td><td>supervisor, (vuota)</td></tr>
+</table>
+
+<div class="callout tip">
+  <div class="label">Suggerimento — Wordlist Personalizzate</div>
+  Per massimizzare l'efficacia del brute force, usa <code>--pass-list</code> con le wordlist
+  complete di SecLists: <code>/usr/share/seclists/Passwords/xato-net-10-million-passwords-100000.txt</code>
+  contiene 100.000 password reali da data breach.
+</div>
+</div>
+
+<!-- SECTION 6: SCAN -->
+<div class="page page-break" id="scan">
+<h1 class="section">6. Subcomandi di Scansione e Ricognizione</h1>
+
+<div id="scan-cmd">
+<div class="cmd-header">
+  <div class="cmd-name">scan</div>
+  <div class="cmd-desc">Scansione porte e servizi con nmap — punto di partenza per ogni engagement</div>
+</div>
+<div class="cmd-body">
+
+<h3 class="subsub">Cos'è una scansione di porte?</h3>
+<p>
+Quando exa-dune "scansiona" un target, invia pacchetti TCP/UDP a ogni porta (da 1 a 65535)
+e analizza la risposta. Se la porta risponde, il servizio è attivo. nmap (il tool usato
+internamente) è in grado di rilevare anche <strong>quale software</strong> gira su quella porta
+e la sua versione, informazione fondamentale per trovare vulnerabilità note (CVE).
+</p>
+
+<h3 class="subsub">Sintassi</h3>
+<pre>exa-dune <span class="cmd">scan</span> <span class="flag">--target</span> <span class="arg">TARGET</span> [opzioni]</pre>
+
+<h3 class="subsub">Flag Specifici</h3>
+<table class="flag-table">
+  <tr><th>Flag</th><th>Default</th><th>Descrizione</th></tr>
+  <tr><td>--ports / -p</td><td>top-1000</td><td>Porte da scansionare (es: 80,443,8080 oppure 1-65535)</td></tr>
+  <tr><td>--scan-type</td><td>SV</td><td>Tipo scan: SV (version), A (aggressive), sU (UDP)</td></tr>
+  <tr><td>--script</td><td>—</td><td>NSE script nmap aggiuntivi (es: vuln, auth, banner)</td></tr>
+  <tr><td>--timing / -T</td><td>T4</td><td>Velocità: T1(lento)–T5(veloce). T4 default, T2 con --stealth</td></tr>
+  <tr><td>--top-ports</td><td>—</td><td>Scansiona solo le N porte più comuni (es: --top-ports 100)</td></tr>
+  <tr><td>--udp</td><td>—</td><td>Aggiunge scansione UDP (richiede root, molto più lenta)</td></tr>
+  <tr><td>--ping-sweep</td><td>—</td><td>Solo ping, non scansione porte (rapido discovery)</td></tr>
+</table>
+
+<h3 class="subsub">Esempi Pratici</h3>
+<pre><span class="comment"># Scan base di una sottorete (trova tutti gli host)</span>
+exa-dune <span class="cmd">scan</span> <span class="flag">--target</span> <span class="arg">192.168.1.0/24</span> <span class="flag">--output-dir</span> <span class="arg">/root/pentest/scans</span>
+
+<span class="comment"># Scan aggressivo su singolo IP (rileva OS, versioni, script)</span>
+exa-dune <span class="cmd">scan</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--scan-type</span> <span class="arg">A</span> <span class="flag">--output-dir</span> <span class="arg">/root/pentest/scans</span>
+
+<span class="comment"># Scan furtivo (lento, evita IDS)</span>
+exa-dune <span class="cmd">scan</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--stealth</span> <span class="flag">--output-dir</span> <span class="arg">/root/pentest/scans</span>
+
+<span class="comment"># Scan solo porte VoIP/SIP</span>
+exa-dune <span class="cmd">scan</span> <span class="flag">--target</span> <span class="arg">192.168.1.0/24</span> <span class="flag">--ports</span> <span class="arg">5060,5061,5080,1720,4569</span>
+
+<span class="comment"># Scan UDP per SNMP e TFTP</span>
+exa-dune <span class="cmd">scan</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--udp</span> <span class="flag">--ports</span> <span class="arg">161,69,123,514</span></pre>
+
+<h3 class="subsub">Output Generati</h3>
+<table>
+  <tr><th>File</th><th>Formato</th><th>Utilizzo</th></tr>
+  <tr><td><code>scan_TARGET_TIMESTAMP.nmap</code></td><td>Testo leggibile</td><td>Revisione manuale rapida</td></tr>
+  <tr><td><code>scan_TARGET_TIMESTAMP.xml</code></td><td>XML strutturato</td><td>Import in altri tool (Metasploit, ecc.)</td></tr>
+  <tr><td><code>scan_TARGET_TIMESTAMP.gnmap</code></td><td>Greppable</td><td>Parsing automatico da exa-dune pipeline</td></tr>
+</table>
+
+<h3 class="subsub">Funzionalità v2.4.0 — Auto-Suggerimenti</h3>
+<p>
+Al termine di ogni scan, exa-dune v2.4.0 <strong>analizza automaticamente i risultati</strong>
+e suggerisce quali attacchi eseguire in base alle porte aperte rilevate:
+</p>
+<pre><span class="ok">[+] Scan completato. Porte aperte rilevate: 22, 80, 5060, 8443</span>
+
+<span class="err">[!] SUGGERIMENTI ATTACCHI (ordine di priorità):</span>
+ [P1] sip      --target 192.168.1.50 --port 5060    → SIP esposto: enum utenti e crack PIN
+ [P5] ssh      --target 192.168.1.50                → SSH: brute force credenziali
+ [P8] web      --target 192.168.1.50 --port 80      → HTTP: directory fuzzing e nikto
+ [P9] web      --target 192.168.1.50 --port 8443    → HTTPS: directory fuzzing e nikto
+
+<span class="ok">[+] Esegui pipeline per automatizzare tutti gli attacchi:</span>
+    exa-dune pipeline --from-scan /root/pentest/scans/scan_20260321/ --auto</pre>
+</div>
+</div>
+
+<div id="dns-cmd" class="page-break">
+<div class="cmd-header" style="margin-top:40px">
+  <div class="cmd-name">dns</div>
+  <div class="cmd-desc">Enumerazione DNS — trova sottodomini e record di un dominio</div>
+</div>
+<div class="cmd-body">
+<h3 class="subsub">Cos'è l'enumerazione DNS?</h3>
+<p>
+Il DNS (Domain Name System) traduce nomi come <code>voip.azienda.local</code> in indirizzi IP.
+Enumerare il DNS significa scoprire tutti i sottodomini e i record esistenti, rivelando
+servizi nascosti che potrebbero non essere visibili dalla scansione di rete diretta.
+</p>
+<h3 class="subsub">Flag Specifici</h3>
+<table class="flag-table">
+  <tr><th>Flag</th><th>Descrizione</th></tr>
+  <tr><td>--domain</td><td>Dominio da enumerare (es: azienda.local)</td></tr>
+  <tr><td>--dns-server</td><td>Server DNS da interrogare (default: resolver di sistema)</td></tr>
+  <tr><td>--wordlist</td><td>Wordlist sottodomini personalizzata</td></tr>
+  <tr><td>--axfr</td><td>Tenta zone transfer (AXFR) — rivela tutti i record se abilitato</td></tr>
+  <tr><td>--brute</td><td>Abilita brute force sottodomini con wordlist integrata (57 voci)</td></tr>
+</table>
+<pre><span class="comment"># Enumerazione base con zone transfer</span>
+exa-dune <span class="cmd">dns</span> <span class="flag">--target</span> <span class="arg">192.168.1.1</span> <span class="flag">--domain</span> <span class="arg">lab.local</span> <span class="flag">--axfr</span>
+
+<span class="comment"># Brute force sottodomini con wordlist integrata</span>
+exa-dune <span class="cmd">dns</span> <span class="flag">--target</span> <span class="arg">192.168.1.1</span> <span class="flag">--domain</span> <span class="arg">lab.local</span> <span class="flag">--brute</span>
+
+<span class="comment"># Usa server DNS specifico</span>
+exa-dune <span class="cmd">dns</span> <span class="flag">--target</span> <span class="arg">192.168.1.1</span> <span class="flag">--domain</span> <span class="arg">lab.local</span> <span class="flag">--dns-server</span> <span class="arg">192.168.1.1</span> <span class="flag">--axfr</span></pre>
+
+<div class="callout info">
+  <div class="label">Zone Transfer (AXFR)</div>
+  Un <strong>zone transfer</strong> è una funzionalità del protocollo DNS che permette di copiare
+  tutti i record di un dominio da un server all'altro. Se il server DNS è mal configurato e
+  accetta richieste AXFR da qualsiasi host, rivela l'intera mappa della rete interna.
+  Questo è un problema comune nei laboratori e nelle reti aziendali non aggiornate.
+</div>
+</div>
+</div>
+
+<div id="web-cmd" class="page-break">
+<div class="cmd-header" style="margin-top:40px">
+  <div class="cmd-name">web</div>
+  <div class="cmd-desc">Audit web — directory fuzzing, LFI, analisi vulnerabilità HTTP</div>
+</div>
+<div class="cmd-body">
+<h3 class="subsub">Cos'è il fuzzing web?</h3>
+<p>
+Il <strong>fuzzing</strong> consiste nel provare sistematicamente molti percorsi URL per trovare
+risorse nascoste: pannelli di amministrazione, API non documentate, file di configurazione,
+directory con listing abilitato. Molti dispositivi IoT/VoIP espongono percorsi CGI sensibili
+come <code>/cgi-bin/upgrade.cgi</code> o <code>/admin/config.html</code>.
+</p>
+<h3 class="subsub">Flag Specifici</h3>
+<table class="flag-table">
+  <tr><th>Flag</th><th>Descrizione</th></tr>
+  <tr><td>--port</td><td>Porta HTTP/HTTPS (default: 80)</td></tr>
+  <tr><td>--https</td><td>Usa HTTPS invece di HTTP</td></tr>
+  <tr><td>--wordlist</td><td>Wordlist percorsi web personalizzata</td></tr>
+  <tr><td>--nikto</td><td>Esegue scan nikto dopo il fuzzing</td></tr>
+  <tr><td>--lfi</td><td>Abilita test LFI (Local File Inclusion) con 29 payload integrati</td></tr>
+  <tr><td>--auth</td><td>Credenziali HTTP Basic Auth (formato user:pass)</td></tr>
+  <tr><td>--extensions</td><td>Estensioni da testare (es: php,html,cgi,asp)</td></tr>
+  <tr><td>--follow-redirect</td><td>Segui i redirect HTTP</td></tr>
+</table>
+<pre><span class="comment"># Fuzzing base con wordlist integrata (70 percorsi)</span>
+exa-dune <span class="cmd">web</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--port</span> <span class="arg">80</span>
+
+<span class="comment"># HTTPS con test LFI e nikto</span>
+exa-dune <span class="cmd">web</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--port</span> <span class="arg">8443</span> <span class="flag">--https</span> <span class="flag">--lfi</span> <span class="flag">--nikto</span>
+
+<span class="comment"># Autenticazione base con wordlist estesa</span>
+exa-dune <span class="cmd">web</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> \
+         <span class="flag">--auth</span> <span class="arg">admin:admin</span> \
+         <span class="flag">--wordlist</span> <span class="arg">/usr/share/wordlists/dirb/common.txt</span></pre>
+
+<h3 class="subsub">Percorsi Chiave per Dispositivi VoIP/IoT</h3>
+<table>
+  <tr><th>Percorso</th><th>Dispositivo Tipico</th><th>Contenuto</th></tr>
+  <tr><td><code>/cgi-bin/status.cgi</code></td><td>AudioCodes MP20x</td><td>Status sistema, configurazione</td></tr>
+  <tr><td><code>/cgi-bin/upgrade.cgi</code></td><td>Gateway VoIP generico</td><td>Upload firmware</td></tr>
+  <tr><td><code>/api/v1/config</code></td><td>Telecamere IP moderne</td><td>Configurazione JSON</td></tr>
+  <tr><td><code>/axis-cgi/</code></td><td>Axis IP Cameras</td><td>API proprietaria Axis</td></tr>
+  <tr><td><code>/admin/</code></td><td>Tutti</td><td>Pannello amministrazione</td></tr>
+  <tr><td><code>/config.xml</code></td><td>Gateway SIP</td><td>Configurazione XML (spesso non protetta)</td></tr>
+  <tr><td><code>/firmware.bin</code></td><td>Router/IoT</td><td>Firmware scaricabile direttamente</td></tr>
+</table>
+</div>
+</div>
+
+<div id="http-cmd" class="page-break">
+<div class="cmd-header" style="margin-top:40px">
+  <div class="cmd-name">http</div>
+  <div class="cmd-desc">Analisi header HTTP e sicurezza del server web</div>
+</div>
+<div class="cmd-body">
+<p>
+Analizza gli header HTTP di risposta per identificare configurazioni di sicurezza mancanti
+(CSP, HSTS, X-Frame-Options), informazioni di versione esposte (Server, X-Powered-By) e
+altri problemi di configurazione comuni.
+</p>
+<pre><span class="comment"># Analisi header di un pannello web</span>
+exa-dune <span class="cmd">http</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--port</span> <span class="arg">80</span>
+
+<span class="comment"># Output tipico</span>
+<span class="ok">[+] Server: nginx/1.14.0</span>            <span class="comment"># Versione esposta → cerca CVE</span>
+<span class="err">[-] X-Frame-Options: MANCANTE</span>        <span class="comment"># Vulnerabile a clickjacking</span>
+<span class="err">[-] Content-Security-Policy: MANCANTE</span>
+<span class="err">[-] HSTS: MANCANTE</span>                  <span class="comment"># HTTP non forzato a HTTPS</span>
+<span class="ok">[+] X-Content-Type-Options: nosniff</span></pre>
+</div>
+</div>
+
+<div id="ssl-cmd" class="page-break">
+<div class="cmd-header" style="margin-top:40px">
+  <div class="cmd-name">ssl</div>
+  <div class="cmd-desc">Analisi certificati TLS/SSL e cypher suite</div>
+</div>
+<div class="cmd-body">
+<p>
+Verifica la configurazione TLS del server: versioni supportate (TLS 1.0/1.1 deprecate),
+cipher suite deboli, certificati scaduti o autofirmati, vulnerabilità come POODLE,
+BEAST, HEARTBLEED, e supporto per algoritmi obsoleti (RC4, DES, MD5).
+</p>
+<pre><span class="comment"># Analisi SSL/TLS con testssl.sh</span>
+exa-dune <span class="cmd">ssl</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--port</span> <span class="arg">443</span>
+
+<span class="comment"># Output tipico per gateway VoIP</span>
+<span class="err">[-] TLS 1.0: ABILITATO (deprecato)</span>
+<span class="err">[-] TLS 1.1: ABILITATO (deprecato)</span>
+<span class="ok">[+] TLS 1.2: ABILITATO</span>
+<span class="err">[-] Certificato: AUTOFIRMATO</span>
+<span class="err">[-] Cipher: RC4 SUPPORTATO (debole)</span>
+<span class="err">[-] HEARTBLEED: VULNERABILE</span></pre>
+</div>
+</div>
+</div>
+
+
+<!-- SECTION 7: VOIP -->
+<div class="page page-break" id="voip">
+<h1 class="section">7. Subcomandi VoIP e Multimedia</h1>
+
+<div id="sip-cmd">
+<div class="cmd-header">
+  <div class="cmd-name">sip</div>
+  <div class="cmd-desc">Enumerazione SIP, discovery utenti, crack PIN — protocollo VoIP principale</div>
+</div>
+<div class="cmd-body">
+
+<h3 class="subsub">Cos'è il protocollo SIP?</h3>
+<p>
+SIP (Session Initiation Protocol) è il protocollo standard per le telefonate VoIP. Funziona
+sulla porta <strong>5060/UDP</strong> (o TCP) e <strong>5061/TCP</strong> per SIP-TLS.
+Ogni telefono VoIP, gateway, PBX (centralino) e softphone usa SIP. Il protocollo gestisce
+la segnalazione: avvio, modifica e chiusura delle chiamate.
+</p>
+<p>
+Un server SIP espone <strong>account/estensioni</strong> (es: 100, 101, 200) protetti da PIN.
+L'enumerazione SIP scopre quali estensioni esistono; il cracking testa i PIN comuni.
+</p>
+
+<h3 class="subsub">Flag Specifici</h3>
+<table class="flag-table">
+  <tr><th>Flag</th><th>Default</th><th>Descrizione</th></tr>
+  <tr><td>--port</td><td>5060</td><td>Porta SIP (5060=UDP/TCP, 5061=TLS)</td></tr>
+  <tr><td>--transport</td><td>udp</td><td>Protocollo: udp, tcp, tls</td></tr>
+  <tr><td>--enum</td><td>—</td><td>Enumera estensioni/utenti (usa svwar)</td></tr>
+  <tr><td>--crack</td><td>—</td><td>Tenta cracking PIN (usa svcrack)</td></tr>
+  <tr><td>--extension-range</td><td>100-999</td><td>Range estensioni da enumerare</td></tr>
+  <tr><td>--method</td><td>REGISTER</td><td>Metodo SIP: REGISTER, OPTIONS, INVITE</td></tr>
+  <tr><td>--user-agent</td><td>exa-dune</td><td>User-Agent SIP personalizzato</td></tr>
+  <tr><td>--domain</td><td>IP target</td><td>Dominio SIP (realm)</td></tr>
+</table>
+
+<h3 class="subsub">Esempi Pratici</h3>
+<pre><span class="comment"># Discovery: verifica se il server risponde a SIP OPTIONS</span>
+exa-dune <span class="cmd">sip</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span>
+
+<span class="comment"># Enumerazione estensioni 100-500</span>
+exa-dune <span class="cmd">sip</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--enum</span> <span class="flag">--extension-range</span> <span class="arg">100-500</span>
+
+<span class="comment"># Cracking PIN su estensione specifica</span>
+exa-dune <span class="cmd">sip</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--crack</span> <span class="flag">--user</span> <span class="arg">200</span>
+
+<span class="comment"># SIP su TCP (AudioCodes spesso usa TCP)</span>
+exa-dune <span class="cmd">sip</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--transport</span> <span class="arg">tcp</span> <span class="flag">--enum</span>
+
+<span class="comment"># SIP-TLS (porta 5061)</span>
+exa-dune <span class="cmd">sip</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--port</span> <span class="arg">5061</span> <span class="flag">--transport</span> <span class="arg">tls</span></pre>
+
+<h3 class="subsub">Interpretare i Risultati</h3>
+<pre><span class="ok">[+] SIP OPTIONS: 200 OK</span>               <span class="comment"># Server risponde</span>
+<span class="ok">[+] Extension 100: FOUND (401 Auth)</span>   <span class="comment"># Estensione esiste, richiede auth</span>
+<span class="ok">[+] Extension 101: FOUND (401 Auth)</span>
+<span class="err">[-] Extension 102: NOT FOUND (404)</span>    <span class="comment"># Estensione non esiste</span>
+<span class="ok">[+] CRACK: 100:1234 SUCCESS!</span>          <span class="comment"># PIN trovato!</span></pre>
+
+<h3 class="subsub">Dispositivi nel Lab</h3>
+<table>
+  <tr><th>Dispositivo</th><th>IP</th><th>Porta SIP</th><th>Note</th></tr>
+  <tr><td>AudioCodes MP202/205</td><td>192.168.1.x</td><td>5060/UDP</td><td>Gateway analogico→VoIP. Espone estensioni FXS.</td></tr>
+  <tr><td>Commend ET962-BF5xx</td><td>192.168.1.x</td><td>5060/UDP</td><td>Stazione citofonico SIP. Default creds spesso factory.</td></tr>
+  <tr><td>GAI-Tronics Commander VoIP</td><td>192.168.1.x</td><td>5060/UDP</td><td>Telefono industriale. Pannello web su 80/443.</td></tr>
+</table>
+
+<div class="scenario">
+  <div class="sc-title">Scenario: AudioCodes MP202 <span class="device">192.168.1.50</span></div>
+  <pre><span class="comment"># 1. Verifica che SIP sia attivo</span>
+exa-dune <span class="cmd">sip</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span>
+
+<span class="comment"># 2. Enumera estensioni (MP202 spesso usa 1-4 porte FXS)</span>
+exa-dune <span class="cmd">sip</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--enum</span> <span class="flag">--extension-range</span> <span class="arg">1-20</span>
+
+<span class="comment"># 3. Crack PIN con lista comune</span>
+exa-dune <span class="cmd">sip</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--crack</span> <span class="flag">--user</span> <span class="arg">1</span>
+
+<span class="comment"># 4. Controlla anche il pannello web admin</span>
+exa-dune <span class="cmd">web</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--port</span> <span class="arg">8080</span></pre>
+</div>
+</div>
+</div>
+
+<div id="rtsp-cmd" class="page-break">
+<div class="cmd-header" style="margin-top:40px">
+  <div class="cmd-name">rtsp</div>
+  <div class="cmd-desc">Scansione stream RTSP — accesso a telecamere IP e videocitofoni</div>
+</div>
+<div class="cmd-body">
+<h3 class="subsub">Cos'è RTSP?</h3>
+<p>
+RTSP (Real Time Streaming Protocol) è il protocollo usato dalle telecamere IP per trasmettere
+video in streaming. Funziona tipicamente sulla porta <strong>554/TCP</strong>. Molte telecamere
+espongono gli stream senza autenticazione o con credenziali di default.
+</p>
+<h3 class="subsub">Flag Specifici</h3>
+<table class="flag-table">
+  <tr><th>Flag</th><th>Descrizione</th></tr>
+  <tr><td>--port</td><td>Porta RTSP (default: 554)</td></tr>
+  <tr><td>--path</td><td>Percorso stream RTSP specifico (es: /stream1, /live)</td></tr>
+  <tr><td>--brute-path</td><td>Testa percorsi RTSP comuni (wordlist integrata)</td></tr>
+  <tr><td>--snapshot</td><td>Cattura snapshot (richiede ffmpeg)</td></tr>
+</table>
+<pre><span class="comment"># Discovery stream RTSP</span>
+exa-dune <span class="cmd">rtsp</span> <span class="flag">--target</span> <span class="arg">192.168.1.100</span>
+
+<span class="comment"># Brute force percorsi stream su telecamera Axis</span>
+exa-dune <span class="cmd">rtsp</span> <span class="flag">--target</span> <span class="arg">192.168.1.100</span> <span class="flag">--brute-path</span>
+
+<span class="comment"># URL RTSP tipici per Axis</span>
+<span class="comment"># rtsp://192.168.1.100/axis-media/media.amp</span>
+<span class="comment"># rtsp://192.168.1.100/mpeg4/media.amp</span></pre>
+
+<div class="callout info">
+  <div class="label">Percorsi RTSP Comuni</div>
+  <ul>
+    <li>Axis: <code>/axis-media/media.amp</code></li>
+    <li>Hikvision: <code>/Streaming/Channels/101</code></li>
+    <li>Dahua: <code>/cam/realmonitor?channel=1&subtype=0</code></li>
+    <li>Generico: <code>/stream1</code>, <code>/live/ch00_0</code>, <code>/video1</code></li>
+  </ul>
+</div>
+</div>
+</div>
+</div>
+
+<!-- SECTION 8: BRUTE FORCE -->
+<div class="page page-break" id="brute">
+<h1 class="section">8. Subcomandi Brute-Force e Credenziali</h1>
+
+<div class="callout info">
+  <div class="label">Come Funziona il Brute Force in exa-dune</div>
+  Tutti i comandi di brute force usano <strong>hydra</strong> internamente. hydra prova
+  ogni combinazione username/password dalla wordlist e riporta le credenziali valide.
+  La velocità dipende dal numero di thread (<code>--threads</code>). Con <code>--stealth</code>
+  si usa 1 thread e si aggiungono delay per eludere i sistemi di rilevamento.
+</div>
+
+<div id="ssh-cmd">
+<div class="cmd-header" style="margin-top:30px">
+  <div class="cmd-name">ssh</div>
+  <div class="cmd-desc">Brute force SSH — accesso remoto sicuro alla shell</div>
+</div>
+<div class="cmd-body">
+<p>SSH (Secure Shell) è il protocollo standard per accesso remoto sicuro. Porta default: <strong>22/TCP</strong>.
+Molti dispositivi IoT/VoIP hanno SSH abilitato con credenziali di default o deboli.</p>
+<pre><span class="comment"># Brute force con wordlist integrate</span>
+exa-dune <span class="cmd">ssh</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--output-dir</span> <span class="arg">/root/pentest/scans</span>
+
+<span class="comment"># Test credenziali specifiche</span>
+exa-dune <span class="cmd">ssh</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--user</span> <span class="arg">root</span> <span class="flag">--pass</span> <span class="arg">admin</span>
+
+<span class="comment"># Wordlist personalizzata, 8 thread</span>
+exa-dune <span class="cmd">ssh</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> \
+         <span class="flag">--user-list</span> <span class="arg">/usr/share/seclists/Usernames/top-usernames-shortlist.txt</span> \
+         <span class="flag">--pass-list</span> <span class="arg">/usr/share/seclists/Passwords/xato-net-10-million-passwords-10000.txt</span> \
+         <span class="flag">--threads</span> <span class="arg">8</span>
+
+<span class="comment"># Output di successo</span>
+<span class="ok">[+] FOUND: root:admin @ 192.168.1.50:22</span>
+<span class="ok">[+] Credenziali salvate in: /root/pentest/scans/ssh_creds.txt</span></pre>
+</div>
+</div>
+
+<div id="ftp-cmd">
+<div class="cmd-header" style="margin-top:20px">
+  <div class="cmd-name">ftp</div>
+  <div class="cmd-desc">Brute force FTP — file transfer non cifrato</div>
+</div>
+<div class="cmd-body">
+<p>FTP (File Transfer Protocol) porta <strong>21/TCP</strong>. Non cifra i dati — credenziali in chiaro.
+Molti dispositivi embedded usano FTP per aggiornamenti firmware o backup configurazione.</p>
+<pre><span class="comment"># Brute force FTP + test anonymous login</span>
+exa-dune <span class="cmd">ftp</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span>
+
+<span class="comment"># Test solo accesso anonimo</span>
+exa-dune <span class="cmd">ftp</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--user</span> <span class="arg">anonymous</span> <span class="flag">--pass</span> <span class="arg">anonymous</span></pre>
+</div>
+</div>
+
+<div id="telnet-cmd">
+<div class="cmd-header" style="margin-top:20px">
+  <div class="cmd-name">telnet</div>
+  <div class="cmd-desc">Brute force Telnet — protocollo legacy non cifrato</div>
+</div>
+<div class="cmd-body">
+<p>Telnet (porta <strong>23/TCP</strong>) è il precursore di SSH: accesso remoto ma <em>senza cifratura</em>.
+Ancora molto comune su dispositivi IoT/embedded economici e hardware industriale legacy.</p>
+<pre><span class="comment"># Brute force Telnet</span>
+exa-dune <span class="cmd">telnet</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span>
+
+<span class="comment"># Porta non standard</span>
+exa-dune <span class="cmd">telnet</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--port</span> <span class="arg">2323</span></pre>
+<div class="callout warn">
+  <div class="label">Attenzione</div>
+  Telnet trasmette username e password in chiaro. Se sei su una rete condivisa,
+  le credenziali possono essere catturate con Wireshark da qualsiasi altro host.
+  Considera sempre tcpdump/Wireshark per intercettare il traffico durante i test.
+</div>
+</div>
+</div>
+
+<div id="creds-cmd">
+<div class="cmd-header" style="margin-top:20px">
+  <div class="cmd-name">creds</div>
+  <div class="cmd-desc">Test credenziali di default IoT/VoIP su tutti i protocolli</div>
+</div>
+<div class="cmd-body">
+<p>
+Il subcomando <code>creds</code> è specializzato per dispositivi IoT/VoIP: usa la wordlist
+integrata <code>_wl_iot_creds()</code> con 65 coppie user:pass specifiche per vendor, e le
+testa automaticamente su tutti i protocolli rilevati (SSH, Telnet, FTP, HTTP, SIP).
+</p>
+<pre><span class="comment"># Test tutte le credenziali IoT su tutti i protocolli</span>
+exa-dune <span class="cmd">creds</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span>
+
+<span class="comment"># Solo HTTP con credenziali vendor-specifiche</span>
+exa-dune <span class="cmd">creds</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--port</span> <span class="arg">80</span> <span class="flag">--protocol</span> <span class="arg">http</span>
+
+<span class="comment"># Output tipico</span>
+<span class="ok">[+] HTTP 192.168.1.50:80 Admin:Admin → 200 OK</span>
+<span class="ok">[+] Credenziali valide trovate!</span></pre>
+</div>
+</div>
+
+<div id="rdp-cmd">
+<div class="cmd-header" style="margin-top:20px">
+  <div class="cmd-name">rdp</div>
+  <div class="cmd-desc">Brute force RDP — Remote Desktop Protocol (Windows)</div>
+</div>
+<div class="cmd-body">
+<p>RDP (porta <strong>3389/TCP</strong>) permette il controllo grafico remoto di sistemi Windows.
+Raro sui dispositivi VoIP puri, ma presente su PC embedded con software gestione VoIP.</p>
+<pre><span class="comment"># Brute force RDP</span>
+exa-dune <span class="cmd">rdp</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--output-dir</span> <span class="arg">/root/pentest/scans</span></pre>
+</div>
+</div>
+
+<div id="vnc-cmd">
+<div class="cmd-header" style="margin-top:20px">
+  <div class="cmd-name">vnc</div>
+  <div class="cmd-desc">Brute force VNC — accesso desktop remoto multipiattaforma</div>
+</div>
+<div class="cmd-body">
+<p>VNC (porta <strong>5900/TCP</strong>) è un sistema di controllo remoto grafico. Comune su dispositivi
+embedded Linux e alcuni apparati di rete con interfaccia grafica.</p>
+<pre><span class="comment"># Brute force VNC</span>
+exa-dune <span class="cmd">vnc</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span></pre>
+</div>
+</div>
+
+<div id="smb-cmd">
+<div class="cmd-header" style="margin-top:20px">
+  <div class="cmd-name">smb</div>
+  <div class="cmd-desc">Enumerazione e brute force SMB — condivisioni file Windows/Samba</div>
+</div>
+<div class="cmd-body">
+<p>SMB (Server Message Block, porta <strong>445/TCP</strong>) è usato per condivisioni file Windows e
+Samba su Linux. Vulnerabilità storiche: EternalBlue (MS17-010), WannaCry, NotPetya.</p>
+<pre><span class="comment"># Enumerazione condivisioni (null session)</span>
+exa-dune <span class="cmd">smb</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span>
+
+<span class="comment"># Brute force + enum condivisioni</span>
+exa-dune <span class="cmd">smb</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--brute</span>
+
+<span class="comment"># Test vulnerabilità EternalBlue</span>
+exa-dune <span class="cmd">smb</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--script</span> <span class="arg">vuln</span></pre>
+</div>
+</div>
+</div>
+
+
+<!-- SECTION 9: PROTOCOLLI IoT -->
+<div class="page page-break" id="proto">
+<h1 class="section">9. Subcomandi Protocolli Industriali/IoT</h1>
+
+<div id="snmp-cmd">
+<div class="cmd-header">
+  <div class="cmd-name">snmp</div>
+  <div class="cmd-desc">SNMP community brute force e MIB walk — gestione dispositivi di rete</div>
+</div>
+<div class="cmd-body">
+<h3 class="subsub">Cos'è SNMP?</h3>
+<p>
+SNMP (Simple Network Management Protocol) è il protocollo usato per monitorare e gestire
+dispositivi di rete (router, switch, VoIP gateway, UPS). Funziona su porta <strong>161/UDP</strong>.
+L'accesso è controllato da una <strong>community string</strong> (simile a una password). Le community
+di default sono <code>public</code> (lettura) e <code>private</code> (scrittura).
+</p>
+<p>
+Con la community string corretta, è possibile leggere la <strong>MIB</strong> (Management Information Base):
+un albero di informazioni sul dispositivo che include configurazione, routing table, utenti,
+interfacce di rete e persino le password in testo chiaro su alcuni dispositivi legacy.
+</p>
+<h3 class="subsub">Flag Specifici</h3>
+<table class="flag-table">
+  <tr><th>Flag</th><th>Default</th><th>Descrizione</th></tr>
+  <tr><td>--port</td><td>161</td><td>Porta SNMP UDP</td></tr>
+  <tr><td>--version</td><td>2c</td><td>Versione SNMP: 1, 2c, 3</td></tr>
+  <tr><td>--community</td><td>—</td><td>Community string specifica da testare</td></tr>
+  <tr><td>--community-list</td><td>—</td><td>File community strings personalizzato</td></tr>
+  <tr><td>--walk</td><td>—</td><td>Esegue MIB walk completo dopo aver trovato community</td></tr>
+  <tr><td>--oid</td><td>—</td><td>OID specifico da leggere (es: 1.3.6.1.2.1.1.1.0)</td></tr>
+  <tr><td>--write-test</td><td>—</td><td>Testa se community "private" ha accesso in scrittura</td></tr>
+</table>
+<pre><span class="comment"># Community brute force con 70 stringhe integrate</span>
+exa-dune <span class="cmd">snmp</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span>
+
+<span class="comment"># Testa community specifica + MIB walk</span>
+exa-dune <span class="cmd">snmp</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--community</span> <span class="arg">public</span> <span class="flag">--walk</span>
+
+<span class="comment"># Leggi OID specifico (sysDescr = info sistema)</span>
+exa-dune <span class="cmd">snmp</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--community</span> <span class="arg">public</span> \
+         <span class="flag">--oid</span> <span class="arg">1.3.6.1.2.1.1.1.0</span>
+
+<span class="comment"># Output tipico MIB walk</span>
+<span class="ok">[+] Community "public" VALIDA</span>
+<span class="ok">[+] sysDescr: AudioCodes Mediant 2000 VoIP Gateway</span>
+<span class="ok">[+] sysContact: admin@lab.local</span>
+<span class="ok">[+] Interfacce: eth0 (192.168.1.50), lo</span>
+<span class="ok">[+] Route table: 192.168.1.0/24 → eth0</span></pre>
+
+<h3 class="subsub">OID Utili per IoT/VoIP</h3>
+<table>
+  <tr><th>OID</th><th>Nome</th><th>Contenuto</th></tr>
+  <tr><td><code>1.3.6.1.2.1.1.1.0</code></td><td>sysDescr</td><td>Descrizione sistema e versione firmware</td></tr>
+  <tr><td><code>1.3.6.1.2.1.1.5.0</code></td><td>sysName</td><td>Hostname del dispositivo</td></tr>
+  <tr><td><code>1.3.6.1.2.1.1.6.0</code></td><td>sysLocation</td><td>Posizione fisica dichiarata</td></tr>
+  <tr><td><code>1.3.6.1.2.1.2.2</code></td><td>ifTable</td><td>Tabella interfacce di rete</td></tr>
+  <tr><td><code>1.3.6.1.2.1.4.20</code></td><td>ipAddrTable</td><td>Indirizzi IP configurati</td></tr>
+  <tr><td><code>1.3.6.1.4.1.9</code></td><td>Cisco enterprise</td><td>MIB proprietaria Cisco</td></tr>
+</table>
+</div>
+</div>
+
+<div id="mqtt-cmd" class="page-break">
+<div class="cmd-header" style="margin-top:40px">
+  <div class="cmd-name">mqtt</div>
+  <div class="cmd-desc">Subscribe/publish MQTT — protocollo IoT per messaggistica</div>
+</div>
+<div class="cmd-body">
+<h3 class="subsub">Cos'è MQTT?</h3>
+<p>
+MQTT (Message Queuing Telemetry Transport) è un protocollo leggero publish/subscribe
+usato massivamente in ambienti IoT (sensori, automazione industriale, smart home).
+Porta default: <strong>1883/TCP</strong> (non cifrato) o <strong>8883/TCP</strong> (TLS).
+Un broker MQTT non autenticato permette di intercettare tutti i messaggi dell'impianto.
+</p>
+<pre><span class="comment"># Discovery e subscribe a tutti i topic</span>
+exa-dune <span class="cmd">mqtt</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span>
+
+<span class="comment"># Subscribe a topic specifico</span>
+exa-dune <span class="cmd">mqtt</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--topic</span> <span class="arg">"#"</span>
+
+<span class="comment"># Publish messaggio su topic</span>
+exa-dune <span class="cmd">mqtt</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--publish</span> <span class="flag">--topic</span> <span class="arg">"/test"</span> <span class="flag">--message</span> <span class="arg">"hello"</span>
+
+<span class="comment"># Con autenticazione</span>
+exa-dune <span class="cmd">mqtt</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--user</span> <span class="arg">admin</span> <span class="flag">--pass</span> <span class="arg">admin</span></pre>
+</div>
+</div>
+
+<div id="modbus-cmd">
+<div class="cmd-header" style="margin-top:20px">
+  <div class="cmd-name">modbus</div>
+  <div class="cmd-desc">Lettura registri Modbus/TCP — protocollo PLC industriale</div>
+</div>
+<div class="cmd-body">
+<p>
+Modbus/TCP (porta <strong>502/TCP</strong>) è il protocollo usato in ambienti industriali per
+controllare PLC (Programmable Logic Controllers), sensori e attuatori. Non ha autenticazione.
+La lettura dei registri rivela lo stato dell'impianto; la scrittura può modificarlo.
+</p>
+<pre><span class="comment"># Leggi registri Modbus (holding registers)</span>
+exa-dune <span class="cmd">modbus</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span>
+
+<span class="comment"># Leggi unit ID specifico e range registri</span>
+exa-dune <span class="cmd">modbus</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--unit-id</span> <span class="arg">1</span> <span class="flag">--register</span> <span class="arg">0-100</span></pre>
+<div class="callout danger">
+  <div class="label">Attenzione — Sistemi Industriali</div>
+  Scrivere su registri Modbus in un impianto reale può causare malfunzionamenti fisici.
+  Eseguire SOLO in ambienti di laboratorio con dispositivi non critici.
+</div>
+</div>
+</div>
+
+<div id="redis-cmd">
+<div class="cmd-header" style="margin-top:20px">
+  <div class="cmd-name">redis</div>
+  <div class="cmd-desc">Accesso a Redis non autenticato — database in-memory</div>
+</div>
+<div class="cmd-body">
+<p>Redis (porta <strong>6379/TCP</strong>) è un database chiave-valore in memoria. Spesso deployato
+senza autenticazione in reti interne. Un Redis esposto permette la lettura di tutti i dati
+e può essere usato per escalation (es: scrittura chiavi SSH per accesso root).</p>
+<pre><span class="comment"># Test accesso non autenticato + dump keys</span>
+exa-dune <span class="cmd">redis</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span>
+
+<span class="comment"># Tenta escalation via authorized_keys</span>
+exa-dune <span class="cmd">redis</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--exploit</span></pre>
+</div>
+</div>
+
+<div id="ldap-cmd">
+<div class="cmd-header" style="margin-top:20px">
+  <div class="cmd-name">ldap</div>
+  <div class="cmd-desc">Enumerazione directory LDAP/Active Directory</div>
+</div>
+<div class="cmd-body">
+<p>LDAP (porta <strong>389/TCP</strong>, o 636 per LDAPS) è il protocollo per directory aziendali
+(Active Directory, OpenLDAP). Permette di enumerare utenti, gruppi, configurazioni di rete.</p>
+<pre><span class="comment"># Enumerazione LDAP con null bind (anonimo)</span>
+exa-dune <span class="cmd">ldap</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span>
+
+<span class="comment"># Con credenziali</span>
+exa-dune <span class="cmd">ldap</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--user</span> <span class="arg">"cn=admin,dc=lab,dc=local"</span> <span class="flag">--pass</span> <span class="arg">admin</span></pre>
+</div>
+</div>
+
+<div id="upnp-cmd">
+<div class="cmd-header" style="margin-top:20px">
+  <div class="cmd-name">upnp</div>
+  <div class="cmd-desc">Discovery UPnP — Universal Plug and Play</div>
+</div>
+<div class="cmd-body">
+<p>UPnP (porta <strong>1900/UDP</strong>) permette ai dispositivi di scoprirsi e configurarsi
+automaticamente sulla rete. Spesso espone informazioni dettagliate sul dispositivo
+e può permettere l'apertura di porte sul router.</p>
+<pre><span class="comment"># Discovery UPnP sulla rete</span>
+exa-dune <span class="cmd">upnp</span> <span class="flag">--target</span> <span class="arg">192.168.1.0/24</span>
+
+<span class="comment"># Descrizione XML del dispositivo specifico</span>
+exa-dune <span class="cmd">upnp</span> <span class="flag">--target</span> <span class="arg">192.168.1.1</span> <span class="flag">--describe</span></pre>
+</div>
+</div>
+
+<div id="tftp-cmd">
+<div class="cmd-header" style="margin-top:20px">
+  <div class="cmd-name">tftp</div>
+  <div class="cmd-desc">Download file via TFTP — protocollo di trasferimento senza autenticazione</div>
+</div>
+<div class="cmd-body">
+<p>TFTP (Trivial FTP, porta <strong>69/UDP</strong>) è usato da molti dispositivi embedded per
+il boot di rete (PXE) e aggiornamenti firmware. Non ha autenticazione e permette
+il download di file di configurazione sensibili se mal configurato.</p>
+<pre><span class="comment"># Tenta download di file di configurazione comuni</span>
+exa-dune <span class="cmd">tftp</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span>
+
+<span class="comment"># Download file specifico</span>
+exa-dune <span class="cmd">tftp</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--file</span> <span class="arg">startup-config</span></pre>
+</div>
+</div>
+
+<div id="coap-cmd">
+<div class="cmd-header" style="margin-top:20px">
+  <div class="cmd-name">coap</div>
+  <div class="cmd-desc">CoAP — Constrained Application Protocol per IoT</div>
+</div>
+<div class="cmd-body">
+<p>CoAP (porta <strong>5683/UDP</strong>) è il protocollo HTTP-like per dispositivi IoT a bassa potenza.
+Permette GET/PUT/POST su risorse del dispositivo. Raro ma presente su sensori industriali moderni.</p>
+<pre><span class="comment"># Discovery risorse CoAP</span>
+exa-dune <span class="cmd">coap</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span></pre>
+</div>
+</div>
+
+<div id="ipmi-cmd">
+<div class="cmd-header" style="margin-top:20px">
+  <div class="cmd-name">ipmi</div>
+  <div class="cmd-desc">IPMI/BMC — gestione server out-of-band</div>
+</div>
+<div class="cmd-body">
+<p>IPMI (porta <strong>623/UDP</strong>) è usato per la gestione remota di server (BMC/iDRAC/iLO).
+La vulnerabilità IPMI Cipher 0 permette l'autenticazione con qualsiasi password.
+Molti BMC hanno credenziali di default <code>admin:admin</code> o <code>ADMIN:ADMIN</code>.</p>
+<pre><span class="comment"># Dump hash password IPMI (Cipher 0 bypass)</span>
+exa-dune <span class="cmd">ipmi</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span>
+
+<span class="comment"># Brute force IPMI</span>
+exa-dune <span class="cmd">ipmi</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--brute</span></pre>
+</div>
+</div>
+</div>
+
+<!-- SECTION 10: AVANZATI -->
+<div class="page page-break" id="adv">
+<h1 class="section">10. Subcomandi Avanzati</h1>
+
+<div id="js-cmd">
+<div class="cmd-header">
+  <div class="cmd-name">js</div>
+  <div class="cmd-desc">Analisi JavaScript — estrazione segreti, API keys, endpoint</div>
+</div>
+<div class="cmd-body">
+<p>
+Analizza i file JavaScript esposti dall'applicazione web per trovare: API key hardcoded,
+token di autenticazione, endpoint interni non documentati, credenziali, URL di backend.
+È comune trovare queste informazioni nei file JS di pannelli di amministrazione IoT.
+</p>
+<pre><span class="comment"># Analisi JS da URL web</span>
+exa-dune <span class="cmd">js</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--port</span> <span class="arg">80</span>
+
+<span class="comment"># Output tipico</span>
+<span class="ok">[+] Trovato: apiKey = "a7b3c9d..."</span>
+<span class="ok">[+] Trovato: endpoint "/api/v1/admin/reset"</span>
+<span class="ok">[+] Trovato: password = "admin123" (in commento)</span></pre>
+</div>
+</div>
+
+<div id="fw-cmd">
+<div class="cmd-header" style="margin-top:20px">
+  <div class="cmd-name">fw</div>
+  <div class="cmd-desc">Firmware Analysis — estrazione e analisi binari dispositivi IoT</div>
+</div>
+<div class="cmd-body">
+<h3 class="subsub">Cos'è l'analisi firmware?</h3>
+<p>
+Il <strong>firmware</strong> è il software permanente installato su un dispositivo IoT (router,
+telecamera, gateway VoIP). Analizzarlo permette di trovare: credenziali hardcoded, chiavi
+crittografiche, backdoor, vulnerabilità nel codice.
+</p>
+<h3 class="subsub">Flag Specifici</h3>
+<table class="flag-table">
+  <tr><th>Flag</th><th>Descrizione</th></tr>
+  <tr><td>--file</td><td>File firmware locale da analizzare</td></tr>
+  <tr><td>--url</td><td>URL da cui scaricare il firmware</td></tr>
+  <tr><td>--extract</td><td>Estrai il filesystem con binwalk</td></tr>
+  <tr><td>--strings</td><td>Cerca stringhe interessanti (password, URL, chiavi)</td></tr>
+  <tr><td>--creds</td><td>Cerca credenziali hardcoded nel filesystem estratto</td></tr>
+</table>
+<pre><span class="comment"># Analisi firmware scaricato manualmente</span>
+exa-dune <span class="cmd">fw</span> <span class="flag">--file</span> <span class="arg">/root/pentest/firmware.bin</span> <span class="flag">--extract</span> <span class="flag">--creds</span>
+
+<span class="comment"># Download + analisi automatica</span>
+exa-dune <span class="cmd">fw</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--url</span> <span class="arg">http://192.168.1.50/firmware.bin</span> <span class="flag">--extract</span>
+
+<span class="comment"># Output tipico</span>
+<span class="ok">[+] Tipo: SquashFS filesystem (Linux embedded)</span>
+<span class="ok">[+] Estrazione in: /tmp/fw_extract/</span>
+<span class="ok">[+] TROVATO /etc/passwd: root:x:0:0:root</span>
+<span class="ok">[+] TROVATO /etc/shadow: root:$1$xyz...</span>
+<span class="ok">[+] TROVATO hardcoded: TELNET_PASS="admin123"</span></pre>
+
+<div class="scenario">
+  <div class="sc-title">Scenario: Analisi Firmware AudioCodes <span class="device">MP202/MP205</span></div>
+  <pre><span class="comment"># 1. Scarica firmware dal pannello web</span>
+wget http://192.168.1.50/cgi-bin/firmwareupgrade.cgi -O fw.bin
+
+<span class="comment"># 2. Analizza con exa-dune</span>
+exa-dune <span class="cmd">fw</span> <span class="flag">--file</span> <span class="arg">fw.bin</span> <span class="flag">--extract</span> <span class="flag">--strings</span> <span class="flag">--creds</span>
+
+<span class="comment"># 3. Cerca file di configurazione SIP nel filesystem estratto</span>
+find /tmp/fw_extract -name "*.cfg" -o -name "*.ini" 2>/dev/null</pre>
+</div>
+</div>
+</div>
+
+<div id="post-cmd">
+<div class="cmd-header" style="margin-top:20px">
+  <div class="cmd-name">post</div>
+  <div class="cmd-desc">Post-Exploitation — raccolta informazioni dopo accesso ottenuto</div>
+</div>
+<div class="cmd-body">
+<h3 class="subsub">Cos'è il Post-Exploitation?</h3>
+<p>
+Una volta ottenute le credenziali valide, il post-exploitation consiste nel raccogliere
+tutte le informazioni utili dal sistema compromesso: configurazione, file sensibili,
+altri dispositivi raggiungibili, informazioni di rete, log di sistema.
+</p>
+<h3 class="subsub">Flag Specifici</h3>
+<table class="flag-table">
+  <tr><th>Flag</th><th>Descrizione</th></tr>
+  <tr><td>--protocol</td><td>Protocollo di accesso: ssh, telnet, ftp, http</td></tr>
+  <tr><td>--user</td><td>Username per l'accesso</td></tr>
+  <tr><td>--pass</td><td>Password per l'accesso</td></tr>
+  <tr><td>--collect-all</td><td>Raccoglie tutto: config, log, utenti, routing</td></tr>
+  <tr><td>--dump-config</td><td>Scarica file di configurazione (SSH/FTP/HTTP)</td></tr>
+  <tr><td>--enum-network</td><td>Enumera rete raggiungibile dal dispositivo</td></tr>
+  <tr><td>--pivot</td><td>Imposta pivot per raggiungere reti interne</td></tr>
+</table>
+<pre><span class="comment"># Post-exploitation via SSH con credenziali trovate</span>
+exa-dune <span class="cmd">post</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> \
+         <span class="flag">--protocol</span> <span class="arg">ssh</span> \
+         <span class="flag">--user</span> <span class="arg">root</span> \
+         <span class="flag">--pass</span> <span class="arg">admin</span> \
+         <span class="flag">--collect-all</span>
+
+<span class="comment"># Solo dump configurazione</span>
+exa-dune <span class="cmd">post</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> \
+         <span class="flag">--protocol</span> <span class="arg">http</span> \
+         <span class="flag">--user</span> <span class="arg">Admin</span> \
+         <span class="flag">--pass</span> <span class="arg">Admin</span> \
+         <span class="flag">--dump-config</span></pre>
+
+<p>La <code>pipeline</code> automatizzata esegue <code>post</code> automaticamente per ogni credenziale trovata.</p>
+</div>
+</div>
+
+<div id="auto-cmd">
+<div class="cmd-header" style="margin-top:20px">
+  <div class="cmd-name">auto</div>
+  <div class="cmd-desc">Automazione multi-target — esegui comandi su file di target</div>
+</div>
+<div class="cmd-body">
+<p>Permette di eseguire lo stesso subcomando su una lista di target da file.</p>
+<pre><span class="comment"># Crea file con lista target</span>
+cat > /tmp/targets.txt << 'EOF'
+192.168.1.50
+192.168.1.51
+192.168.1.100
+EOF
+
+<span class="comment"># Esegui ssh brute force su tutti i target</span>
+exa-dune <span class="cmd">auto</span> <span class="flag">--target-file</span> <span class="arg">/tmp/targets.txt</span> <span class="flag">--command</span> <span class="arg">ssh</span>
+
+<span class="comment"># Esegui scan sull'intera subnet</span>
+exa-dune <span class="cmd">auto</span> <span class="flag">--target-file</span> <span class="arg">/tmp/targets.txt</span> <span class="flag">--command</span> <span class="arg">scan</span> <span class="flag">--output-dir</span> <span class="arg">/root/pentest/scans</span></pre>
+</div>
+</div>
+
+<div id="report-cmd">
+<div class="cmd-header" style="margin-top:20px">
+  <div class="cmd-name">report</div>
+  <div class="cmd-desc">Generazione report HTML e PDF professionale</div>
+</div>
+<div class="cmd-body">
+<h3 class="subsub">Cos'è il Report di Pentest?</h3>
+<p>
+Il report è il documento finale che descrive le vulnerabilità trovate, la loro gravità
+(secondo il sistema CVSS 3.1) e le raccomandazioni per correggerle. exa-dune genera
+report in formato HTML e PDF pronti per la consegna al cliente.
+</p>
+<h3 class="subsub">Flag Specifici</h3>
+<table class="flag-table">
+  <tr><th>Flag</th><th>Default</th><th>Descrizione</th></tr>
+  <tr><td>--output-dir</td><td>./</td><td>Directory contenente gli output degli scan</td></tr>
+  <tr><td>--title</td><td>Pentest Report</td><td>Titolo del report</td></tr>
+  <tr><td>--author</td><td>exa-dune</td><td>Nome del tester nel report</td></tr>
+  <tr><td>--pdf</td><td>—</td><td>Genera anche PDF (richiede weasyprint)</td></tr>
+  <tr><td>--dry-run</td><td>—</td><td>Simula senza scrivere file</td></tr>
+  <tr><td>--template</td><td>dark</td><td>Template: dark, light, minimal</td></tr>
+</table>
+<pre><span class="comment"># Genera report HTML dalla directory di scan</span>
+exa-dune <span class="cmd">report</span> <span class="flag">--output-dir</span> <span class="arg">/root/pentest/scans</span> \
+         <span class="flag">--title</span> <span class="arg">"Pentest Lab AudioCodes"</span> \
+         <span class="flag">--author</span> <span class="arg">"Security Team"</span>
+
+<span class="comment"># Genera direttamente in PDF</span>
+exa-dune <span class="cmd">report</span> <span class="flag">--output-dir</span> <span class="arg">/root/pentest/scans</span> <span class="flag">--pdf</span>
+
+<span class="comment"># Output</span>
+<span class="ok">[+] Report HTML: /root/pentest/scans/REPORT_20260321_143500.html</span>
+<span class="ok">[+] Report PDF:  /root/pentest/scans/REPORT_20260321_143500.pdf</span></pre>
+
+<h3 class="subsub">Struttura del Report Generato</h3>
+<ul>
+  <li><strong>Executive Summary</strong> — Panoramica per il management, senza dettagli tecnici</li>
+  <li><strong>Vulnerability Table</strong> — Tabella con CVSS score, porta, servizio, descrizione</li>
+  <li><strong>Evidence</strong> — Output raw dei tool (nmap, hydra, nikto)</li>
+  <li><strong>Recommendations</strong> — Azioni correttive per ogni vulnerabilità</li>
+  <li><strong>Appendice</strong> — Scope, metodologia, tool usati</li>
+</ul>
+
+<div class="callout tip">
+  <div class="label">CVSS 3.1 — Scala di Gravità</div>
+  <table>
+    <tr><th>Score</th><th>Gravità</th><th>Colore</th><th>Significato</th></tr>
+    <tr><td>9.0–10.0</td><td>Critico</td><td><span class="tag red">CRITICO</span></td><td>Accesso immediato senza autenticazione</td></tr>
+    <tr><td>7.0–8.9</td><td>Alto</td><td><span class="tag red">ALTO</span></td><td>Credenziali di default, RCE con auth</td></tr>
+    <tr><td>4.0–6.9</td><td>Medio</td><td><span class="tag yellow">MEDIO</span></td><td>Informazioni esposte, configurazione debole</td></tr>
+    <tr><td>0.1–3.9</td><td>Basso</td><td><span class="tag green">BASSO</span></td><td>Rischio limitato, best practice mancanti</td></tr>
+  </table>
+</div>
+</div>
+</div>
+</div>
+
+
+<!-- SECTION 10.6: ONVIF -->
+<div class="page page-break" id="onvif-cmd">
+<h2 class="sub">10.6 onvif — Telecamere IP ONVIF</h2>
+<p>
+Il subcomando <code>onvif</code> esegue discovery e brute force su telecamere IP che implementano lo standard
+<strong>ONVIF</strong> (Open Network Video Interface Forum). Usa SOAP via curl per le chiamate WS-Security.
+</p>
+<pre><span class="cmd">exa-dune onvif --target &lt;IP&gt; [--port 8000] [--output-dir &lt;dir&gt;]</span></pre>
+<table>
+  <tr><th>Flag</th><th>Default</th><th>Descrizione</th></tr>
+  <tr><td>--target / -t</td><td>—</td><td>IP o hostname della telecamera</td></tr>
+  <tr><td>--port</td><td>8000</td><td>Porta ONVIF (comune: 8000, 8080, 80)</td></tr>
+  <tr><td>--output-dir / -o</td><td>./onvif_&lt;target&gt;</td><td>Directory di output</td></tr>
+</table>
+<h3 class="subsub">Come funziona</h3>
+<p>Il modulo ONVIF esegue tre fasi principali:</p>
+<ol>
+  <li><strong>GetSystemDateAndTime</strong> — proba il servizio ONVIF e verifica l'esistenza dell'endpoint</li>
+  <li><strong>GetDeviceInformation</strong> — recupera marca, modello, firmware senza autenticazione</li>
+  <li><strong>WS-Security Brute Force</strong> — prova combinazioni user:pass con PasswordDigest (SHA1 + nonce)</li>
+</ol>
+<div class="callout info">
+  <div class="label">Porte Tipiche ONVIF</div>
+  Le porte più comuni per il servizio ONVIF sono: <code>8000</code> (gSOAP), <code>8080</code>, <code>80</code>.
+  Su Reolink il servizio gSOAP è visibile sulla porta 8000 (<code>open soap gSOAP 2.8</code>).
+</div>
+<pre><span class="comment"># Esempio: brute force ONVIF su telecamera Reolink</span>
+<span class="cmd">exa-dune onvif --target 192.168.1.34 --port 8000 --output-dir /tmp/onvif_test</span></pre>
+</div>
+
+<!-- SECTION 10.7: INSTALL -->
+<div class="page page-break" id="install-cmd">
+<h2 class="sub">10.7 install — Installazione Automatica dei Tool</h2>
+<p>
+Il subcomando <code>install</code> installa automaticamente tutti i tool richiesti da exa-dune che non sono presenti
+sul sistema. Va eseguito <strong>una sola volta come root</strong> al momento della prima installazione.
+</p>
+<pre><span class="cmd">sudo exa-dune install</span></pre>
+<h3 class="subsub">Tool installati</h3>
+<p>Il comando installa via <code>apt-get</code> e <code>pip3</code> i seguenti pacchetti:</p>
+<table>
+  <tr><th>Categoria</th><th>Tool</th></tr>
+  <tr><td>Scansione</td><td>nmap, masscan, arp-scan, testssl</td></tr>
+  <tr><td>Web/HTTP</td><td>nikto, gobuster, ffuf, curl, wget</td></tr>
+  <tr><td>Brute Force</td><td>hydra, medusa, ncrack</td></tr>
+  <tr><td>VoIP/IoT</td><td>sipvicious, snmpwalk, snmp-mibs-downloader, onesixtyone</td></tr>
+  <tr><td>Multimedia</td><td>ffmpeg, vlc</td></tr>
+  <tr><td>Post-Exploit</td><td>binwalk, strings, file, xxd</td></tr>
+  <tr><td>Vulnerability</td><td>nuclei (via pip3)</td></tr>
+  <tr><td>Report</td><td>weasyprint (via pip3)</td></tr>
+</table>
+<p>Dopo l'installazione dei tool, <code>install</code> esegue automaticamente:</p>
+<ul>
+  <li>Creazione della cartella Desktop per i report: <code>/home/kali/Desktop/EXA-DUNE-Reports/</code></li>
+  <li>Download delle wordlist aggiuntive da SecLists GitHub: <code>/usr/share/exa-dune/wordlists/</code></li>
+</ul>
+<div class="callout tip">
+  <div class="label">Prima Installazione</div>
+  Dopo aver scaricato exa-dune, esegui sempre <code>sudo exa-dune install</code> per avere tutti i tool
+  disponibili e le wordlist aggiornate da SecLists.
+</div>
+<pre><span class="comment"># Workflow tipico di prima installazione</span>
+<span class="cmd">git clone https://github.com/Sal1699/exa-dune.git</span>
+<span class="cmd">cd exa-dune && chmod +x exa-dune</span>
+<span class="cmd">sudo ./exa-dune install    # installa tutto</span>
+<span class="cmd">exa-dune --version         # verifica installazione</span></pre>
+</div>
+
+<!-- SECTION 10.8: WORDLISTS -->
+<div class="page page-break" id="wordlists-cmd">
+<h2 class="sub">10.8 wordlists — Gestione Wordlist</h2>
+<p>
+Il subcomando <code>wordlists</code> scarica wordlist aggiuntive da SecLists GitHub e le installa in
+<code>/usr/share/exa-dune/wordlists/</code>. Richiede connessione internet e privilegi root.
+</p>
+<pre><span class="cmd">sudo exa-dune wordlists</span></pre>
+<h3 class="subsub">Wordlist scaricate da SecLists</h3>
+<table>
+  <tr><th>File</th><th>Voci</th><th>Scopo</th></tr>
+  <tr><td>top-usernames-shortlist.txt</td><td>15</td><td>Utenti più comuni</td></tr>
+  <tr><td>probable-v2-top1575.txt</td><td>1575</td><td>Password probabili</td></tr>
+  <tr><td>common.txt (DNS)</td><td>4989</td><td>Sottodomini comuni</td></tr>
+  <tr><td>common.txt (web)</td><td>4724</td><td>Path web comuni</td></tr>
+  <tr><td>CGIs.txt</td><td>3462</td><td>CGI endpoint</td></tr>
+  <tr><td>snmp-onesixtyone.txt</td><td>100</td><td>Community SNMP</td></tr>
+  <tr><td>ssh-betterdefault.txt</td><td>30</td><td>Default SSH</td></tr>
+  <tr><td>ftp-betterdefault.txt</td><td>30</td><td>Default FTP</td></tr>
+  <tr><td>sip-extensions.txt</td><td>2000</td><td>Extension SIP</td></tr>
+  <tr><td>rtsp-urls.txt</td><td>100</td><td>Path RTSP</td></tr>
+  <tr><td>iot-default.txt</td><td>65</td><td>Credenziali IoT predefinite</td></tr>
+  <tr><td>... + 13 altri</td><td>—</td><td>LFI, telnet, rdp, smb, ecc.</td></tr>
+</table>
+<div class="callout info">
+  <div class="label">Priorità Wordlist</div>
+  Se una wordlist esiste in <code>/usr/share/exa-dune/wordlists/</code>, viene usata al posto di quella
+  integrata nel codice. Le wordlist embedded sono sempre disponibili come fallback anche offline.
+</div>
+</div>
+
+<!-- SECTION 11: PIPELINE -->
+<div class="page page-break" id="pipeline">
+<h1 class="section">11. Pipeline Automatizzata</h1>
+<div style="background: linear-gradient(135deg, #0d2040, #1a1230); border: 2px solid var(--accent); border-radius: 12px; padding: 20px 24px; margin-bottom: 24px;">
+  <div style="font-size: 12px; color: var(--accent); font-weight: 700; text-transform: uppercase; letter-spacing: 2px; margin-bottom: 8px;">FUNZIONALITÀ v2.4.0</div>
+  <div style="font-size: 16px; font-weight: 600; color: var(--text);">La pipeline automatizzata è la funzionalità più potente di exa-dune: esegue l'intero ciclo di penetration testing in un singolo comando, dalla scansione iniziale al report PDF finale.</div>
+</div>
+
+<h2 class="sub">11.1 Le 5 Fasi della Pipeline</h2>
+
+<div class="phase-box">
+  <div class="phase-num">FASE 1</div>
+  <h4>Scansione</h4>
+  <p>Esegue <code>nmap</code> sul target con rilevamento versioni e script NSE. Salva i risultati in formato .nmap, .xml e .gnmap per l'analisi automatica. Con <code>--from-scan DIR</code> questa fase viene saltata e si usano scan precedenti.</p>
+</div>
+
+<div class="phase-box">
+  <div class="phase-num">FASE 2</div>
+  <h4>Analisi e Suggerimenti</h4>
+  <p>Legge l'output nmap e mappa le porte aperte ai moduli di attacco appropriati. Ogni suggerimento ha una priorità da 1 (critico) a 25 (basso). La lista viene mostrata ordinata per priorità con codice colore: <span style="color:var(--danger)">rosso=critico</span>, <span style="color:var(--warn)">giallo=medio</span>, <span style="color:var(--accent2)">verde=basso</span>.</p>
+</div>
+
+<div class="phase-box">
+  <div class="phase-num">FASE 3</div>
+  <h4>Esecuzione Attacchi</h4>
+  <p>Esegue ogni attacco suggerito in ordine di priorità. Per ogni attacco registra l'output completo. Se non vengono trovate vulnerabilità, logga "nessuna vulnerabilità rilevata". Con <code>--auto</code> non chiede conferma prima di ogni attacco.</p>
+</div>
+
+<div class="phase-box">
+  <div class="phase-num">FASE 4</div>
+  <h4>Post-Exploitation Automatico</h4>
+  <p>Se hydra ha trovato credenziali valide, le legge automaticamente e lancia <code>exa-dune post</code> per raccogliere informazioni dal sistema compromesso. Con <code>--no-post</code> questa fase viene saltata.</p>
+</div>
+
+<div class="phase-box">
+  <div class="phase-num">FASE 5</div>
+  <h4>Generazione Report PDF</h4>
+  <p>Aggrega tutti gli output delle fasi precedenti in un report HTML strutturato e lo converte in PDF con weasyprint. Il report include executive summary, tabella vulnerabilità, evidenze e raccomandazioni.</p>
+</div>
+
+<h2 class="sub">11.2 Sintassi Completa</h2>
+<pre>exa-dune <span class="cmd">pipeline</span> <span class="flag">--target</span> <span class="arg">TARGET</span> [opzioni]</pre>
+
+<h2 class="sub">11.3 Flag Specifici Pipeline</h2>
+<table class="flag-table">
+  <tr><th>Flag</th><th>Default</th><th>Descrizione</th></tr>
+  <tr><td>--target / -t</td><td>—</td><td>Target: IP singolo, CIDR, o hostname</td></tr>
+  <tr><td>--output-dir / -o</td><td>./pipeline_TIMESTAMP</td><td>Directory output per tutti i file</td></tr>
+  <tr><td>--auto</td><td>—</td><td>Esegui senza chiedere conferma ad ogni fase</td></tr>
+  <tr><td>--from-scan DIR</td><td>—</td><td>Usa scan nmap esistente, salta Fase 1</td></tr>
+  <tr><td>--no-post</td><td>—</td><td>Salta Fase 4 (post-exploitation)</td></tr>
+  <tr><td>--stealth</td><td>—</td><td>Modalità silenziosa in tutte le fasi</td></tr>
+  <tr><td>--timeout N</td><td>300</td><td>Timeout in secondi per ogni singolo attacco</td></tr>
+  <tr><td>--dry-run</td><td>—</td><td>Simula tutto senza eseguire azioni reali</td></tr>
+  <tr><td>--pdf</td><td>—</td><td>Genera PDF (attivo di default se weasyprint disponibile)</td></tr>
+</table>
+
+<h2 class="sub">11.4 Esempi Pratici</h2>
+<pre><span class="comment">━━━ UTILIZZO BASE ━━━</span>
+<span class="comment"># Pipeline completa su target singolo</span>
+exa-dune <span class="cmd">pipeline</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--output-dir</span> <span class="arg">/root/pentest/scans</span>
+
+<span class="comment">━━━ MODALITÀ AUTOMATICA ━━━</span>
+<span class="comment"># Nessuna interazione richiesta, ideale per script</span>
+exa-dune <span class="cmd">pipeline</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--auto</span> <span class="flag">--output-dir</span> <span class="arg">/root/pentest/scans</span>
+
+<span class="comment">━━━ RIUSO SCAN ESISTENTE ━━━</span>
+<span class="comment"># Salta la scansione, usa risultati precedenti</span>
+exa-dune <span class="cmd">pipeline</span> <span class="flag">--from-scan</span> <span class="arg">/root/pentest/scans/scan_20260321/</span> \
+         <span class="flag">--auto</span> <span class="flag">--output-dir</span> <span class="arg">/root/pentest/scans</span>
+
+<span class="comment">━━━ SILENZIOSA SENZA POST-EXPLOIT ━━━</span>
+exa-dune <span class="cmd">pipeline</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> \
+         <span class="flag">--stealth</span> <span class="flag">--no-post</span> \
+         <span class="flag">--timeout</span> <span class="arg">600</span> \
+         <span class="flag">--output-dir</span> <span class="arg">/root/pentest/scans</span>
+
+<span class="comment">━━━ DRY RUN (test senza azioni) ━━━</span>
+exa-dune <span class="cmd">pipeline</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--dry-run</span></pre>
+
+<h2 class="sub">11.5 Output della Pipeline</h2>
+<pre><span class="ok">╔══════════════════════════════════════════════════════════╗</span>
+<span class="ok">║         exa-dune PIPELINE — 192.168.1.50                 ║</span>
+<span class="ok">╚══════════════════════════════════════════════════════════╝</span>
+
+<span class="ok">[FASE 1/5] Scansione...</span>
+<span class="ok">[+] nmap completato. Porte: 22, 80, 443, 5060, 8080</span>
+
+<span class="ok">[FASE 2/5] Analisi risultati...</span>
+<span class="err">[P01] sip   --target 192.168.1.50 --port 5060  → SIP esposto</span>
+<span class="warn">[P05] ssh   --target 192.168.1.50              → SSH bruteforce</span>
+<span class="warn">[P08] web   --target 192.168.1.50 --port 80    → HTTP audit</span>
+<span class="warn">[P09] web   --target 192.168.1.50 --port 8080  → HTTP-alt audit</span>
+<span class="ok">[P12] ssl   --target 192.168.1.50 --port 443   → TLS audit</span>
+
+<span class="ok">[FASE 3/5] Esecuzione 5 attacchi...</span>
+<span class="err">[1/5] sip...</span>
+<span class="ok">      [+] Extension 100 trovata, PIN crackato: 1234</span>
+<span class="warn">[2/5] ssh...</span>
+<span class="ok">      [+] FOUND: root:admin</span>
+<span class="warn">[3/5] web (porta 80)...</span>
+<span class="ok">      [+] /admin/: 200 OK</span>
+<span class="ok">      [+] /cgi-bin/status.cgi: 200 OK</span>
+<span class="warn">[4/5] web (porta 8080)...</span>
+<span class="ok">      [-] nessuna vulnerabilità rilevata</span>
+<span class="warn">[5/5] ssl...</span>
+<span class="ok">      [+] TLS 1.0 abilitato, cert autofirmato</span>
+
+<span class="ok">[FASE 4/5] Post-exploitation (2 credenziali trovate)...</span>
+<span class="ok">      [+] SSH root:admin → raccolta config completata</span>
+
+<span class="ok">[FASE 5/5] Generazione report...</span>
+<span class="ok">[+] Report HTML: /root/pentest/scans/REPORT_20260321_145030.html</span>
+<span class="ok">[+] Report PDF:  /root/pentest/scans/REPORT_20260321_145030.pdf</span>
+<span class="ok">✓ Pipeline completata in 4m 32s</span></pre>
+
+<h2 class="sub">11.6 Mappatura Porte → Moduli</h2>
+<table>
+  <tr><th>Porta</th><th>Servizio</th><th>Modulo</th><th>Priorità</th></tr>
+  <tr><td><span class="port-badge">5060</span></td><td>SIP/VoIP</td><td>sip</td><td><span class="tag red">P1 CRITICO</span></td></tr>
+  <tr><td><span class="port-badge">5061</span></td><td>SIP-TLS</td><td>sip --tls</td><td><span class="tag red">P2 CRITICO</span></td></tr>
+  <tr><td><span class="port-badge">23</span></td><td>Telnet</td><td>telnet</td><td><span class="tag red">P3 CRITICO</span></td></tr>
+  <tr><td><span class="port-badge">161</span></td><td>SNMP</td><td>snmp</td><td><span class="tag red">P4 CRITICO</span></td></tr>
+  <tr><td><span class="port-badge">22</span></td><td>SSH</td><td>ssh</td><td><span class="tag yellow">P5</span></td></tr>
+  <tr><td><span class="port-badge">21</span></td><td>FTP</td><td>ftp</td><td><span class="tag yellow">P6</span></td></tr>
+  <tr><td><span class="port-badge">554</span></td><td>RTSP</td><td>rtsp</td><td><span class="tag yellow">P7</span></td></tr>
+  <tr><td><span class="port-badge">80</span></td><td>HTTP</td><td>web, http</td><td><span class="tag yellow">P8</span></td></tr>
+  <tr><td><span class="port-badge">443</span></td><td>HTTPS</td><td>web, ssl</td><td><span class="tag yellow">P9</span></td></tr>
+  <tr><td><span class="port-badge">445</span></td><td>SMB</td><td>smb</td><td><span class="tag yellow">P10</span></td></tr>
+  <tr><td><span class="port-badge">1883</span></td><td>MQTT</td><td>mqtt</td><td><span class="tag yellow">P11</span></td></tr>
+  <tr><td><span class="port-badge">502</span></td><td>Modbus</td><td>modbus</td><td><span class="tag yellow">P12</span></td></tr>
+  <tr><td><span class="port-badge">6379</span></td><td>Redis</td><td>redis</td><td><span class="tag yellow">P13</span></td></tr>
+  <tr><td><span class="port-badge">3389</span></td><td>RDP</td><td>rdp</td><td><span class="tag yellow">P14</span></td></tr>
+  <tr><td><span class="port-badge">5900</span></td><td>VNC</td><td>vnc</td><td><span class="tag yellow">P15</span></td></tr>
+  <tr><td><span class="port-badge">389</span></td><td>LDAP</td><td>ldap</td><td><span class="tag green">P16</span></td></tr>
+  <tr><td><span class="port-badge">1900</span></td><td>UPnP</td><td>upnp</td><td><span class="tag green">P17</span></td></tr>
+  <tr><td><span class="port-badge">69</span></td><td>TFTP</td><td>tftp</td><td><span class="tag green">P18</span></td></tr>
+  <tr><td><span class="port-badge">623</span></td><td>IPMI</td><td>ipmi</td><td><span class="tag green">P19</span></td></tr>
+  <tr><td><span class="port-badge">53</span></td><td>DNS</td><td>dns</td><td><span class="tag green">P20</span></td></tr>
+</table>
+</div>
+
+
+<!-- SECTION 12: SCENARI PRATICI -->
+<div class="page page-break" id="scenarios">
+<h1 class="section">12. Scenari Pratici di Laboratorio</h1>
+<p>Questa sezione descrive procedure step-by-step per i dispositivi specifici del laboratorio.</p>
+
+<h2 class="sub">12.1 AudioCodes MP202/MP205</h2>
+<div class="callout info">
+  <div class="label">Dispositivo</div>
+  Gateway VoIP analogico che converte porte FXS (telefoni analogici) in SIP. Tipicamente
+  espone pannello web (HTTP/HTTPS), SIP (5060), e talvolta SSH o Telnet.
+</div>
+
+<div class="scenario">
+  <div class="sc-title">Procedura Completa: AudioCodes MP202 <span class="device">192.168.1.50</span></div>
+<pre><span class="comment">══ STEP 1: Discovery iniziale ══</span>
+exa-dune <span class="cmd">scan</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--output-dir</span> <span class="arg">/root/pentest/scans</span>
+<span class="comment"># Tipicamente trovi: 80/tcp (HTTP), 443/tcp (HTTPS), 5060/udp (SIP)</span>
+
+<span class="comment">══ STEP 2: Audit pannello web ══</span>
+exa-dune <span class="cmd">web</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--port</span> <span class="arg">80</span>
+exa-dune <span class="cmd">http</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--port</span> <span class="arg">80</span>
+<span class="comment"># Cerca: /cgi-bin/status.cgi, /admin/, /config.html</span>
+
+<span class="comment">══ STEP 3: Credenziali default pannello ══</span>
+exa-dune <span class="cmd">creds</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--port</span> <span class="arg">80</span> <span class="flag">--protocol</span> <span class="arg">http</span>
+<span class="comment"># AudioCodes default: Admin/Admin (A maiuscola!)</span>
+
+<span class="comment">══ STEP 4: Enumerazione SIP ══</span>
+exa-dune <span class="cmd">sip</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--enum</span> <span class="flag">--extension-range</span> <span class="arg">1-10</span>
+<span class="comment"># MP202 = 2 porte FXS → max 2 estensioni</span>
+<span class="comment"># MP205 = 5 porte FXS → max 5 estensioni</span>
+
+<span class="comment">══ STEP 5: Crack PIN SIP ══</span>
+exa-dune <span class="cmd">sip</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--crack</span>
+
+<span class="comment">══ STEP 6: SNMP (se attivo) ══</span>
+exa-dune <span class="cmd">snmp</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--walk</span>
+<span class="comment"># AudioCodes community default: "public"</span>
+
+<span class="comment">══ OPZIONALE: Pipeline automatica ══</span>
+exa-dune <span class="cmd">pipeline</span> <span class="flag">--target</span> <span class="arg">192.168.1.50</span> <span class="flag">--auto</span> <span class="flag">--output-dir</span> <span class="arg">/root/pentest/scans</span></pre>
+</div>
+
+<h3 class="subsub">Vulnerabilità Tipiche AudioCodes</h3>
+<table>
+  <tr><th>Vulnerabilità</th><th>CVSS</th><th>Gravità</th><th>Descrizione</th></tr>
+  <tr><td>Credenziali default Admin:Admin</td><td>9.8</td><td><span class="tag red">CRITICO</span></td><td>Accesso completo al pannello senza modifica password</td></tr>
+  <tr><td>SIP PIN deboli (1234, 0000)</td><td>8.1</td><td><span class="tag red">ALTO</span></td><td>Permette effettuare chiamate a spese dell'intestatario</td></tr>
+  <tr><td>SNMP community "public" R/W</td><td>7.5</td><td><span class="tag red">ALTO</span></td><td>Lettura e modifica configurazione completa via SNMP</td></tr>
+  <tr><td>TLS 1.0 abilitato</td><td>5.3</td><td><span class="tag yellow">MEDIO</span></td><td>Protocollo deprecato, vulnerabile a POODLE</td></tr>
+  <tr><td>Certificato autofirmato</td><td>4.3</td><td><span class="tag yellow">MEDIO</span></td><td>Man-in-the-middle possibile senza warning utente</td></tr>
+</table>
+
+<h2 class="sub" style="margin-top:40px">12.2 Commend SIP Station ET962-BF5xx</h2>
+<div class="callout info">
+  <div class="label">Dispositivo</div>
+  Stazione citofonico/intercom SIP di alta qualità. Espone interfaccia web e SIP.
+  Usato in applicazioni di sicurezza fisica: portiere, accesso edifici.
+</div>
+
+<div class="scenario">
+  <div class="sc-title">Procedura: Commend ET962 <span class="device">192.168.1.x</span></div>
+<pre><span class="comment"># Scan iniziale</span>
+exa-dune <span class="cmd">scan</span> <span class="flag">--target</span> <span class="arg">192.168.1.60</span> <span class="flag">--scan-type</span> <span class="arg">A</span> <span class="flag">--output-dir</span> <span class="arg">/root/pentest/scans</span>
+
+<span class="comment"># Il Commend espone tipicamente: 80 (HTTP config), 5060 (SIP), 554 (RTSP audio)</span>
+
+<span class="comment"># Test pannello web</span>
+exa-dune <span class="cmd">web</span> <span class="flag">--target</span> <span class="arg">192.168.1.60</span> <span class="flag">--port</span> <span class="arg">80</span> <span class="flag">--nikto</span>
+
+<span class="comment"># Credenziali web (Commend default varia per modello)</span>
+exa-dune <span class="cmd">creds</span> <span class="flag">--target</span> <span class="arg">192.168.1.60</span> <span class="flag">--protocol</span> <span class="arg">http</span>
+
+<span class="comment"># SIP: cerca account configurati</span>
+exa-dune <span class="cmd">sip</span> <span class="flag">--target</span> <span class="arg">192.168.1.60</span> <span class="flag">--enum</span>
+
+<span class="comment"># RTSP audio stream (se porta 554 aperta)</span>
+exa-dune <span class="cmd">rtsp</span> <span class="flag">--target</span> <span class="arg">192.168.1.60</span> <span class="flag">--brute-path</span></pre>
+</div>
+
+<h2 class="sub" style="margin-top:40px">12.3 GAI-Tronics Commander VoIP</h2>
+<div class="callout info">
+  <div class="label">Dispositivo</div>
+  Telefono industriale VoIP robusto (ambienti pericolosi, industria). Pannello web
+  di configurazione, SIP, e in alcuni modelli telnet per manutenzione.
+</div>
+
+<div class="scenario">
+  <div class="sc-title">Procedura: GAI-Tronics Commander <span class="device">192.168.1.x</span></div>
+<pre><span class="comment"># Pipeline automatica completa</span>
+exa-dune <span class="cmd">pipeline</span> <span class="flag">--target</span> <span class="arg">192.168.1.70</span> <span class="flag">--auto</span> \
+         <span class="flag">--output-dir</span> <span class="arg">/root/pentest/scans</span>
+
+<span class="comment"># Oppure manuale:</span>
+exa-dune <span class="cmd">scan</span> <span class="flag">--target</span> <span class="arg">192.168.1.70</span> <span class="flag">--output-dir</span> <span class="arg">/root/pentest/scans</span>
+exa-dune <span class="cmd">web</span> <span class="flag">--target</span> <span class="arg">192.168.1.70</span>
+exa-dune <span class="cmd">telnet</span> <span class="flag">--target</span> <span class="arg">192.168.1.70</span>  <span class="comment"># Se porta 23 aperta</span>
+exa-dune <span class="cmd">sip</span> <span class="flag">--target</span> <span class="arg">192.168.1.70</span> <span class="flag">--enum</span></pre>
+</div>
+
+<h2 class="sub" style="margin-top:40px">12.4 Axis IP Camera</h2>
+<div class="callout info">
+  <div class="label">Dispositivo</div>
+  Telecamera IP professionale. Espone HTTP/HTTPS per configurazione, RTSP per streaming,
+  e in alcuni modelli SSH. API proprietaria <code>/axis-cgi/</code>.
+</div>
+
+<div class="scenario">
+  <div class="sc-title">Procedura: Axis Camera <span class="device">192.168.1.100</span></div>
+<pre><span class="comment">══ Scan con script NSE per Axis ══</span>
+exa-dune <span class="cmd">scan</span> <span class="flag">--target</span> <span class="arg">192.168.1.100</span> <span class="flag">--script</span> <span class="arg">http-auth-finder</span> \
+         <span class="flag">--output-dir</span> <span class="arg">/root/pentest/scans</span>
+
+<span class="comment">══ Audit web API Axis ══</span>
+exa-dune <span class="cmd">web</span> <span class="flag">--target</span> <span class="arg">192.168.1.100</span> <span class="flag">--port</span> <span class="arg">80</span>
+<span class="comment"># Cerca: /axis-cgi/admin/, /axis-cgi/param.cgi</span>
+<span class="comment"># URL stream: http://192.168.1.100/axis-cgi/mjpg/video.cgi</span>
+
+<span class="comment">══ Credenziali default Axis ══</span>
+<span class="comment"># Axis modelli vecchi: root/(vuota) o root/pass</span>
+<span class="comment"># Axis modelli nuovi: admin/(da configurare al primo boot)</span>
+exa-dune <span class="cmd">creds</span> <span class="flag">--target</span> <span class="arg">192.168.1.100</span> <span class="flag">--protocol</span> <span class="arg">http</span>
+
+<span class="comment">══ Stream RTSP ══</span>
+exa-dune <span class="cmd">rtsp</span> <span class="flag">--target</span> <span class="arg">192.168.1.100</span> <span class="flag">--brute-path</span>
+<span class="comment"># Path comuni Axis: /axis-media/media.amp</span>
+<span class="comment">#                   /mpeg4/media.amp</span>
+
+<span class="comment">══ SSL (Axis usa HTTPS self-signed) ══</span>
+exa-dune <span class="cmd">ssl</span> <span class="flag">--target</span> <span class="arg">192.168.1.100</span> <span class="flag">--port</span> <span class="arg">443</span>
+
+<span class="comment">══ Firmware (scarica dal pannello) ══</span>
+<span class="comment"># Prima ottieni accesso al pannello admin, poi:</span>
+exa-dune <span class="cmd">fw</span> <span class="flag">--target</span> <span class="arg">192.168.1.100</span> \
+         <span class="flag">--url</span> <span class="arg">http://admin:@192.168.1.100/axis-cgi/firmware.cgi</span> \
+         <span class="flag">--extract</span></pre>
+</div>
+
+<h2 class="sub" style="margin-top:40px">12.5 Scenario: Scoperta Rete Completa</h2>
+<div class="scenario">
+  <div class="sc-title">Procedura: Scoperta e Pentest Intera Subnet</div>
+<pre><span class="comment">════════════════════════════════════════════════
+  STEP 1: Ping sweep — trova tutti gli host
+════════════════════════════════════════════════</span>
+exa-dune <span class="cmd">scan</span> <span class="flag">--target</span> <span class="arg">192.168.1.0/24</span> \
+         <span class="flag">--ping-sweep</span> \
+         <span class="flag">--output-dir</span> <span class="arg">/root/pentest/scans/discovery</span>
+
+<span class="comment">════════════════════════════════════════════════
+  STEP 2: Scan veloce porte principali
+════════════════════════════════════════════════</span>
+exa-dune <span class="cmd">scan</span> <span class="flag">--target</span> <span class="arg">192.168.1.0/24</span> \
+         <span class="flag">--top-ports</span> <span class="arg">100</span> \
+         <span class="flag">--output-dir</span> <span class="arg">/root/pentest/scans/quick</span>
+
+<span class="comment">════════════════════════════════════════════════
+  STEP 3: Scan dettagliato host rilevati
+════════════════════════════════════════════════</span>
+<span class="comment"># Per ogni host trovato al passo 2:</span>
+for ip in 192.168.1.50 192.168.1.60 192.168.1.100; do
+  exa-dune <span class="cmd">scan</span> <span class="flag">--target</span> <span class="arg">$ip</span> <span class="flag">--scan-type</span> <span class="arg">A</span> \
+           <span class="flag">--output-dir</span> <span class="arg">/root/pentest/scans/deep_$ip</span>
+done
+
+<span class="comment">════════════════════════════════════════════════
+  STEP 4: Pipeline su ogni host
+════════════════════════════════════════════════</span>
+for ip in 192.168.1.50 192.168.1.60 192.168.1.100; do
+  exa-dune <span class="cmd">pipeline</span> \
+           <span class="flag">--from-scan</span> <span class="arg">/root/pentest/scans/deep_$ip</span> \
+           <span class="flag">--auto</span> \
+           <span class="flag">--output-dir</span> <span class="arg">/root/pentest/results_$ip</span>
+done
+
+<span class="comment">════════════════════════════════════════════════
+  STEP 5: Report consolidato
+════════════════════════════════════════════════</span>
+exa-dune <span class="cmd">report</span> <span class="flag">--output-dir</span> <span class="arg">/root/pentest/</span> \
+         <span class="flag">--title</span> <span class="arg">"Pentest Laboratorio IoT/VoIP 2026"</span> \
+         <span class="flag">--pdf</span></pre>
+</div>
+</div>
+
+<!-- SECTION 13: GLOSSARIO -->
+<div class="page page-break" id="glossary">
+<h1 class="section">13. Glossario per Principianti</h1>
+<p>Definizioni dei termini tecnici usati in questo manuale, con spiegazioni accessibili.</p>
+
+<div class="glossary-entry">
+  <div class="term">Banner Grabbing</div>
+  <div class="def">Tecnica per leggere il "banner" (messaggio di benvenuto) di un servizio che rivela la versione del software. Es: <code>SSH-2.0-OpenSSH_7.4</code>. Utile per trovare versioni vulnerabili.</div>
+</div>
+<div class="glossary-entry">
+  <div class="term">Brute Force</div>
+  <div class="def">Attacco che prova sistematicamente molte combinazioni di credenziali (username/password) fino a trovare quella corretta. Contrapposto al "dictionary attack" che usa una lista di parole predefinite.</div>
+</div>
+<div class="glossary-entry">
+  <div class="term">CGI (Common Gateway Interface)</div>
+  <div class="def">Standard per eseguire programmi sul server web. Le URL che contengono <code>/cgi-bin/</code> spesso eseguono script che possono avere vulnerabilità di injection.</div>
+</div>
+<div class="glossary-entry">
+  <div class="term">CIDR (Classless Inter-Domain Routing)</div>
+  <div class="def">Notazione per specificare range di indirizzi IP. <code>192.168.1.0/24</code> indica tutti gli indirizzi da 192.168.1.0 a 192.168.1.255 (256 host). <code>/24</code> indica 24 bit di network.</div>
+</div>
+<div class="glossary-entry">
+  <div class="term">Community String (SNMP)</div>
+  <div class="def">La "password" del protocollo SNMP. Le più comuni sono <code>public</code> (sola lettura) e <code>private</code> (lettura/scrittura). Molti dispositivi le lasciano al valore di default.</div>
+</div>
+<div class="glossary-entry">
+  <div class="term">CVE (Common Vulnerabilities and Exposures)</div>
+  <div class="def">Sistema di identificazione standard per vulnerabilità note. Formato: <code>CVE-ANNO-NUMERO</code> (es: CVE-2021-44228 = Log4Shell). Ogni CVE è una vulnerabilità documentata pubblicamente.</div>
+</div>
+<div class="glossary-entry">
+  <div class="term">CVSS (Common Vulnerability Scoring System)</div>
+  <div class="def">Sistema di valutazione della gravità delle vulnerabilità da 0.0 a 10.0. Versione 3.1 è quella attuale. Considera vettore d'attacco, complessità, privilegi richiesti, impatto. Score ≥9.0 = critico.</div>
+</div>
+<div class="glossary-entry">
+  <div class="term">Default Credentials</div>
+  <div class="def">Username e password preimpostate in fabbrica (es: admin/admin). Sono la prima cosa da cambiare su qualsiasi dispositivo. La maggior parte delle compromissioni IoT sfruttano credenziali di default non cambiate.</div>
+</div>
+<div class="glossary-entry">
+  <div class="term">Directory Traversal / Path Traversal</div>
+  <div class="def">Vulnerabilità che permette di accedere a file fuori dalla directory web usando <code>../</code>. Esempio: <code>http://victim/page?file=../../../etc/passwd</code>. Anche chiamata LFI (Local File Inclusion).</div>
+</div>
+<div class="glossary-entry">
+  <div class="term">Dry Run</div>
+  <div class="def">Modalità di esecuzione che mostra i comandi che verrebbero eseguiti senza eseguirli realmente. Utile per verificare cosa farebbe lo strumento prima di procedere.</div>
+</div>
+<div class="glossary-entry">
+  <div class="term">Enumeration</div>
+  <div class="def">Fase di ricognizione che raccoglie informazioni specifiche su un target: utenti, directory, servizi, condivisioni. Più dettagliata del semplice scan di porte.</div>
+</div>
+<div class="glossary-entry">
+  <div class="term">Exploit</div>
+  <div class="def">Codice o tecnica che sfrutta una vulnerabilità per ottenere un accesso non autorizzato o eseguire azioni non previste. Un exploit "in the wild" è già usato da attaccanti reali.</div>
+</div>
+<div class="glossary-entry">
+  <div class="term">Extension (SIP)</div>
+  <div class="def">Identificatore numerico (solitamente 3-4 cifre) di un account SIP. Equivale al "numero interno" di un centralino. Es: estensione 200 = telefono IP 192.168.1.50, account 200.</div>
+</div>
+<div class="glossary-entry">
+  <div class="term">Firmware</div>
+  <div class="def">Software permanente installato nella memoria flash di un dispositivo hardware. Controlla il funzionamento del dispositivo. I firmware obsoleti spesso contengono vulnerabilità note.</div>
+</div>
+<div class="glossary-entry">
+  <div class="term">Fuzzing</div>
+  <div class="def">Tecnica di testing che invia input casuali o sistematici a un programma per trovare comportamenti inattesi (crash, errori, accessi non autorizzati). Il web fuzzing cerca percorsi URL nascosti.</div>
+</div>
+<div class="glossary-entry">
+  <div class="term">Gateway VoIP</div>
+  <div class="def">Dispositivo che converte segnale telefonico analogico (PSTN) in VoIP digitale. Es: AudioCodes MP202 converte telefoni analogici in chiamate SIP su Internet.</div>
+</div>
+<div class="glossary-entry">
+  <div class="term">hydra</div>
+  <div class="def">Tool di brute force per reti, open source, incluso in Kali Linux. Supporta oltre 30 protocolli: SSH, FTP, HTTP, SIP, RDP, VNC e molti altri. Usato internamente da exa-dune per brute force.</div>
+</div>
+<div class="glossary-entry">
+  <div class="term">IoT (Internet of Things)</div>
+  <div class="def">Dispositivi fisici connessi a Internet: telecamere, sensori, router, gateway VoIP, elettrodomestici "smart". Spesso hanno sicurezza debole per ridurre i costi di produzione.</div>
+</div>
+<div class="glossary-entry">
+  <div class="term">LFI (Local File Inclusion)</div>
+  <div class="def">Vulnerabilità web che permette di leggere file locali del server attraverso un parametro URL manipolato. Target comune: <code>/etc/passwd</code>, <code>/etc/shadow</code>, file di configurazione.</div>
+</div>
+<div class="glossary-entry">
+  <div class="term">MIB (Management Information Base)</div>
+  <div class="def">Database gerarchico di informazioni gestibili via SNMP. Ogni nodo ha un OID (Object Identifier) numerico. La MIB di un dispositivo espone tutto: configurazione, statistiche, utenti.</div>
+</div>
+<div class="glossary-entry">
+  <div class="term">nmap</div>
+  <div class="def">Network Mapper — tool open source per scansione di rete. Uno dei più usati in sicurezza informatica. Rileva host attivi, porte aperte, versioni dei servizi e può eseguire script NSE di sicurezza.</div>
+</div>
+<div class="glossary-entry">
+  <div class="term">NSE (Nmap Scripting Engine)</div>
+  <div class="def">Sistema di scripting di nmap che permette di eseguire analisi avanzate. Script come <code>vuln</code> testano vulnerabilità note, <code>auth</code> testa credenziali di default, <code>brute</code> fa brute force.</div>
+</div>
+<div class="glossary-entry">
+  <div class="term">OID (Object Identifier)</div>
+  <div class="def">Identificatore numerico gerarchico per oggetti SNMP. Formato: numeri separati da punti (es: 1.3.6.1.2.1.1.1.0 = sysDescr). Leggi un OID per ottenere quella specifica informazione dal dispositivo.</div>
+</div>
+<div class="glossary-entry">
+  <div class="term">Penetration Testing</div>
+  <div class="def">Attività professionale autorizzata di test sicurezza che simula un attacco reale per trovare vulnerabilità. Distinto dall'"hacking" non autorizzato per il consenso esplicito del proprietario del sistema.</div>
+</div>
+<div class="glossary-entry">
+  <div class="term">PIN (SIP)</div>
+  <div class="def">Codice numerico (tipicamente 4-6 cifre) che autentica un account SIP. I PIN deboli (1234, 0000) permettono a chiunque di registrare quell'estensione e effettuare chiamate.</div>
+</div>
+<div class="glossary-entry">
+  <div class="term">Pipeline</div>
+  <div class="def">In exa-dune: sequenza automatizzata di fasi (scan → analisi → attacchi → post-exploit → report). In Unix: concatenazione di comandi con <code>|</code> dove l'output di uno diventa input del successivo.</div>
+</div>
+<div class="glossary-entry">
+  <div class="term">Port Scanning</div>
+  <div class="def">Processo di sondare un dispositivo su tutte le porte per determinare quali sono aperte e quali servizi le usano. Punto di partenza di ogni penetration test.</div>
+</div>
+<div class="glossary-entry">
+  <div class="term">Post-Exploitation</div>
+  <div class="def">Fase dopo aver ottenuto accesso: raccolta di informazioni, mantenimento dell'accesso, escalation privilegi, pivot verso altri sistemi. Dimostra l'impatto reale della vulnerabilità.</div>
+</div>
+<div class="glossary-entry">
+  <div class="term">RCE (Remote Code Execution)</div>
+  <div class="def">Vulnerabilità critica che permette di eseguire codice arbitrario su un sistema remoto senza autenticazione. CVSS spesso 9.0-10.0. La vulnerabilità più pericolosa esistente.</div>
+</div>
+<div class="glossary-entry">
+  <div class="term">SecLists</div>
+  <div class="def">Raccolta open source di wordlist per sicurezza: password, username, percorsi web, payload. Su Kali: <code>/usr/share/seclists/</code>. exa-dune le usa se disponibili, altrimenti usa le wordlist integrate.</div>
+</div>
+<div class="glossary-entry">
+  <div class="term">SIP (Session Initiation Protocol)</div>
+  <div class="def">Protocollo standard RFC 3261 per comunicazioni multimediali (VoIP). Gestisce la segnalazione: chi chiama chi, negoziazione codec, avvio/fine chiamata. Porta default: 5060/UDP.</div>
+</div>
+<div class="glossary-entry">
+  <div class="term">Stealth Scan</div>
+  <div class="def">Scansione "furtiva" che riduce il numero di pacchetti e la velocità per evitare il rilevamento da IDS/IPS e firewall. In exa-dune: attivato con <code>--stealth</code>, usa timing T2 e 1 thread.</div>
+</div>
+<div class="glossary-entry">
+  <div class="term">TLS/SSL</div>
+  <div class="def">Protocolli crittografici per comunicazioni sicure su Internet. SSL è obsoleto; TLS 1.2 e 1.3 sono attuali. TLS 1.0/1.1 sono deprecati e vulnerabili. HTTPS usa TLS su HTTP.</div>
+</div>
+<div class="glossary-entry">
+  <div class="term">VoIP (Voice over IP)</div>
+  <div class="def">Tecnologia che trasmette voce su reti IP invece delle tradizionali linee telefoniche. Usa protocolli come SIP per la segnalazione e RTP per il trasporto audio.</div>
+</div>
+<div class="glossary-entry">
+  <div class="term">Wordlist</div>
+  <div class="def">File di testo con una parola per riga, usato per attacchi dizionario. In exa-dune v2.4.0: 7 wordlist integrate (embedded) + 24 wordlist aggiuntive da SecLists per utenti, password, web, SNMP, LFI, DNS, credenziali IoT, RTSP, SIP.</div>
+</div>
+<div class="glossary-entry">
+  <div class="term">Zone Transfer (AXFR)</div>
+  <div class="def">Meccanismo DNS per replicare tutti i record di un dominio da un server a un altro. Se mal configurato, rivela l'intera struttura della rete interna a qualsiasi richiedente.</div>
+</div>
+</div>
+
+
+<!-- SECTION 14: CHEAT SHEET -->
+<div class="page page-break" id="cheatsheet">
+<h1 class="section">14. Cheat Sheet Rapido</h1>
+<p>Riferimento rapido per i comandi più usati. Stampare e tenere a portata di mano durante l'engagement.</p>
+
+<div class="cheatsheet">
+  <div class="cs-block">
+    <h4>Scansione Iniziale</h4>
+<pre>
+# Ping sweep
+exa-dune scan -t 192.168.1.0/24 \
+  --ping-sweep
+
+# Scan veloce
+exa-dune scan -t 192.168.1.0/24 \
+  --top-ports 100 -o /tmp/scan
+
+# Scan completo
+exa-dune scan -t 192.168.1.50 \
+  --scan-type A -o /tmp/scan
+
+# Solo porte VoIP
+exa-dune scan -t 192.168.1.0/24 \
+  --ports 5060,5061,5080 -o /tmp/scan
+</pre>
+  </div>
+  <div class="cs-block">
+    <h4>Pipeline (Tutto Automatico)</h4>
+<pre>
+# Pipeline completa
+exa-dune pipeline -t 192.168.1.50 \
+  --auto -o /tmp/results
+
+# Da scan esistente
+exa-dune pipeline \
+  --from-scan /tmp/scan/ \
+  --auto -o /tmp/results
+
+# Silenzioso
+exa-dune pipeline -t 192.168.1.50 \
+  --stealth --no-post -o /tmp/results
+
+# Dry run
+exa-dune pipeline -t TARGET --dry-run
+</pre>
+  </div>
+  <div class="cs-block">
+    <h4>VoIP / SIP</h4>
+<pre>
+# Discovery SIP
+exa-dune sip -t 192.168.1.50
+
+# Enum estensioni
+exa-dune sip -t 192.168.1.50 \
+  --enum --extension-range 100-999
+
+# Crack PIN
+exa-dune sip -t 192.168.1.50 --crack
+
+# RTSP stream
+exa-dune rtsp -t 192.168.1.100 \
+  --brute-path
+</pre>
+  </div>
+  <div class="cs-block">
+    <h4>Credenziali / Brute Force</h4>
+<pre>
+# Creds default IoT
+exa-dune creds -t 192.168.1.50
+
+# SSH brute
+exa-dune ssh -t 192.168.1.50
+
+# Telnet brute
+exa-dune telnet -t 192.168.1.50
+
+# FTP + anon
+exa-dune ftp -t 192.168.1.50
+
+# Con wordlist custom
+exa-dune ssh -t 192.168.1.50 \
+  --user-list /usr/share/... \
+  --pass-list /usr/share/...
+</pre>
+  </div>
+  <div class="cs-block">
+    <h4>Protocolli IoT</h4>
+<pre>
+# SNMP community brute
+exa-dune snmp -t 192.168.1.50
+
+# SNMP walk
+exa-dune snmp -t 192.168.1.50 \
+  --community public --walk
+
+# MQTT subscribe all
+exa-dune mqtt -t 192.168.1.50 \
+  --topic "#"
+
+# Modbus read
+exa-dune modbus -t 192.168.1.50
+</pre>
+  </div>
+  <div class="cs-block">
+    <h4>Web / HTTP</h4>
+<pre>
+# Directory fuzzing
+exa-dune web -t 192.168.1.50 -p 80
+
+# HTTPS + nikto + LFI
+exa-dune web -t 192.168.1.50 \
+  -p 443 --https --nikto --lfi
+
+# Header analysis
+exa-dune http -t 192.168.1.50 -p 80
+
+# TLS audit
+exa-dune ssl -t 192.168.1.50 -p 443
+</pre>
+  </div>
+  <div class="cs-block">
+    <h4>Firmware / Post-Exploit</h4>
+<pre>
+# Analisi firmware
+exa-dune fw --file firmware.bin \
+  --extract --creds
+
+# Post-exploit SSH
+exa-dune post -t 192.168.1.50 \
+  --protocol ssh \
+  --user root --pass admin \
+  --collect-all
+
+# DNS zone transfer
+exa-dune dns -t 192.168.1.1 \
+  --domain lab.local --axfr
+</pre>
+  </div>
+  <div class="cs-block">
+    <h4>Report PDF</h4>
+<pre>
+# Report HTML
+exa-dune report -o /tmp/scan \
+  --title "Lab Pentest"
+
+# Report PDF
+exa-dune report -o /tmp/scan \
+  --pdf --title "Lab Pentest" \
+  --author "Security Team"
+
+# Dry run report
+exa-dune report -o /tmp/scan \
+  --pdf --dry-run
+</pre>
+  </div>
+</div>
+
+<h2 class="sub" style="margin-top:40px">Porte di Riferimento Rapido</h2>
+<table>
+  <tr>
+    <td><span class="port-badge">21</span> FTP</td>
+    <td><span class="port-badge">22</span> SSH</td>
+    <td><span class="port-badge">23</span> Telnet</td>
+    <td><span class="port-badge">53</span> DNS</td>
+    <td><span class="port-badge">69</span> TFTP</td>
+    <td><span class="port-badge">80</span> HTTP</td>
+  </tr>
+  <tr>
+    <td><span class="port-badge">161</span> SNMP</td>
+    <td><span class="port-badge">389</span> LDAP</td>
+    <td><span class="port-badge">443</span> HTTPS</td>
+    <td><span class="port-badge">445</span> SMB</td>
+    <td><span class="port-badge">502</span> Modbus</td>
+    <td><span class="port-badge">554</span> RTSP</td>
+  </tr>
+  <tr>
+    <td><span class="port-badge">623</span> IPMI</td>
+    <td><span class="port-badge">636</span> LDAPS</td>
+    <td><span class="port-badge">1883</span> MQTT</td>
+    <td><span class="port-badge">1900</span> UPnP</td>
+    <td><span class="port-badge">3389</span> RDP</td>
+    <td><span class="port-badge">5060</span> SIP</td>
+  </tr>
+  <tr>
+    <td><span class="port-badge">5061</span> SIP-TLS</td>
+    <td><span class="port-badge">5683</span> CoAP</td>
+    <td><span class="port-badge">5900</span> VNC</td>
+    <td><span class="port-badge">6379</span> Redis</td>
+    <td><span class="port-badge">8080</span> HTTP-alt</td>
+    <td><span class="port-badge">8883</span> MQTT-TLS</td>
+  </tr>
+</table>
+
+<h2 class="sub" style="margin-top:30px">Credenziali Default più Comuni (IoT/VoIP)</h2>
+<table>
+  <tr><th>Vendor / Prodotto</th><th>Username</th><th>Password</th></tr>
+  <tr><td>Generico</td><td>admin</td><td>admin, password, 1234, (vuota)</td></tr>
+  <tr><td>AudioCodes</td><td>Admin</td><td>Admin</td></tr>
+  <tr><td>Ubiquiti AirOS</td><td>ubnt</td><td>ubnt</td></tr>
+  <tr><td>Raspberry Pi</td><td>pi</td><td>raspberry</td></tr>
+  <tr><td>Cisco IOS</td><td>cisco</td><td>cisco, (vuota)</td></tr>
+  <tr><td>Axis Camera</td><td>root</td><td>(vuota), pass</td></tr>
+  <tr><td>Huawei router</td><td>root / admin</td><td>admin, Huawei12#$</td></tr>
+  <tr><td>Mirai (tanti IoT)</td><td>root</td><td>vizxv, xc3511, 888888</td></tr>
+  <tr><td>APC UPS</td><td>apc</td><td>apc</td></tr>
+  <tr><td>Teltonika</td><td>admin</td><td>admin01</td></tr>
+</table>
+
+<!-- SECTION 15: CHANGELOG -->
+<div class="page page-break" id="changelog">
+<h1 class="section">15. Changelog e Versioni</h1>
+
+<h2 class="sub">v2.4.0 — Marzo 2026</h2>
+<ul>
+  <li><strong>Report HTML/PDF professionale</strong> — Cover page, executive summary, stat boxes, bar chart severity, porte/servizi da nmap, findings con CVSS 3.1, raccomandazioni, log appendice</li>
+  <li><strong>Desktop Reports dir</strong> — <code>/home/kali/Desktop/EXA-DUNE-Reports/</code> creata automaticamente. Ogni PDF viene copiato qui automaticamente dopo la generazione</li>
+  <li><strong>Auto-install weasyprint</strong> — <code>exa-dune install</code> installa weasyprint via pip3 per la conversione HTML→PDF</li>
+  <li><strong>Fix <code>rest: unbound variable</code></strong> — Risolto crash nel bar chart del report HTML con <code>set -u</code></li>
+</ul>
+
+<h2 class="sub">v2.3.0 — Marzo 2026</h2>
+<ul>
+  <li><strong>Fix <code>run_cmd()</code></strong> — Doppio bash rimosso nel timeout; <code>|| true</code> previene exit prematuro con <code>set -e</code></li>
+  <li><strong>Fix <code>validate_target()</code></strong> — Supporto CIDR (<code>/0-32</code>) e hostname semplici senza TLD</li>
+  <li><strong>Fix <code>validate_timeout()</code></strong> — Nuova funzione, range 1-1440 minuti</li>
+  <li><strong>Fix <code>setup_outdir()</code></strong> — mkdir con messaggio di errore esplicito</li>
+  <li><strong>Fix <code>_wl_rtsp_paths()</code></strong> — Temp file leak risolto con variabile globale <code>_FALLBACK_RTSP</code> e cleanup trap</li>
+  <li><strong>Fix Nuclei flags</strong> — Flag corretti: <code>-duc -nh -no-verify</code> (compatibile v3.7.1+)</li>
+  <li><strong>Fix testssl</strong> — Binary corretto su Kali è <code>testssl</code> (non <code>testssl.sh</code>)</li>
+</ul>
+
+<h2 class="sub">v2.2.0 — Marzo 2026</h2>
+<ul>
+  <li><strong>Auto-install media tools</strong> — <code>_ensure_media_tools()</code> installa ffmpeg e vlc via apt se assenti</li>
+  <li><strong>RTSP snapshot con ffmpeg/cvlc</strong> — Cattura frame dalle telecamere via RTSP (ffmpeg primario, cvlc fallback con <code>--allow-user-root</code>)</li>
+  <li><strong>Subcomando <code>install</code></strong> — Installa tutti i 34 tool mancanti (apt + pip3) con un solo comando</li>
+  <li><strong>Subcomando <code>wordlists</code></strong> — Scarica 24 wordlist da SecLists GitHub in <code>/usr/share/exa-dune/wordlists/</code></li>
+  <li><strong>RTSP path branding</strong> — Wordlist brand-aware: Reolink, Hikvision, Dahua, Axis, Axis</li>
+</ul>
+
+<h2 class="sub">v2.1.0 — Marzo 2026</h2>
+<ul>
+  <li><strong>Anti-falsi-positivi HTTP</strong> — <code>_http_requires_auth()</code> testa con credenziali bogus prima del brute force; skippa se il target risponde 200/302 a tutto</li>
+  <li><strong>RTSP Digest Auth nativa</strong> — <code>_rtsp_digest_brute()</code> implementa RFC 2617 via Python3 inline (MD5 challenge-response)</li>
+  <li><strong>Modulo ONVIF</strong> — <code>cmd_onvif</code>: discovery SOAP, GetDeviceInformation, WS-Security PasswordDigest brute force (SHA1+nonce) via curl + Python3</li>
+  <li><strong>Fix RTSP snapshot</strong> — ffmpeg primary, cvlc fallback</li>
+</ul>
+
+<h2 class="sub">v2.0.0 — Marzo 2026</h2>
+<ul>
+  <li>Release iniziale v2: pipeline automatizzata 5 fasi, 29 subcomandi, 7 wordlist integrate</li>
+  <li>Motore suggerimenti intelligenti (port→modulo mapping)</li>
+  <li>Report HTML + PDF via weasyprint</li>
+  <li>Supporto <code>--dry-run</code>, <code>--stealth</code>, <code>--timeout</code></li>
+</ul>
+</div>
+
+<div style="margin-top: 50px; border-top: 2px solid var(--border); padding-top: 30px; text-align: center;">
+  <div style="font-size: 13px; color: var(--muted);">
+    <strong style="color: var(--accent);">exa-dune v2.4.0</strong> — Framework Multi-Protocollo per Penetration Testing IoT/VoIP<br>
+    Piattaforma: Kali Linux 6.18 — Marzo 2026<br><br>
+    <span style="color: var(--danger); font-weight: 700;">⚠ CONFIDENZIALE — Uso esclusivamente in ambienti autorizzati ⚠</span><br>
+    <span style="color: var(--muted); font-size: 11px;">Il pentest non autorizzato è reato. Verifica sempre di avere il consenso scritto del proprietario del sistema.</span>
+  </div>
+</div>
+
+</div>
+
+</body>
+</html>
