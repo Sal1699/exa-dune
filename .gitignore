@@ -1,0 +1,17 @@
+# Output directories
+scans/
+results/
+reports/
+*.pdf
+*.xml
+*.gnmap
+*.nmap
+
+# Temp files
+/tmp/
+*.tmp
+
+# Credentials (never commit)
+*creds*.txt
+*credentials*
+*passwords*
