@@ -3,6 +3,7 @@ scans/
 results/
 reports/
 *.pdf
+!exa-dune-manual-*.pdf
 *.xml
 *.gnmap
 *.nmap
