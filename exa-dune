@@ -5578,7 +5578,7 @@ cmd_pipeline() {
     # ── FASE 2: ANALISI E SUGGEST ────────────────────────────
     section "FASE 2 — ANALISI SCAN E SUGGERIMENTI"
     local nmap_out
-    nmap_out=$(find "$scan_dir" -name "nmap_fast.nmap" -o -name "nmap_fast.gnmap" 2>/dev/null | head -1)
+    nmap_out=$(find "$scan_dir" -name "nmap_fast.nmap" -o -name "nmap_fast.gnmap" 2>/dev/null | head -1) || true
 
     if [[ -z "$nmap_out" && $DRY_RUN -eq 0 ]]; then
         warn "File nmap non trovato in $scan_dir — pipeline interrotta"
@@ -5593,10 +5593,20 @@ cmd_pipeline() {
     fi
 
     if [[ ${#attack_plan[@]} -eq 0 ]]; then
-        warn "Nessuna porta riconosciuta — pipeline interrotta dopo scan"
-        # Genera report anche senza attacchi
-        bash "$SCRIPT_PATH" report "$OUTDIR_BASE" --html --pdf --output "$OUTDIR_BASE" 2>/dev/null || true
-        exit 0
+        if [[ $DRY_RUN -eq 1 ]]; then
+            # In dry-run senza nmap file: popola con piano demo per mostrare tutte le fasi
+            attack_plan=(
+                "1|sip|$target|SIP esposto: enumerazione estensioni e crack PIN"
+                "5|ssh|$target|SSH: brute force credenziali"
+                "8|web|$target|HTTP: directory fuzzing e nikto"
+                "9|snmp|$target|SNMP: community brute force"
+            )
+            log "[DRY-RUN] Nessun file nmap trovato — uso piano attacchi demo per simulazione"
+        else
+            warn "Nessuna porta riconosciuta — pipeline interrotta dopo scan"
+            bash "$SCRIPT_PATH" report "$OUTDIR_BASE" --html --pdf --output "$OUTDIR_BASE" 2>/dev/null || true
+            exit 0
+        fi
     fi
 
     _print_suggestions "$nmap_out" "$target"
@@ -5966,7 +5976,7 @@ cmd_report() {
 
     local report_file="$outdir/REPORT_$(date +%Y%m%d_%H%M%S).txt"
     # Extract IP or hostname from directory name (e.g. exa-dune-10-0-0-1-20250101)
-    local target; target=$(basename "$outdir" | grep -oP '(\d{1,3}-){3}\d{1,3}' | head -1 | tr '-' '.' 2>/dev/null)
+    local target; target=$(basename "$outdir" | grep -oP '(\d{1,3}-){3}\d{1,3}' | head -1 | tr '-' '.' 2>/dev/null || true)
     [[ -z "$target" ]] && target=$(basename "$outdir")
 
     # Helper: print section header
@@ -6053,7 +6063,7 @@ cmd_report() {
             local count=0
             while IFS= read -r line; do
                 [[ -z "$line" || "$line" == "="* ]] && continue
-                ((count++)); [[ $count -gt 20 ]] && break
+                ((count++)) || true; [[ $count -gt 20 ]] && break
                 printf "  [%-10s] %s\n" "$module" "$line"
                 gob_out=1
             done < "$f"
@@ -6080,7 +6090,7 @@ cmd_report() {
         echo "═══════════════════════════════════════════════════"
         echo "  Fine report — $(date)"
         echo "═══════════════════════════════════════════════════"
-    } | tee "$report_file"
+    } | tee "$report_file" 2>/dev/null
 
     echo ""
     ok "Report salvato: $report_file"
