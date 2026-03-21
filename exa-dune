@@ -1111,8 +1111,9 @@ _suggest_attacks() {
             8000) suggestions+=("16|onvif|$target --port 8000|ONVIF/gSOAP esposto — brute force WS-Security, GetDeviceInfo") ;;
             1935) suggestions+=("19|web|$target --port 1935 --scheme http|RTMP esposto — streaming media server") ;;
             5683) suggestions+=("23|coap|$target|CoAP esposto — dispositivo IoT, risorse pubbliche") ;;
-            3702) suggestions+=("24|web|$target --port 3702 --scheme http|WS-Discovery esposto — device fingerprint") ;;
-            47808) suggestions+=("17|modbus|$target|BACnet/IP (47808) — building automation, lettura oggetti") ;;
+            3702) suggestions+=("24|wsd|$target|WS-Discovery (3702) — device fingerprint telecamere/stampanti") ;;
+            47808) suggestions+=("17|bacnet|$target|BACnet/IP (47808) — building automation, lettura oggetti") ;;
+            5353) suggestions+=("24|mdns|$target|mDNS/Bonjour (5353) — servizi Zeroconf sulla rete locale") ;;
         esac
     done
 
@@ -3645,6 +3646,378 @@ cmd_coap() {
     fi
 
     ok "CoAP audit completato → $OUTDIR"
+}
+
+# ============================================================
+#  SUBCOMMAND: mdns
+# ============================================================
+usage_mdns() {
+    echo "Uso: exa-dune mdns <TARGET_NETWORK> [OPTIONS]"
+    echo ""
+    echo "  Enumera servizi mDNS/Bonjour e dispositivi Zeroconf sulla rete locale."
+    echo "  Identifica stampanti, NAS, telecamere IP, Apple TV, smart speakers, ecc."
+    echo ""
+    echo "Opzioni:"
+    echo "  --iface IFACE    Interfaccia di rete (default: auto)"
+    echo "  --timeout N      Timeout ascolto in secondi (default: 10)"
+    echo "  --output DIR"
+    echo "  --dry-run"
+}
+
+cmd_mdns() {
+    local target="" iface="" mdns_timeout=10
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --iface)     iface="$2";         shift 2 ;;
+            --timeout)   mdns_timeout="$2";  shift 2 ;;
+            --output)    OUTDIR_BASE="$2";   shift 2 ;;
+            --stealth)   STEALTH=1;          shift ;;
+            --dry-run)   DRY_RUN=1;          shift ;;
+            --help|-h)   usage_mdns; exit 0 ;;
+            -*)          err "Opzione sconosciuta: $1"; usage_mdns; exit 1 ;;
+            *)           target="$1"; shift ;;
+        esac
+    done
+    [[ -z "$target" ]] && target="local"
+    check_root
+    setup_outdir "$target" "mdns"
+
+    log "Target: $target | Output: $OUTDIR"
+
+    # ── mDNS con avahi-browse ─────────────────────────────────
+    section "mDNS Service Discovery (avahi-browse)"
+    local avahi_out="$OUTDIR/avahi_browse.txt"
+    local iface_flag=""
+    [[ -n "$iface" ]] && iface_flag="--interface $iface"
+
+    if command -v avahi-browse &>/dev/null; then
+        run_cmd "avahi-browse --all --resolve --terminate $iface_flag 2>/dev/null" "$avahi_out"
+        if [[ -s "$avahi_out" ]]; then
+            # Parse servizi trovati e registra findings
+            while IFS= read -r line; do
+                local stype shost sip sport
+                # Estrai hostname/IP/port dalle righe address/port
+                if echo "$line" | grep -q "hostname = \["; then
+                    shost=$(echo "$line" | grep -oP "hostname = \[\K[^\]]+")
+                fi
+                if echo "$line" | grep -q "address = \["; then
+                    sip=$(echo "$line" | grep -oP "address = \[\K[^\]]+")
+                fi
+                if echo "$line" | grep -q "port = \["; then
+                    sport=$(echo "$line" | grep -oP "port = \[\K[^\]]+")
+                fi
+                if echo "$line" | grep -qE "^\+.*_[a-z]+\._tcp|^\+.*_[a-z]+\._udp"; then
+                    stype=$(echo "$line" | awk '{print $NF}')
+                    finding "MEDIUM" "mDNS" "Servizio $stype su $line"
+                fi
+            done < "$avahi_out"
+            ok "avahi-browse completato: $(wc -l < "$avahi_out") righe"
+        fi
+    else
+        warn "avahi-browse non trovato — installa: apt install avahi-utils"
+    fi
+
+    # ── nmap mDNS (porta 5353 UDP) ────────────────────────────
+    section "nmap mDNS/DNS-SD Scan"
+    local nmap_mdns="$OUTDIR/nmap_mdns.txt"
+    if [[ "$target" != "local" ]]; then
+        run_cmd "nmap -sU -p 5353 --script dns-service-discovery \
+            -oN $OUTDIR/nmap_mdns.txt $NMAP_TIMING $target 2>/dev/null" "$nmap_mdns"
+        if [[ -s "$nmap_mdns" ]]; then
+            while IFS= read -r line; do
+                echo "$line" | grep -qE "^\|.*_[a-z]+\." || continue
+                finding "MEDIUM" "mDNS" "DNS-SD: $line"
+            done < "$nmap_mdns"
+        fi
+    else
+        warn "Usa un IP/CIDR come target per nmap mDNS (es: 192.168.1.0/24)"
+    fi
+
+    # ── nmap broadcast-mdns (passive) ────────────────────────
+    section "mDNS Broadcast Discovery"
+    local bcast_out="$OUTDIR/mdns_broadcast.txt"
+    run_cmd "nmap --script broadcast-dns-service-discovery $NMAP_TIMING 2>/dev/null" "$bcast_out"
+    if [[ -s "$bcast_out" ]]; then
+        while IFS= read -r line; do
+            echo "$line" | grep -qE "^\|.*_[a-z]+\." || continue
+            finding "LOW" "mDNS" "Broadcast: $line"
+        done < "$bcast_out"
+    fi
+
+    ok "mDNS audit completato → $OUTDIR"
+}
+
+# ============================================================
+#  SUBCOMMAND: wsd
+# ============================================================
+usage_wsd() {
+    echo "Uso: exa-dune wsd <TARGET> [OPTIONS]"
+    echo ""
+    echo "  WS-Discovery — rileva dispositivi su rete locale (telecamere ONVIF,"
+    echo "  stampanti, NAS, smart TV) tramite multicast WSD (porta UDP 3702)."
+    echo ""
+    echo "Opzioni:"
+    echo "  --port PORT      Porta WSD (default: 3702)"
+    echo "  --timeout N      Timeout ascolto multicast in secondi (default: 5)"
+    echo "  --output DIR"
+    echo "  --dry-run"
+}
+
+cmd_wsd() {
+    local target="" port=3702 wsd_timeout=5
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --port)      port="$2";         shift 2 ;;
+            --timeout)   wsd_timeout="$2";  shift 2 ;;
+            --output)    OUTDIR_BASE="$2";  shift 2 ;;
+            --stealth)   STEALTH=1;         shift ;;
+            --dry-run)   DRY_RUN=1;         shift ;;
+            --help|-h)   usage_wsd; exit 0 ;;
+            -*)          err "Opzione sconosciuta: $1"; usage_wsd; exit 1 ;;
+            *)           target="$1"; shift ;;
+        esac
+    done
+    [[ -z "$target" ]] && { err "TARGET mancante"; usage_wsd; exit 1; }
+    check_root
+    setup_outdir "$target" "wsd"
+    log "Target: $target | Output: $OUTDIR"
+
+    # ── WS-Discovery via nmap ────────────────────────────────
+    section "WS-Discovery (nmap broadcast)"
+    local wsd_nmap="$OUTDIR/wsd_nmap.txt"
+    run_cmd "nmap -sU -p $port --script broadcast-wsd-discover \
+        $NMAP_TIMING $target 2>/dev/null" "$wsd_nmap"
+    if [[ -s "$wsd_nmap" ]]; then
+        while IFS= read -r line; do
+            echo "$line" | grep -qE "Types:|Address:|XAddrs:" || continue
+            finding "MEDIUM" "WSD" "WS-Discovery: $line"
+        done < "$wsd_nmap"
+        ok "nmap WSD completato"
+    fi
+
+    # ── WS-Discovery via Python3 multicast ───────────────────
+    section "WS-Discovery UDP Multicast (239.255.255.250:3702)"
+    local wsd_out="$OUTDIR/wsd_multicast.txt"
+    if [[ $DRY_RUN -eq 1 ]]; then
+        echo -e "${CYAN}[DRY-RUN]${NC} WS-Discovery multicast probe su $target:$port"
+    else
+        python3 - <<PYEOF > "$wsd_out" 2>&1 || true
+import socket, uuid, time, sys
+
+WSD_MCAST = "239.255.255.250"
+WSD_PORT  = $port
+PROBE_MSG = '''<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+               xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing"
+               xmlns:wsd="http://schemas.xmlsoap.org/ws/2005/04/discovery">
+  <soap:Header>
+    <wsa:To>urn:schemas-xmlsoap-org:ws:2005:04:discovery</wsa:To>
+    <wsa:Action>http://schemas.xmlsoap.org/ws/2005/04/discovery/Probe</wsa:Action>
+    <wsa:MessageID>urn:uuid:__UUID__</wsa:MessageID>
+  </soap:Header>
+  <soap:Body>
+    <wsd:Probe>
+      <wsd:Types>wsdp:Device</wsd:Types>
+    </wsd:Probe>
+  </soap:Body>
+</soap:Envelope>'''
+
+msg = PROBE_MSG.replace("__UUID__", str(uuid.uuid4())).encode()
+try:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 4)
+    s.settimeout($wsd_timeout)
+    # Probe su target specifico e multicast
+    for dest in ["$target", WSD_MCAST]:
+        try: s.sendto(msg, (dest, WSD_PORT))
+        except: pass
+    print(f"[WSD] Probe inviato a {WSD_MCAST}:{WSD_PORT} e $target:{WSD_PORT}")
+    print(f"[WSD] Ascolto risposte per {$wsd_timeout}s...")
+    deadline = time.time() + $wsd_timeout
+    while time.time() < deadline:
+        try:
+            data, addr = s.recvfrom(65535)
+            print(f"[WSD] Risposta da {addr[0]}:{addr[1]}")
+            print(data.decode(errors='replace'))
+            print("---")
+        except socket.timeout:
+            break
+        except: break
+    s.close()
+except Exception as e:
+    print(f"[WSD] Errore: {e}", file=sys.stderr)
+PYEOF
+        if [[ -s "$wsd_out" ]]; then
+            # Estrai Types, XAddrs dai ProbeMatches
+            local found_wsd=0
+            while IFS= read -r line; do
+                if echo "$line" | grep -qE "Risposta da|Types|XAddrs|Scopes"; then
+                    echo "$line" | grep -q "Risposta da" && {
+                        local dev_ip; dev_ip=$(echo "$line" | grep -oP '[\d.]+(?=:)')
+                        finding "MEDIUM" "WSD" "Dispositivo WSD rilevato: $dev_ip"
+                        found_wsd=1
+                    }
+                fi
+            done < "$wsd_out"
+            [[ $found_wsd -eq 0 ]] && log "Nessun dispositivo WSD risposto"
+        fi
+    fi
+
+    # ── SSDP (UPnP discovery su 1900) ────────────────────────
+    section "SSDP M-SEARCH (1900/UDP)"
+    local ssdp_out="$OUTDIR/ssdp_discover.txt"
+    if [[ $DRY_RUN -eq 1 ]]; then
+        echo -e "${CYAN}[DRY-RUN]${NC} SSDP M-SEARCH su $target"
+    else
+        python3 - <<PYEOF > "$ssdp_out" 2>&1 || true
+import socket, time
+
+SSDP_MCAST = "239.255.255.250"
+SSDP_PORT  = 1900
+MSEARCH = (
+    "M-SEARCH * HTTP/1.1\r\n"
+    "HOST: 239.255.255.250:1900\r\n"
+    "MAN: \"ssdp:discover\"\r\n"
+    "MX: 3\r\n"
+    "ST: ssdp:all\r\n\r\n"
+)
+try:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.settimeout(5)
+    s.sendto(MSEARCH.encode(), (SSDP_MCAST, SSDP_PORT))
+    s.sendto(MSEARCH.encode(), ("$target", SSDP_PORT))
+    print(f"[SSDP] M-SEARCH inviato")
+    deadline = time.time() + 5
+    seen = set()
+    while time.time() < deadline:
+        try:
+            data, addr = s.recvfrom(65535)
+            if addr[0] not in seen:
+                seen.add(addr[0])
+                print(f"[SSDP] {addr[0]}: {data.decode(errors='replace')[:200]}")
+        except socket.timeout:
+            break
+        except: break
+    s.close()
+except Exception as e:
+    print(f"[SSDP] Errore: {e}")
+PYEOF
+        if [[ -s "$ssdp_out" ]]; then
+            while IFS= read -r line; do
+                echo "$line" | grep -q "^\[SSDP\].*\." && {
+                    local ssdp_ip; ssdp_ip=$(echo "$line" | grep -oP '[\d]+\.[\d]+\.[\d]+\.[\d]+' | head -1)
+                    [[ -n "$ssdp_ip" ]] && finding "LOW" "SSDP" "Dispositivo SSDP: $ssdp_ip → $line"
+                }
+            done < "$ssdp_out"
+        fi
+    fi
+
+    ok "WS-Discovery/SSDP audit completato → $OUTDIR"
+}
+
+# ============================================================
+#  SUBCOMMAND: bacnet
+# ============================================================
+usage_bacnet() {
+    echo "Uso: exa-dune bacnet <TARGET> [OPTIONS]"
+    echo ""
+    echo "  BACnet/IP — Building Automation and Control Network."
+    echo "  Enumera dispositivi HVAC, PLC, sensori ambientali via BACnet/IP (porta 47808 UDP)."
+    echo ""
+    echo "Opzioni:"
+    echo "  --port PORT      Porta BACnet (default: 47808)"
+    echo "  --output DIR"
+    echo "  --dry-run"
+}
+
+cmd_bacnet() {
+    local target="" port=47808
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --port)      port="$2";         shift 2 ;;
+            --output)    OUTDIR_BASE="$2";  shift 2 ;;
+            --stealth)   STEALTH=1;         shift ;;
+            --dry-run)   DRY_RUN=1;         shift ;;
+            --help|-h)   usage_bacnet; exit 0 ;;
+            -*)          err "Opzione sconosciuta: $1"; usage_bacnet; exit 1 ;;
+            *)           target="$1"; shift ;;
+        esac
+    done
+    [[ -z "$target" ]] && { err "TARGET mancante"; usage_bacnet; exit 1; }
+    check_root
+    setup_outdir "$target" "bacnet"
+    log "Target: $target:$port | Output: $OUTDIR"
+
+    # ── nmap BACnet NSE scripts ───────────────────────────────
+    section "BACnet/IP — nmap bacnet-info"
+    local nmap_bacnet="$OUTDIR/nmap_bacnet.txt"
+    run_cmd "nmap -sU -p $port --script bacnet-info \
+        -oN $OUTDIR/nmap_bacnet.txt $NMAP_TIMING $target 2>/dev/null" "$nmap_bacnet"
+    if [[ -s "$nmap_bacnet" ]]; then
+        while IFS= read -r line; do
+            echo "$line" | grep -qE "^\|.*(" || continue
+            finding "HIGH" "BACnet" "$line"
+        done < "$nmap_bacnet"
+        ok "nmap BACnet completato"
+    fi
+
+    # ── BACnet Who-Is broadcast via Python3 ──────────────────
+    section "BACnet Who-Is Broadcast"
+    local whois_out="$OUTDIR/bacnet_whois.txt"
+    if [[ $DRY_RUN -eq 1 ]]; then
+        echo -e "${CYAN}[DRY-RUN]${NC} BACnet Who-Is su $target:$port"
+    else
+        python3 - <<PYEOF > "$whois_out" 2>&1 || true
+import socket, struct, time
+
+BACNET_PORT = $port
+
+# BACnet Who-Is NPDU + APDU (broadcast)
+# BVLL Type=0x81 Function=0x0b (original-unicast-npdu) + NPDU + APDU
+whois = bytes([
+    0x81, 0x0b,          # BVLL: BACnet/IP, Original-Unicast-NPDU
+    0x00, 0x09,          # BVLL Length: 9 bytes
+    0x01, 0x00,          # NPDU version=1, control=0
+    0x10, 0x08,          # APDU: unconfirmed-req, Who-Is
+    0x00, 0x00, 0xff, 0xff, 0xff  # Range: all devices
+])
+try:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.settimeout(5)
+    s.sendto(whois, ("$target", BACNET_PORT))
+    s.sendto(whois, ("255.255.255.255", BACNET_PORT))
+    print(f"[BACnet] Who-Is broadcast inviato a {BACNET_PORT}/UDP")
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        try:
+            data, addr = s.recvfrom(1024)
+            print(f"[BACnet] I-Am risposta da {addr[0]}: {data.hex()}")
+        except socket.timeout:
+            break
+        except: break
+    s.close()
+except Exception as e:
+    print(f"[BACnet] Errore: {e}")
+PYEOF
+        if grep -q "I-Am risposta" "$whois_out" 2>/dev/null; then
+            while IFS= read -r line; do
+                echo "$line" | grep -q "I-Am risposta" && finding "HIGH" "BACnet" "Dispositivo BACnet: $line"
+            done < "$whois_out"
+        else
+            log "Nessuna risposta BACnet I-Am ricevuta"
+        fi
+    fi
+
+    # ── nmap scan BACnet port ────────────────────────────────
+    section "BACnet Port Scan"
+    local bacnet_tcp="$OUTDIR/nmap_bacnet_tcp.txt"
+    run_cmd "nmap -p $port -sV --script bacnet-info \
+        $NMAP_TIMING $target 2>/dev/null" "$bacnet_tcp"
+
+    ok "BACnet audit completato → $OUTDIR"
 }
 
 # ============================================================
@@ -7220,6 +7593,9 @@ cmd_help() {
         dns)     banner; usage_dns    ;;
         ipmi)    banner; usage_ipmi   ;;
         coap)    banner; usage_coap   ;;
+        mdns)    banner; usage_mdns   ;;
+        wsd)     banner; usage_wsd    ;;
+        bacnet)  banner; usage_bacnet ;;
         vnc)     banner; usage_vnc    ;;
         rdp)     banner; usage_rdp    ;;
         ldap)    banner; usage_ldap   ;;
@@ -7257,6 +7633,9 @@ cmd_help() {
             printf "  %-10s %s\n" "dns"     "DNS enumeration            (dig, dnsrecon, host, nmap)"
             printf "  %-10s %s\n" "ipmi"    "IPMI/BMC audit             (nmap, ipmitool)"
             printf "  %-10s %s\n" "coap"    "CoAP IoT protocol audit    (nmap, coap-client)"
+            printf "  %-10s %s\n" "mdns"    "mDNS/Bonjour service discovery  (avahi-browse, nmap dns-sd)"
+            printf "  %-10s %s\n" "wsd"     "WS-Discovery/SSDP devices  (UDP 3702 multicast, SSDP 1900)"
+            printf "  %-10s %s\n" "bacnet"  "BACnet/IP building automation  (nmap bacnet-info NSE, Who-Is)"
             printf "  %-10s %s\n" "vnc"     "VNC audit                  (nmap vnc NSE, hydra)"
             printf "  %-10s %s\n" "rdp"     "RDP audit + brute force    (nmap rdp NSE, hydra)"
             printf "  %-10s %s\n" "ldap"    "LDAP enumeration           (ldapsearch, nmap ldap NSE)"
@@ -7681,6 +8060,9 @@ case "$subcommand" in
     dns)     cmd_dns     "$@" ;;
     ipmi)    cmd_ipmi    "$@" ;;
     coap)    cmd_coap    "$@" ;;
+    mdns)    cmd_mdns    "$@" ;;
+    wsd)     cmd_wsd     "$@" ;;
+    bacnet)  cmd_bacnet  "$@" ;;
     vnc)     cmd_vnc     "$@" ;;
     rdp)     cmd_rdp     "$@" ;;
     ldap)    cmd_ldap    "$@" ;;
