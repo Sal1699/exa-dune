@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>exa-dune v2.4.0 — Manuale Operativo</title>
+<title>exa-dune v2.5.0 — Manuale Operativo</title>
 <style>
 :root {
   --bg: #0d1117; --bg2: #161b22; --bg3: #21262d;
@@ -113,10 +113,10 @@ tr:nth-child(even) td { background: var(--bg2); }
   <div class="cover-badge">Uso Interno — Laboratorio Personale</div>
   <h1>exa-dune</h1>
   <div class="subtitle">Framework Multi-Protocollo per Penetration Testing</div>
-  <div class="version">Versione 2.4.0 — Marzo 2026</div>
+  <div class="version">Versione 2.5.0 — Marzo 2026</div>
   <div class="desc">
     Manuale operativo completo per l'utilizzo di exa-dune in ambienti IoT e VoIP.
-    Questo documento copre tutte le funzionalità della versione 2.4.0, incluso il sistema
+    Questo documento copre tutte le funzionalità della versione 2.5.0, incluso il sistema
     di pipeline automatizzata, le wordlist integrate, il modulo ONVIF, l'installer automatico,
     i report HTML/PDF professionali con copia automatica su Desktop, e molto altro.
     Progettato per essere accessibile anche ai principianti.
@@ -177,7 +177,8 @@ tr:nth-child(even) td { background: var(--bg2); }
   <div class="toc-section"><a href="#onvif-cmd"><span class="toc-h2">10.6 onvif — Telecamere ONVIF</span><span class="pg">47</span></a></div>
   <div class="toc-section"><a href="#install-cmd"><span class="toc-h2">10.7 install — Installazione Tool</span><span class="pg">48</span></a></div>
   <div class="toc-section"><a href="#wordlists-cmd"><span class="toc-h2">10.8 wordlists — Download Wordlist</span><span class="pg">49</span></a></div>
-  <div class="toc-section"><a href="#pipeline"><span class="toc-h1">11. Pipeline Automatizzata</span><span class="pg">50</span></a></div>
+  <div class="toc-section"><a href="#new-subcmds"><span class="toc-h2">10.9 Nuovi Subcomandi IoT/OT v2.5.0</span><span class="pg">50</span></a></div>
+  <div class="toc-section"><a href="#pipeline"><span class="toc-h1">11. Pipeline Automatizzata</span><span class="pg">57</span></a></div>
   <div class="toc-section"><a href="#scenarios"><span class="toc-h1">12. Scenari Pratici di Laboratorio</span><span class="pg">55</span></a></div>
   <div class="toc-section"><a href="#glossary"><span class="toc-h1">13. Glossario per Principianti</span><span class="pg">61</span></a></div>
   <div class="toc-section"><a href="#cheatsheet"><span class="toc-h1">14. Cheat Sheet Rapido</span><span class="pg">65</span></a></div>
@@ -236,7 +237,7 @@ exa-dune include oltre 119 password e 43 username pre-integrati.
 <h3 class="subsub">Wordlist</h3>
 <p>
 Una <strong>wordlist</strong> è una lista di parole (username, password, percorsi web, community string)
-usata durante gli attacchi automatizzati. exa-dune v2.4.0 include 7 wordlist integrate direttamente
+usata durante gli attacchi automatizzati. exa-dune v2.5.0 include 7 wordlist integrate direttamente
 nel codice, quindi funziona anche senza SecLists installato.
 </p>
 
@@ -300,7 +301,7 @@ source ~/.zshrc
 
 <span class="comment"># 4. Verifica installazione</span>
 exa-dune --version
-<span class="ok"># Output: exa-dune v2.4.0</span>
+<span class="ok"># Output: exa-dune v2.5.0</span>
 
 <span class="comment"># 5. Verifica dipendenze PDF</span>
 which weasyprint
@@ -449,7 +450,7 @@ exa-dune <span class="cmd">web</span> <span class="flag">--target</span> <span c
 <div class="page page-break" id="wordlists">
 <h1 class="section">5. Wordlist Integrate</h1>
 <p>
-exa-dune v2.4.0 include 7 categorie di wordlist direttamente nel codice sorgente (embedded), più 24 wordlist aggiuntive da SecLists disponibili via <code>exa-dune wordlists</code>.
+exa-dune v2.5.0 include 7 categorie di wordlist direttamente nel codice sorgente (embedded), più 24 wordlist aggiuntive da SecLists disponibili via <code>exa-dune wordlists</code>.
 Questo significa che il tool è <strong>completamente autosufficiente</strong>: funziona anche senza
 SecLists installato. Le wordlist esterne (se presenti) vengono comunque preferite perché più complete.
 </p>
@@ -555,7 +556,7 @@ exa-dune <span class="cmd">scan</span> <span class="flag">--target</span> <span 
   <tr><td><code>scan_TARGET_TIMESTAMP.gnmap</code></td><td>Greppable</td><td>Parsing automatico da exa-dune pipeline</td></tr>
 </table>
 
-<h3 class="subsub">Funzionalità v2.4.0 — Auto-Suggerimenti</h3>
+<h3 class="subsub">Funzionalità v2.5.0 — Auto-Suggerimenti</h3>
 <p>
 Al termine di ogni scan, exa-dune v2.4.0 <strong>analizza automaticamente i risultati</strong>
 e suggerisce quali attacchi eseguire in base alle porte aperte rilevate:
@@ -1437,7 +1438,9 @@ sul sistema. Va eseguito <strong>una sola volta come root</strong> al momento de
   <tr><td>Web/HTTP</td><td>nikto, gobuster, ffuf, curl, wget</td></tr>
   <tr><td>Brute Force</td><td>hydra, medusa, ncrack</td></tr>
   <tr><td>VoIP/IoT</td><td>sipvicious, snmpwalk, snmp-mibs-downloader, onesixtyone</td></tr>
-  <tr><td>Multimedia</td><td>ffmpeg, vlc</td></tr>
+  <tr><td>Multimedia</td><td>ffmpeg, vlc, rtmpdump</td></tr>
+  <tr><td>mDNS/Discovery</td><td>avahi-utils</td></tr>
+  <tr><td>SIP Testing</td><td>sipsak</td></tr>
   <tr><td>Post-Exploit</td><td>binwalk, strings, file, xxd</td></tr>
   <tr><td>Vulnerability</td><td>nuclei (via pip3)</td></tr>
   <tr><td>Report</td><td>weasyprint (via pip3)</td></tr>
@@ -1490,11 +1493,129 @@ Il subcomando <code>wordlists</code> scarica wordlist aggiuntive da SecLists Git
 </div>
 </div>
 
+<!-- SECTION 10.9: NUOVI SUBCOMANDI v2.5.0 -->
+<div class="page page-break" id="new-subcmds">
+<h2 class="sub">10.9 Nuovi Subcomandi IoT/OT — v2.5.0</h2>
+<p>
+La versione 2.5.0 introduce <strong>7 nuovi subcomandi</strong> specializzati per protocolli IoT/OT
+non coperti in precedenza: mDNS, WS-Discovery, BACnet/IP, RTMP, Camera CVE, SIP Fuzzing, EtherNet/IP.
+</p>
+
+<h3 class="subsub">mdns — mDNS/Bonjour Service Discovery</h3>
+<p>Enumera servizi mDNS sulla rete locale tramite <code>avahi-browse</code> e NSE <code>dns-service-discovery</code>.
+Identifica dispositivi IoT, telecamere, stampanti, HomeKit, Chromecast.</p>
+<pre><span class="cmd">exa-dune mdns                      # scan rete locale</span>
+<span class="cmd">exa-dune mdns 192.168.1.0/24       # con target specifico</span>
+<span class="cmd">exa-dune mdns --iface eth0 --timeout 30</span></pre>
+<table>
+  <tr><th>Opzione</th><th>Default</th><th>Descrizione</th></tr>
+  <tr><td>--iface</td><td>—</td><td>Interfaccia di rete da usare (es: eth0, wlan0)</td></tr>
+  <tr><td>--timeout</td><td>10</td><td>Timeout ascolto multicast in secondi</td></tr>
+  <tr><td>--output</td><td>auto</td><td>Directory output</td></tr>
+</table>
+<div class="callout tip"><div class="label">Tool richiesti</div><code>avahi-utils</code> (apt) — installato via <code>exa-dune install</code></div>
+
+<h3 class="subsub">wsd — WS-Discovery / SSDP</h3>
+<p>Rileva dispositivi WS-Discovery (ONVIF, stampanti, NAS, smart TV) via UDP multicast 3702.
+Esegue anche SSDP M-SEARCH su porta 1900 per dispositivi UPnP.</p>
+<pre><span class="cmd">exa-dune wsd 192.168.1.50         # probe WSD + SSDP</span>
+<span class="cmd">exa-dune wsd 192.168.1.50 --port 3702 --timeout 10</span></pre>
+<table>
+  <tr><th>Opzione</th><th>Default</th><th>Descrizione</th></tr>
+  <tr><td>--port</td><td>3702</td><td>Porta WSD UDP</td></tr>
+  <tr><td>--timeout</td><td>5</td><td>Timeout ascolto risposta in secondi</td></tr>
+</table>
+
+<h3 class="subsub">bacnet — BACnet/IP (Building Automation)</h3>
+<p>Enumera dispositivi BACnet/IP (HVAC, PLC, sensori) tramite NSE <code>bacnet-info</code> e
+Who-Is broadcast su UDP 47808. Copre automazione edifici e sistemi ICS.</p>
+<pre><span class="cmd">exa-dune bacnet 192.168.1.100     # scan BACnet</span>
+<span class="cmd">exa-dune bacnet 192.168.1.0/24 --port 47808</span></pre>
+<table>
+  <tr><th>Opzione</th><th>Default</th><th>Descrizione</th></tr>
+  <tr><td>--port</td><td>47808</td><td>Porta BACnet/IP UDP</td></tr>
+</table>
+<div class="callout warn"><div class="label">Attenzione OT</div>Non eseguire test BACnet su sistemi in produzione senza autorizzazione esplicita. I dispositivi BACnet sono spesso PLC critici per HVAC e safety.</div>
+
+<h3 class="subsub">rtmp — RTMP Stream Enumeration</h3>
+<p>Proba server RTMP (DVR, NVR, telecamere IP) su porta 1935. Enumera 20 path comuni
+(live, stream, cam, dvr, ch1…), verifica accesso anonimo con ffprobe, cattura metadati stream.</p>
+<pre><span class="cmd">exa-dune rtmp 192.168.1.34        # probe RTMP porta 1935</span>
+<span class="cmd">exa-dune rtmp 192.168.1.34 --port 1935 --apps /custom/wordlist.txt</span></pre>
+<table>
+  <tr><th>Opzione</th><th>Default</th><th>Descrizione</th></tr>
+  <tr><td>--port</td><td>1935</td><td>Porta RTMP TCP</td></tr>
+  <tr><td>--apps</td><td>embedded</td><td>File con lista di app/stream da provare (1 per riga)</td></tr>
+</table>
+<div class="callout tip"><div class="label">Tool richiesti</div><code>ffmpeg</code> (ffprobe) + <code>rtmpdump</code> — installati via <code>exa-dune install</code></div>
+
+<h3 class="subsub">cam-cve — IP Camera CVE Scanner</h3>
+<p>Verifica vulnerabilità note su telecamere IP con detection automatica vendor (Hikvision, Dahua, Axis,
+Reolink, generic). Controlla endpoint CVE noti e disclosure unauthenticated.</p>
+<pre><span class="cmd">exa-dune cam-cve 192.168.1.34                    # auto-detect vendor</span>
+<span class="cmd">exa-dune cam-cve 192.168.1.34 --vendor hikvision</span>
+<span class="cmd">exa-dune cam-cve 192.168.1.34 --vendor axis --ssl</span></pre>
+<table>
+  <tr><th>Opzione</th><th>Default</th><th>Descrizione</th></tr>
+  <tr><td>--vendor</td><td>auto</td><td>hikvision | dahua | axis | reolink | generic</td></tr>
+  <tr><td>--port</td><td>80</td><td>Porta HTTP</td></tr>
+  <tr><td>--ssl</td><td>off</td><td>Usa HTTPS su porta 443</td></tr>
+</table>
+<table>
+  <tr><th>CVE Supportati</th><th>Vendor</th><th>Severity</th></tr>
+  <tr><td>CVE-2021-36260 — Unauthenticated RCE via webLanguage</td><td>Hikvision</td><td>CRITICAL</td></tr>
+  <tr><td>CVE-2017-7921 — Unauthenticated snapshot bypass</td><td>Hikvision</td><td>HIGH</td></tr>
+  <tr><td>CVE-2021-33044 — Auth bypass via magic packet</td><td>Dahua</td><td>CRITICAL</td></tr>
+  <tr><td>CVE-2017-7925 — Unauthenticated config dump</td><td>Dahua</td><td>CRITICAL</td></tr>
+  <tr><td>CVE-2018-10660 — Root shell via VAPIX param injection</td><td>Axis</td><td>CRITICAL</td></tr>
+  <tr><td>CVE-2016-6201 — Snapshot auth bypass</td><td>Axis</td><td>HIGH</td></tr>
+  <tr><td>INFO-DISC-* — Device info/API senza autenticazione</td><td>Reolink</td><td>MEDIUM</td></tr>
+</table>
+
+<h3 class="subsub">sip-fuzz — SIP Fuzzing e Stress Test</h3>
+<p>Invia messaggi SIP malformati, effettua tracerouting SIP e stress test INVITE tramite <code>sipsak</code>.
+Complementa sipvicious (enumeration) con test di robustezza del server.</p>
+<pre><span class="cmd">exa-dune sip-fuzz 192.168.1.10             # OPTIONS probe + trace</span>
+<span class="cmd">exa-dune sip-fuzz 192.168.1.10 --method INVITE --count 100</span>
+<span class="cmd">exa-dune sip-fuzz 192.168.1.10 --port 5060 --sleep 50</span></pre>
+<table>
+  <tr><th>Opzione</th><th>Default</th><th>Descrizione</th></tr>
+  <tr><td>--port</td><td>5060</td><td>Porta SIP UDP/TCP</td></tr>
+  <tr><td>--method</td><td>OPTIONS</td><td>Metodo SIP: OPTIONS | INVITE | REGISTER</td></tr>
+  <tr><td>--count</td><td>50</td><td>Numero messaggi per stress test</td></tr>
+  <tr><td>--sleep</td><td>100</td><td>Delay tra messaggi in millisecondi</td></tr>
+</table>
+<div class="callout tip"><div class="label">Tool richiesti</div><code>sipsak</code> — installato via <code>exa-dune install</code></div>
+
+<h3 class="subsub">enip — EtherNet/IP (ICS/SCADA)</h3>
+<p>Enumera controller PLC EtherNet/IP (Allen-Bradley, Rockwell) tramite NSE <code>enip-info</code> e
+CIP ListIdentity broadcast su TCP/UDP 44818. Identifica vendor, product name, revisione firmware.</p>
+<pre><span class="cmd">exa-dune enip 192.168.1.100       # scan EtherNet/IP</span>
+<span class="cmd">exa-dune enip 192.168.1.0/24 --port 44818</span></pre>
+<table>
+  <tr><th>Opzione</th><th>Default</th><th>Descrizione</th></tr>
+  <tr><td>--port</td><td>44818</td><td>Porta EtherNet/IP TCP/UDP</td></tr>
+</table>
+<div class="callout warn"><div class="label">Attenzione ICS</div>EtherNet/IP è usato su PLC in ambienti industriali critici. Non eseguire mai senza autorizzazione esplicita e in orari concordati con i responsabili OT.</div>
+
+<h3 class="subsub">Riepilogo — Nuovi Subcomandi v2.5.0</h3>
+<table>
+  <tr><th>Subcomando</th><th>Protocollo/Porta</th><th>Vendor/Scope</th><th>Tool</th></tr>
+  <tr><td><code>mdns</code></td><td>UDP 5353</td><td>IoT/LAN universale</td><td>avahi-browse, nmap NSE</td></tr>
+  <tr><td><code>wsd</code></td><td>UDP 3702, UDP 1900</td><td>ONVIF, UPnP</td><td>Python3, nmap NSE</td></tr>
+  <tr><td><code>bacnet</code></td><td>UDP 47808</td><td>Building Automation (HVAC, PLC)</td><td>nmap NSE, Python3</td></tr>
+  <tr><td><code>rtmp</code></td><td>TCP 1935</td><td>DVR, NVR, streaming</td><td>ffprobe, rtmpdump</td></tr>
+  <tr><td><code>cam-cve</code></td><td>TCP 80/443</td><td>Hikvision, Dahua, Axis, Reolink</td><td>curl (built-in)</td></tr>
+  <tr><td><code>sip-fuzz</code></td><td>UDP/TCP 5060</td><td>SIP server, PBX</td><td>sipsak, nmap NSE</td></tr>
+  <tr><td><code>enip</code></td><td>TCP/UDP 44818</td><td>PLC Allen-Bradley/Rockwell</td><td>nmap NSE, Python3</td></tr>
+</table>
+</div>
+
 <!-- SECTION 11: PIPELINE -->
 <div class="page page-break" id="pipeline">
 <h1 class="section">11. Pipeline Automatizzata</h1>
 <div style="background: linear-gradient(135deg, #0d2040, #1a1230); border: 2px solid var(--accent); border-radius: 12px; padding: 20px 24px; margin-bottom: 24px;">
-  <div style="font-size: 12px; color: var(--accent); font-weight: 700; text-transform: uppercase; letter-spacing: 2px; margin-bottom: 8px;">FUNZIONALITÀ v2.4.0</div>
+  <div style="font-size: 12px; color: var(--accent); font-weight: 700; text-transform: uppercase; letter-spacing: 2px; margin-bottom: 8px;">FUNZIONALITÀ v2.5.0</div>
   <div style="font-size: 16px; font-weight: 600; color: var(--text);">La pipeline automatizzata è la funzionalità più potente di exa-dune: esegue l'intero ciclo di penetration testing in un singolo comando, dalla scansione iniziale al report PDF finale.</div>
 </div>
 
@@ -2180,6 +2301,18 @@ exa-dune report -o /tmp/scan \
 <div class="page page-break" id="changelog">
 <h1 class="section">15. Changelog e Versioni</h1>
 
+<h2 class="sub">v2.5.0 — Marzo 2026</h2>
+<ul>
+  <li><strong>7 nuovi subcomandi IoT/OT</strong> — <code>mdns</code>, <code>wsd</code>, <code>bacnet</code>, <code>rtmp</code>, <code>cam-cve</code>, <code>sip-fuzz</code>, <code>enip</code>: coprono mDNS/Bonjour, WS-Discovery/SSDP, BACnet/IP, RTMP stream, CVE telecamere IP, SIP fuzzing, EtherNet/IP CIP</li>
+  <li><strong>Pipeline parallela</strong> — flag <code>--parallel</code> esegue i moduli in background bash job con <code>wait</code> finale; riduce tempo totale audit multi-modulo</li>
+  <li><strong>Timeline per fase</strong> — <code>_timeline_event()</code> registra timestamp START/END/SKIP in <code>timeline.txt</code>; il report HTML mostra la sezione 8 Timeline con codifica colori</li>
+  <li><strong>Report completo per fase</strong> — Report HTML v2.5.0 aggiunge: UDP ports (2b), SSL/TLS detail (2c), ARP (2d), searchsploit (2e), RTSP streams+snapshot (4b), SIP/VoIP (4c), JS Analysis (4d), SSH/FTP (4e), tabella moduli con findings (7), timeline (8), appendice log (9)</li>
+  <li><strong>Camera CVE scanner</strong> — Auto-detection vendor da HTTP header, check CVE-2021-36260, CVE-2017-7921 (Hikvision), CVE-2021-33044, CVE-2017-7925 (Dahua), CVE-2018-10660, CVE-2016-6201 (Axis)</li>
+  <li><strong>_suggest_attacks() aggiornato</strong> — mapping porta→modulo corretto: RTMP→rtmp, WSD→wsd, BACnet→bacnet, mDNS→mdns, EtherNet/IP→enip, ONVIF→onvif, CoAP→coap</li>
+  <li><strong>Fix <code>run_cmd</code> nei 7 nuovi subcomandi</strong> — corretti 12 chiamate con argomenti invertiti (comando/outfile) in <code>cmd_mdns</code>, <code>cmd_wsd</code>, <code>cmd_bacnet</code>, <code>cmd_rtmp</code>, <code>cmd_sipfuzz</code>, <code>cmd_enip</code></li>
+  <li><strong>Install aggiornato</strong> — <code>exa-dune install</code> aggiunge automaticamente: <code>sipsak</code>, <code>rtmpdump</code>, <code>avahi-utils</code></li>
+</ul>
+
 <h2 class="sub">v2.4.0 — Marzo 2026</h2>
 <ul>
   <li><strong>Report HTML/PDF professionale</strong> — Cover page, executive summary, stat boxes, bar chart severity, porte/servizi da nmap, findings con CVSS 3.1, raccomandazioni, log appendice</li>
@@ -2227,7 +2360,7 @@ exa-dune report -o /tmp/scan \
 
 <div style="margin-top: 50px; border-top: 2px solid var(--border); padding-top: 30px; text-align: center;">
   <div style="font-size: 13px; color: var(--muted);">
-    <strong style="color: var(--accent);">exa-dune v2.4.0</strong> — Framework Multi-Protocollo per Penetration Testing IoT/VoIP<br>
+    <strong style="color: var(--accent);">exa-dune v2.5.0</strong> — Framework Multi-Protocollo per Penetration Testing IoT/VoIP<br>
     Piattaforma: Kali Linux 6.18 — Marzo 2026<br><br>
     <span style="color: var(--danger); font-weight: 700;">⚠ CONFIDENZIALE — Uso esclusivamente in ambienti autorizzati ⚠</span><br>
     <span style="color: var(--muted); font-size: 11px;">Il pentest non autorizzato è reato. Verifica sempre di avere il consenso scritto del proprietario del sistema.</span>
