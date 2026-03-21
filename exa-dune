@@ -40,7 +40,7 @@
 
 set -euo pipefail
 
-VERSION="2.1.0"
+VERSION="2.5.0"
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 
 # ── Colori ──────────────────────────────────────────────────
@@ -1108,6 +1108,11 @@ _suggest_attacks() {
                   suggestions+=("13|snmp|$target|SNMP aperto — community brute force, OID walk, WRITE test") ;;
             44818|102)
                   suggestions+=("17|modbus|$target|Porta ICS/SCADA — audit Modbus/industrial protocol") ;;
+            8000) suggestions+=("16|onvif|$target --port 8000|ONVIF/gSOAP esposto — brute force WS-Security, GetDeviceInfo") ;;
+            1935) suggestions+=("19|web|$target --port 1935 --scheme http|RTMP esposto — streaming media server") ;;
+            5683) suggestions+=("23|coap|$target|CoAP esposto — dispositivo IoT, risorse pubbliche") ;;
+            3702) suggestions+=("24|web|$target --port 3702 --scheme http|WS-Discovery esposto — device fingerprint") ;;
+            47808) suggestions+=("17|modbus|$target|BACnet/IP (47808) — building automation, lettura oggetti") ;;
         esac
     done
 
@@ -5940,6 +5945,7 @@ usage_pipeline() {
     echo "  --from-scan DIR    Usa scan esistente (salta fase scan)"
     echo "  --auto             Esegui senza chiedere conferma"
     echo "  --no-post          Salta post-exploitation automatico"
+    echo "  --parallel         Esegui moduli in parallelo (background jobs)"
     echo "  --stealth          Passa --stealth a tutti i moduli"
     echo "  --timeout N        Timeout minuti per modulo (default: 10)"
     echo "  --userlist FILE"
@@ -5949,12 +5955,13 @@ usage_pipeline() {
 }
 
 cmd_pipeline() {
-    local target="" from_scan="" auto_mode=0 no_post=0
+    local target="" from_scan="" auto_mode=0 no_post=0 parallel_mode=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --from-scan)  from_scan="$2";      shift 2 ;;
             --auto)       auto_mode=1;         shift ;;
             --no-post)    no_post=1;           shift ;;
+            --parallel)   parallel_mode=1;     shift ;;
             --stealth)    STEALTH=1;           shift ;;
             --timeout)    TIMEOUT="$2";        shift 2 ;;
             --userlist)   CUSTOM_USERS="$2";   shift 2 ;;
@@ -5976,27 +5983,39 @@ cmd_pipeline() {
     [[ $DRY_RUN -eq 0 ]] && mkdir -p "$OUTDIR_BASE"
     _log_file="${OUTDIR_BASE}/pipeline.log"
     [[ $DRY_RUN -eq 1 ]] && _log_file=""
+    local _timeline_file="${OUTDIR_BASE}/timeline.txt"
+    [[ $DRY_RUN -eq 0 ]] && : > "$_timeline_file"
+
+    _timeline_event() {
+        [[ $DRY_RUN -eq 1 ]] && return
+        printf "[%s] %s\n" "$(date '+%H:%M:%S')" "$*" >> "$_timeline_file" 2>/dev/null || true
+    }
 
     banner
     log "=== PIPELINE START === Target: $target | Output: $OUTDIR_BASE"
+    _timeline_event "PIPELINE START — target=$target parallel=${parallel_mode}"
 
     # ── FASE 1: SCAN ─────────────────────────────────────────
     local scan_dir=""
     if [[ -n "$from_scan" && -d "$from_scan" ]]; then
         scan_dir="$from_scan"
         ok "Fase 1 SCAN: uso scan esistente → $scan_dir"
+        _timeline_event "FASE 1 — SCAN (preesistente): $scan_dir"
     else
         section "FASE 1 — PORT SCAN"
+        _timeline_event "FASE 1 START — port scan su $target"
         local extra_flags="--output $OUTDIR_BASE"
         [[ $STEALTH -eq 1 ]] && extra_flags="$extra_flags --stealth"
         [[ $DRY_RUN -eq 1 ]] && extra_flags="$extra_flags --dry-run"
         [[ "${TIMEOUT:-0}" -gt 0 ]] && extra_flags="$extra_flags --timeout $TIMEOUT"
         bash "$SCRIPT_PATH" scan "$target" --vuln $extra_flags || true
         scan_dir="$OUTDIR_BASE"
+        _timeline_event "FASE 1 END — scan completato"
     fi
 
     # ── FASE 2: ANALISI E SUGGEST ────────────────────────────
     section "FASE 2 — ANALISI SCAN E SUGGERIMENTI"
+    _timeline_event "FASE 2 START — analisi risultati scan"
     local nmap_out
     nmap_out=$(find "$scan_dir" -name "nmap_fast.nmap" -o -name "nmap_fast.gnmap" 2>/dev/null | head -1) || true
 
@@ -6030,6 +6049,7 @@ cmd_pipeline() {
     fi
 
     _print_suggestions "$nmap_out" "$target"
+    _timeline_event "FASE 2 END — ${#attack_plan[@]} attacchi pianificati"
 
     # ── CONFERMA O AUTO ──────────────────────────────────────
     if [[ $auto_mode -eq 0 && $DRY_RUN -eq 0 ]]; then
@@ -6040,48 +6060,85 @@ cmd_pipeline() {
 
     # ── FASE 3: ESECUZIONE ATTACCHI ─────────────────────────
     section "FASE 3 — ESECUZIONE ATTACCHI"
+    _timeline_event "FASE 3 START — esecuzione ${#attack_plan[@]} moduli (parallel=${parallel_mode})"
     local found_creds=0
     local modules_run=()
+    local _bg_pids=()
 
-    for entry in "${attack_plan[@]}"; do
-        IFS='|' read -r prio module args reason <<< "$entry"
-        section "  [$module] $reason"
-        log "Esecuzione: exa-dune $module $args"
-        modules_run+=("$module")
-
+    # Helper per eseguire un modulo (sequenziale o background)
+    _run_module() {
+        local module="$1"; shift
+        local args="$*"
         local mod_flags="--output $OUTDIR_BASE"
         [[ $STEALTH -eq 1 ]] && mod_flags="$mod_flags --stealth"
         [[ $DRY_RUN -eq 1 ]] && mod_flags="$mod_flags --dry-run"
         [[ "${TIMEOUT:-0}" -gt 0 ]] && mod_flags="$mod_flags --timeout $TIMEOUT"
         [[ -n "$CUSTOM_USERS" ]] && mod_flags="$mod_flags --userlist $CUSTOM_USERS"
         [[ -n "$CUSTOM_PASS"  ]] && mod_flags="$mod_flags --passlist $CUSTOM_PASS"
-
+        _timeline_event "  MOD START — $module $args"
+        local t0; t0=$(date +%s)
         bash "$SCRIPT_PATH" $module $args $mod_flags 2>&1 || true
+        local t1; t1=$(date +%s)
+        _timeline_event "  MOD END   — $module [$(( t1 - t0 ))s]"
+    }
 
-        # Controlla se sono state trovate credenziali dopo ogni modulo
-        if [[ $DRY_RUN -eq 0 ]] && \
-           find "$OUTDIR_BASE" -name "hydra_*.txt" -newer "$OUTDIR_BASE/pipeline.log" \
-                -exec grep -l "login:" {} \; 2>/dev/null | grep -q .; then
-            found_creds=1
-            ok "Credenziali trovate durante modulo '$module'!"
-        fi
+    if [[ $parallel_mode -eq 1 && $DRY_RUN -eq 0 ]]; then
+        # Modalità parallela: lancia tutti in background, poi aspetta
+        log "[PARALLEL] Lancio tutti i moduli in background..."
+        for entry in "${attack_plan[@]}"; do
+            IFS='|' read -r prio module args reason <<< "$entry"
+            log "  [bg] $module — $reason"
+            modules_run+=("$module")
+            _run_module "$module" $args &
+            _bg_pids+=($!)
+        done
+        log "[PARALLEL] In attesa completamento ${#_bg_pids[@]} moduli..."
+        for pid in "${_bg_pids[@]}"; do
+            wait "$pid" 2>/dev/null || true
+        done
+        ok "[PARALLEL] Tutti i moduli completati."
+    else
+        # Modalità sequenziale (default)
+        for entry in "${attack_plan[@]}"; do
+            IFS='|' read -r prio module args reason <<< "$entry"
+            section "  [$module] $reason"
+            log "Esecuzione: exa-dune $module $args"
+            modules_run+=("$module")
+            _run_module "$module" $args
 
-        # Fine fase brute force — messaggio se nulla trovato
-        if [[ $DRY_RUN -eq 0 ]]; then
-            local mod_findings
-            mod_findings=$(find "$OUTDIR_BASE" -path "*/${module}*/findings.txt" 2>/dev/null | head -1)
-            if [[ -n "$mod_findings" && -s "$mod_findings" ]]; then
-                local count; count=$(wc -l < "$mod_findings" 2>/dev/null || echo 0)
-                ok "[$module] $count finding(s) registrati"
-            else
-                log "[$module] Nessuna vulnerabilità rilevata — fase completata."
+            # Controlla se sono state trovate credenziali dopo ogni modulo
+            if [[ $DRY_RUN -eq 0 ]] && \
+               find "$OUTDIR_BASE" -name "hydra_*.txt" -newer "$OUTDIR_BASE/pipeline.log" \
+                    -exec grep -l "login:" {} \; 2>/dev/null | grep -q .; then
+                found_creds=1
+                ok "Credenziali trovate durante modulo '$module'!"
             fi
-        fi
-    done
+
+            # Fine fase — messaggio se nulla trovato
+            if [[ $DRY_RUN -eq 0 ]]; then
+                local mod_findings
+                mod_findings=$(find "$OUTDIR_BASE" -path "*/${module}*/findings.txt" 2>/dev/null | head -1)
+                if [[ -n "$mod_findings" && -s "$mod_findings" ]]; then
+                    local count; count=$(wc -l < "$mod_findings" 2>/dev/null || echo 0)
+                    ok "[$module] $count finding(s) registrati"
+                else
+                    log "[$module] Nessuna vulnerabilità rilevata — fase completata."
+                fi
+            fi
+        done
+    fi
+
+    # Check credenziali dopo tutto (in parallel mode controlliamo qui)
+    if [[ $DRY_RUN -eq 0 ]] && find "$OUTDIR_BASE" -name "hydra_*.txt" \
+         -exec grep -l "login:" {} \; 2>/dev/null | grep -q .; then
+        found_creds=1
+    fi
+    _timeline_event "FASE 3 END — found_creds=${found_creds}"
 
     # ── FASE 4: POST-EXPLOITATION ────────────────────────────
     if [[ $no_post -eq 0 && $found_creds -eq 1 ]]; then
         section "FASE 4 — POST-EXPLOITATION (credenziali trovate)"
+        _timeline_event "FASE 4 START — post-exploitation"
         # Leggi le credenziali trovate da hydra
         while IFS= read -r -d '' hfile; do
             local cred_user cred_pass cred_port
@@ -6104,18 +6161,26 @@ cmd_pipeline() {
         done < <(find "$OUTDIR_BASE" -name "hydra_*.txt" -print0 2>/dev/null)
     elif [[ $no_post -eq 0 && $found_creds -eq 0 && $DRY_RUN -eq 0 ]]; then
         log "Fase 4 POST-EXPLOITATION: nessuna credenziale confermata — step saltato."
+        _timeline_event "FASE 4 SKIP — nessuna credenziale"
     fi
 
     # ── FASE 5: REPORT PDF ───────────────────────────────────
     section "FASE 5 — GENERAZIONE REPORT PDF"
+    _timeline_event "FASE 5 START — generazione report"
     local report_flags="--html --pdf"
     [[ $DRY_RUN -eq 1 ]] && report_flags="$report_flags --dry-run"
     bash "$SCRIPT_PATH" report "$OUTDIR_BASE" $report_flags 2>&1 || true
+    _timeline_event "FASE 5 END — pipeline completata"
 
     echo ""
+    local total_findings; total_findings=$(find "$OUTDIR_BASE" -name 'findings.txt' -exec wc -l {} \; 2>/dev/null | awk '{s+=$1} END{print s+0}')
+    local total_creds; total_creds=$(find "$OUTDIR_BASE" -name "hydra_*.txt" -exec grep -c "login:" {} \; 2>/dev/null | awk '{s+=$1} END{print s+0}' || echo 0)
     ok "=== PIPELINE COMPLETATA === Output: $OUTDIR_BASE"
-    echo -e "  ${BOLD}Report:${NC} $OUTDIR_BASE/REPORT_*.pdf"
-    echo -e "  ${BOLD}Findings:${NC} $(find "$OUTDIR_BASE" -name 'findings.txt' -exec wc -l {} \; 2>/dev/null | awk '{s+=$1} END{print s+0}') totali"
+    echo -e "  ${BOLD}Report:${NC}     $OUTDIR_BASE/REPORT_*.pdf"
+    echo -e "  ${BOLD}Findings:${NC}   $total_findings totali"
+    echo -e "  ${BOLD}Credenziali:${NC} $total_creds trovate"
+    echo -e "  ${BOLD}Timeline:${NC}   $OUTDIR_BASE/timeline.txt"
+    [[ -f "$_timeline_file" ]] && { echo ""; echo "── Timeline ──"; cat "$_timeline_file"; }
 }
 
 # ============================================================
@@ -6273,11 +6338,16 @@ cmd_auto() {
             _auto_mod "creds_https" creds "$target" https
             ;;
         camera)
-            _auto_mod "web_80"  web   "$target" --port 80  --scheme http
-            _auto_mod "web_443" web   "$target" --port 443 --scheme https
-            _auto_mod "rtsp"    rtsp  "$target"
-            _auto_mod "ssl_443" ssl   "$target"
-            _auto_mod "creds"   creds "$target" http --port 80
+            _auto_mod "web_80"    web   "$target" --port 80  --scheme http
+            _auto_mod "web_443"   web   "$target" --port 443 --scheme https
+            _auto_mod "web_8080"  web   "$target" --port 8080 --scheme http
+            _auto_mod "rtsp"      rtsp  "$target"
+            _auto_mod "ssl_443"   ssl   "$target"
+            _auto_mod "onvif"     onvif "$target"
+            _auto_mod "js"        js    "$target" --port 80
+            _auto_mod "snmp"      snmp  "$target"
+            _auto_mod "creds_80"  creds "$target" http --port 80
+            _auto_mod "creds_443" creds "$target" https --port 443
             ;;
         router)
             _auto_mod "web_80"   web   "$target" --port 80   --scheme http
@@ -6665,6 +6735,85 @@ HTMLEOF
             echo "<p>Nessun file nmap trovato nella directory di output.</p>"
         fi
 
+        # 2b. UDP PORTS
+        local udp_file
+        udp_file=$(find "$outdir" -maxdepth 2 -name "nmap_udp.nmap" 2>/dev/null | head -1)
+        if [[ -n "$udp_file" ]] && grep -qE "^[0-9]+/udp.*open" "$udp_file" 2>/dev/null; then
+            echo "<h2>Porte UDP Aperte</h2>"
+            echo "<table><tr><th>Porta</th><th>Stato</th><th>Servizio</th><th>Info</th></tr>"
+            while IFS= read -r line; do
+                echo "$line" | grep -qE "^[0-9]+/udp.*(open|open|filtered)" || continue
+                local up us usvc uver
+                up=$(echo "$line" | awk '{print $1}')
+                us=$(echo "$line" | awk '{print $2}')
+                usvc=$(echo "$line" | awk '{print $3}')
+                uver=$(echo "$line" | awk '{for(i=4;i<=NF;i++) printf $i" "; print ""}' | sed 's/</\&lt;/g;s/>/\&gt;/g' | head -c 80)
+                local uclr="#e3b341"; [[ "$us" == "open" ]] && uclr="#56d364"
+                echo "<tr><td class='port-open'>${up%%/*}</td><td style='color:$uclr'>$us</td><td style='color:#79c0ff'>$usvc</td><td>$uver</td></tr>"
+            done < "$udp_file"
+            echo "</table>"
+        fi
+
+        # 2c. SSL/TLS ANALYSIS
+        local sslscan_f cert_f ssl_nmap_f
+        sslscan_f=$(find "$outdir" -name "sslscan.txt" 2>/dev/null | head -1)
+        cert_f=$(find "$outdir" -name "cert_summary.txt" 2>/dev/null | head -1)
+        ssl_nmap_f=$(find "$outdir" -name "ssl_nmap.txt" 2>/dev/null | head -1)
+        if [[ -n "$sslscan_f" || -n "$cert_f" ]]; then
+            echo "<h2>SSL/TLS Analysis</h2>"
+            if [[ -n "$cert_f" && -s "$cert_f" ]]; then
+                echo "<h3>Certificato</h3><pre>"
+                sed 's/</\&lt;/g;s/>/\&gt;/g' "$cert_f" | head -20
+                echo "</pre>"
+            fi
+            if [[ -n "$sslscan_f" && -s "$sslscan_f" ]]; then
+                echo "<h3>Protocolli e Cipher Suites</h3>"
+                echo "<table><tr><th>Protocollo</th><th>Stato</th></tr>"
+                grep -E "(SSL|TLS)v[0-9]" "$sslscan_f" 2>/dev/null | while IFS= read -r sline; do
+                    local proto stat pcolor
+                    proto=$(echo "$sline" | awk '{print $1}')
+                    stat=$(echo "$sline" | awk '{print $2}')
+                    pcolor="#56d364"; [[ "$stat" == "enabled" ]] && [[ "$proto" =~ SSL|TLSv1\.0|TLSv1\.1 ]] && pcolor="#ff7b72"
+                    echo "<tr><td style='font-family:monospace'>$proto</td><td style='color:$pcolor'>$stat</td></tr>"
+                done
+                echo "</table>"
+                echo "<h3>Cipher Suites Accettate</h3><pre>"
+                grep -E "^(Preferred|Accepted)" "$sslscan_f" 2>/dev/null | sed 's/</\&lt;/g;s/>/\&gt;/g' | head -20
+                echo "</pre>"
+                # Heartbleed check
+                local hb; hb=$(grep -i "heartbleed" "$sslscan_f" 2>/dev/null || true)
+                [[ -n "$hb" ]] && { echo "<div class='info-box'><strong>Heartbleed:</strong> $(echo "$hb" | sed 's/</\&lt;/g;s/>/\&gt;/g')</div>"; }
+            fi
+        fi
+
+        # 2d. ARP / HOST INFO
+        local arp_f; arp_f=$(find "$outdir" -name "arp.txt" 2>/dev/null | head -1)
+        if [[ -n "$arp_f" && -s "$arp_f" ]]; then
+            echo "<h2>ARP / Informazioni Host</h2><pre>"
+            sed 's/</\&lt;/g;s/>/\&gt;/g' "$arp_f" | head -10
+            echo "</pre>"
+        fi
+
+        # 2e. SEARCHSPLOIT
+        local sploit_f; sploit_f=$(find "$outdir" -name "searchsploit.txt" 2>/dev/null | head -1)
+        if [[ -n "$sploit_f" && -s "$sploit_f" ]]; then
+            echo "<h2>Searchsploit — Exploit Noti</h2>"
+            echo "<table><tr><th>Titolo Exploit</th><th>Path</th></tr>"
+            local ss_count=0
+            while IFS= read -r ssline; do
+                [[ "$ssline" =~ ^(-+|Exploit|$) ]] && continue
+                ((ss_count++)) || true; [[ $ss_count -gt 25 ]] && break
+                # Strip ANSI color codes
+                local ssclean; ssclean=$(echo "$ssline" | sed 's/\x1b\[[0-9;]*m//g')
+                local sstitle ssfile
+                sstitle=$(echo "$ssclean" | sed 's/ | .*//' | sed 's/^[[:space:]]*//' | sed 's/</\&lt;/g;s/>/\&gt;/g')
+                ssfile=$(echo "$ssclean" | sed 's/.*| //' | sed 's/^[[:space:]]*//' | sed 's/</\&lt;/g')
+                [[ -z "$sstitle" || -z "$ssfile" ]] && continue
+                echo "<tr><td>$sstitle</td><td><code>$ssfile</code></td></tr>"
+            done < "$sploit_f"
+            echo "</table>"
+        fi
+
         # Snapshot RTSP se presenti
         local snap_files
         snap_files=$(find "$outdir" -name "snapshot_*.jpg" 2>/dev/null | head -3)
@@ -6752,6 +6901,132 @@ HTMLEOF
             done < <(find "$outdir" -name "nuclei.txt" -print0 2>/dev/null)
         fi
 
+        # 4b. RTSP STREAMS
+        local rtsp_nmap_f; rtsp_nmap_f=$(find "$outdir" -name "nmap_rtsp.txt" 2>/dev/null | head -1)
+        local rtsp_streams_f; rtsp_streams_f=$(find "$outdir" -name "rtsp_streams.txt" 2>/dev/null | head -1)
+        if [[ -n "$rtsp_nmap_f" && -s "$rtsp_nmap_f" ]] || [[ -n "$rtsp_streams_f" && -s "$rtsp_streams_f" ]]; then
+            echo "<h1>4b. RTSP — Stream e Path Rilevati</h1>"
+            # Paths da nmap rtsp-url-brute
+            if [[ -n "$rtsp_nmap_f" ]]; then
+                local rtsp_urls; rtsp_urls=$(grep -oP 'rtsp://[^\s<>"]+' "$rtsp_nmap_f" 2>/dev/null || true)
+                if [[ -n "$rtsp_urls" ]]; then
+                    echo "<table><tr><th>URL RTSP</th><th>Note</th></tr>"
+                    while IFS= read -r rurl; do
+                        [[ -z "$rurl" ]] && continue
+                        local rnote="path rilevato da nmap rtsp-url-brute"
+                        echo "$rurl" | grep -qi "reolink\|h264\|stream_1\|firststream" && rnote="<span style='color:#56d364'>path primario — probabile stream attivo</span>"
+                        echo "<tr><td><code>$(echo "$rurl" | sed 's/</\&lt;/g;s/>/\&gt;/g')</code></td><td>$rnote</td></tr>"
+                    done <<< "$rtsp_urls"
+                    echo "</table>"
+                fi
+            fi
+            # Metodi RTSP
+            local rtsp_methods; rtsp_methods=$(grep -A5 "rtsp-methods" "$rtsp_nmap_f" 2>/dev/null | grep "Supported" || true)
+            [[ -n "$rtsp_methods" ]] && echo "<p><strong>Metodi RTSP supportati:</strong> $(echo "$rtsp_methods" | sed 's/</\&lt;/g;s/>/\&gt;/g')</p>"
+            # Streams trovati
+            if [[ -n "$rtsp_streams_f" && -s "$rtsp_streams_f" ]]; then
+                echo "<h3>Stream Verificati</h3><pre>"
+                sed 's/</\&lt;/g;s/>/\&gt;/g' "$rtsp_streams_f" | head -30
+                echo "</pre>"
+            fi
+            [[ -n "$(find "$outdir" -name "snapshot_*.jpg" 2>/dev/null | head -1)" ]] && {
+                echo "<h3>Snapshot RTSP</h3>"
+                while IFS= read -r snap; do
+                    local snap_b64; snap_b64=$(base64 -w0 "$snap" 2>/dev/null || true)
+                    [[ -n "$snap_b64" ]] && echo "<img src='data:image/jpeg;base64,${snap_b64}' style='max-width:100%;border:1px solid #30363d;border-radius:4px;margin:6px 0;max-height:240px'>"
+                done < <(find "$outdir" -name "snapshot_*.jpg" 2>/dev/null | head -3)
+            }
+        fi
+
+        # 4c. SIP EXTENSIONS E VoIP
+        local sip_ext_f; sip_ext_f=$(find "$outdir" -name "sip_extensions.txt" 2>/dev/null | head -1)
+        local sip_crack_f; sip_crack_f=$(find "$outdir" -name "sip_crack*.txt" 2>/dev/null | head -1)
+        local svmap_f; svmap_f=$(find "$outdir" -name "svmap.txt" 2>/dev/null | head -1)
+        if [[ -n "$sip_ext_f" || -n "$svmap_f" ]]; then
+            echo "<h1>4c. SIP / VoIP</h1>"
+            if [[ -n "$svmap_f" && -s "$svmap_f" ]]; then
+                echo "<h2>SIP Server Rilevati</h2><pre>"
+                sed 's/</\&lt;/g;s/>/\&gt;/g' "$svmap_f" | head -20
+                echo "</pre>"
+            fi
+            if [[ -n "$sip_ext_f" && -s "$sip_ext_f" ]]; then
+                echo "<h2>Extension SIP Trovate</h2>"
+                echo "<table><tr><th>Extension</th><th>Stato</th></tr>"
+                local sip_count=0
+                while IFS= read -r ext; do
+                    [[ -z "$ext" ]] && continue
+                    ((sip_count++)) || true; [[ $sip_count -gt 50 ]] && break
+                    echo "<tr><td><code>$ext</code></td><td><span style='color:#e3b341'>trovata</span></td></tr>"
+                done < "$sip_ext_f"
+                echo "</table>"
+            else
+                echo "<p style='color:#8b949e'>Nessuna extension SIP trovata.</p>"
+            fi
+            if [[ -n "$sip_crack_f" && -s "$sip_crack_f" ]]; then
+                echo "<h2>SIP PIN Cracking</h2><pre>"
+                sed 's/</\&lt;/g;s/>/\&gt;/g' "$sip_crack_f" | head -20
+                echo "</pre>"
+            fi
+        fi
+
+        # 4d. JavaScript Analysis
+        local js_secrets_f; js_secrets_f=$(find "$outdir" -name "js_debug_comments.txt" 2>/dev/null | head -1)
+        local js_endpoints_f; js_endpoints_f=$(find "$outdir" -name "js_endpoints.txt" 2>/dev/null | head -1)
+        local js_versions_f; js_versions_f=$(find "$outdir" -name "js_versions.txt" 2>/dev/null | head -1)
+        local js_emails_f; js_emails_f=$(find "$outdir" -name "js_emails.txt" 2>/dev/null | head -1)
+        if [[ -n "$js_secrets_f" || -n "$js_endpoints_f" ]]; then
+            echo "<h1>4d. Analisi JavaScript</h1>"
+            if [[ -n "$js_endpoints_f" && -s "$js_endpoints_f" ]]; then
+                echo "<h2>Endpoint / API Rilevati</h2>"
+                echo "<table><tr><th>Endpoint</th></tr>"
+                local ep_count=0
+                while IFS= read -r ep; do
+                    [[ -z "$ep" ]] && continue
+                    ((ep_count++)) || true; [[ $ep_count -gt 30 ]] && break
+                    echo "<tr><td><code>$(echo "$ep" | sed 's/</\&lt;/g;s/>/\&gt;/g')</code></td></tr>"
+                done < "$js_endpoints_f"
+                echo "</table>"
+            fi
+            if [[ -n "$js_secrets_f" && -s "$js_secrets_f" ]]; then
+                echo "<h2>Segreti / Token Hardcoded</h2><pre>"
+                sed 's/</\&lt;/g;s/>/\&gt;/g' "$js_secrets_f" | head -30
+                echo "</pre>"
+            fi
+            if [[ -n "$js_versions_f" && -s "$js_versions_f" ]]; then
+                echo "<h2>Librerie JS Rilevate</h2><pre>"
+                sed 's/</\&lt;/g;s/>/\&gt;/g' "$js_versions_f" | head -20
+                echo "</pre>"
+            fi
+            if [[ -n "$js_emails_f" && -s "$js_emails_f" ]]; then
+                echo "<h2>Email Trovate</h2><pre>"
+                sed 's/</\&lt;/g;s/>/\&gt;/g' "$js_emails_f" | head -10
+                echo "</pre>"
+            fi
+        fi
+
+        # 4e. SSH / FTP / Telnet details
+        local ssh_ver_f; ssh_ver_f=$(find "$outdir" -name "ssh_version.txt" 2>/dev/null | head -1)
+        local ssh_timing_f; ssh_timing_f=$(find "$outdir" -name "ssh_user_timing.txt" 2>/dev/null | head -1)
+        local ftp_nmap_f; ftp_nmap_f=$(find "$outdir" -name "nmap_ftp.txt" 2>/dev/null | head -1)
+        if [[ -n "$ssh_ver_f" || -n "$ftp_nmap_f" ]]; then
+            echo "<h1>4e. Servizi di Accesso Remoto</h1>"
+            if [[ -n "$ssh_ver_f" && -s "$ssh_ver_f" ]]; then
+                echo "<h2>SSH</h2><pre>"
+                sed 's/</\&lt;/g;s/>/\&gt;/g' "$ssh_ver_f" | head -15
+                echo "</pre>"
+                if [[ -n "$ssh_timing_f" && -s "$ssh_timing_f" ]]; then
+                    echo "<h3>User Enumeration (Timing)</h3><pre>"
+                    sed 's/</\&lt;/g;s/>/\&gt;/g' "$ssh_timing_f" | head -20
+                    echo "</pre>"
+                fi
+            fi
+            if [[ -n "$ftp_nmap_f" && -s "$ftp_nmap_f" ]]; then
+                echo "<h2>FTP</h2><pre>"
+                sed 's/</\&lt;/g;s/>/\&gt;/g' "$ftp_nmap_f" | head -20
+                echo "</pre>"
+            fi
+        fi
+
         # 5. CREDENZIALI TROVATE
         echo "<h1>5. Credenziali Trovate</h1>"
         local has_creds=0
@@ -6793,29 +7068,78 @@ RECS
         [[ -n "$has_rtsp" ]] && cat << 'RECS'
 <div class='rec'><strong>📹 RTSP</strong> — Stream RTSP rilevati. Verificare che l'accesso richieda autenticazione Digest. Limitare accesso RTSP a IP autorizzati tramite firewall.</div>
 RECS
+        # Raccomandazione ONVIF se presente
+        [[ -n "$(find "$outdir" -name "onvif_creds.txt" -not -empty 2>/dev/null)" ]] && cat << 'RECS'
+<div class='rec'><strong>📷 ONVIF</strong> — Credenziali ONVIF trovate. Cambiare immediatamente la password, abilitare HTTPS e limitare l'accesso al servizio ONVIF/gSOAP via firewall.</div>
+RECS
+        # Raccomandazione SNMP se community trovata
+        [[ -n "$(find "$outdir" -name "snmp_found.txt" -not -empty 2>/dev/null)" ]] && cat << 'RECS'
+<div class='rec'><strong>📡 SNMP</strong> — Community SNMP trovata. Aggiornare a SNMPv3 con autenticazione e cifratura, o disabilitare SNMP se non necessario.</div>
+RECS
+        # Raccomandazione TLS debole
+        if find "$outdir" -name "sslscan.txt" 2>/dev/null | xargs grep -l "TLSv1\.0.*enabled\|SSLv[23].*enabled" 2>/dev/null | grep -q .; then
+            cat << 'RECS'
+<div class='rec'><strong>🔐 TLS</strong> — Protocolli TLS obsoleti (TLSv1.0/SSLv2/SSLv3) rilevati. Disabilitare i protocolli vulnerabili e configurare solo TLSv1.2+.</div>
+RECS
+        fi
         cat << 'RECS'
-<div class='info-box'><strong>✅ Buone pratiche generali:</strong> Aggiornare regolarmente il firmware, utilizzare password complesse e uniche per ogni dispositivo, segmentare la rete IoT in VLAN dedicata, monitorare i log di accesso.</div>
+<div class='info-box'><strong>✅ Buone pratiche generali:</strong> Aggiornare regolarmente il firmware, utilizzare password complesse e uniche per ogni dispositivo, segmentare la rete IoT in VLAN dedicata, monitorare i log di accesso, disabilitare tutti i servizi non necessari.</div>
 RECS
 
         # 7. MODULI ESEGUITI
         echo "<h1>7. Moduli Eseguiti</h1>"
-        echo "<table><tr><th>Modulo</th><th>File Output</th><th>Stato</th></tr>"
+        echo "<table><tr><th>Modulo</th><th>File Output</th><th>Findings</th><th>Stato</th></tr>"
         find "$outdir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | while IFS= read -r d; do
             local mod; mod=$(basename "$d")
             local fcount; fcount=$(find "$d" -type f 2>/dev/null | wc -l)
+            local fnd; fnd=$(find "$d" -name "findings.txt" -exec wc -l {} \; 2>/dev/null | awk '{print $1+0}')
             local status="<span style='color:#56d364'>✓ Completato</span>"
             [[ $fcount -eq 0 ]] && status="<span style='color:#8b949e'>— Vuoto</span>"
-            echo "<tr><td><strong>$mod</strong></td><td>$fcount file</td><td>$status</td></tr>"
+            local fnd_disp="—"; [[ -n "$fnd" && "$fnd" -gt 0 ]] && fnd_disp="<span style='color:#e3b341'>$fnd</span>"
+            echo "<tr><td><strong>$mod</strong></td><td>$fcount file</td><td>$fnd_disp</td><td>$status</td></tr>"
         done
         echo "</table>"
 
-        # 8. APPENDICE — LOG
-        echo "<h1 class='page-break'>8. Appendice — Log Completo</h1>"
-        echo "<pre>"
-        if [[ -f "$outdir/exa-dune.log" ]]; then
-            sed 's/</\&lt;/g;s/>/\&gt;/g' "$outdir/exa-dune.log" | head -300
+        # 8. TIMELINE
+        echo "<h1>8. Timeline delle Fasi</h1>"
+        local timeline_f; timeline_f=$(find "$outdir" -name "timeline.txt" 2>/dev/null | head -1)
+        if [[ -n "$timeline_f" && -s "$timeline_f" ]]; then
+            echo "<table><tr><th style='width:90px'>Orario</th><th>Evento</th></tr>"
+            while IFS= read -r tline; do
+                [[ -z "$tline" ]] && continue
+                local ttime tmsg
+                ttime=$(echo "$tline" | grep -oP '^\[[0-9:]+\]' | tr -d '[]')
+                tmsg=$(echo "$tline" | sed 's/^\[[0-9:]*\] //' | sed 's/</\&lt;/g;s/>/\&gt;/g')
+                local tcolor="#c9d1d9"
+                echo "$tmsg" | grep -qi "START\|PIPELINE START" && tcolor="#56d364"
+                echo "$tmsg" | grep -qi "END\|COMPLETAT" && tcolor="#58a6ff"
+                echo "$tmsg" | grep -qi "SKIP\|SALTA" && tcolor="#8b949e"
+                echo "<tr><td style='font-family:monospace;color:#8b949e'>$ttime</td><td style='color:$tcolor'>$tmsg</td></tr>"
+            done < "$timeline_f"
+            echo "</table>"
         else
-            echo "(nessun log disponibile)"
+            # Timeline sintetica dai moduli (senza file timeline)
+            echo "<table><tr><th>Modulo</th><th>File Output</th><th>Findings</th></tr>"
+            find "$outdir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | while IFS= read -r d; do
+                local mod; mod=$(basename "$d")
+                local fcount; fcount=$(find "$d" -type f 2>/dev/null | wc -l)
+                local fnd; fnd=$(find "$d" -name "findings.txt" -exec wc -l {} \; 2>/dev/null | awk '{print $1}' || echo 0)
+                local tmod_color="#56d364"; [[ $fcount -eq 0 ]] && tmod_color="#8b949e"
+                echo "<tr><td style='color:$tmod_color'><strong>$mod</strong></td><td>$fcount file</td><td>${fnd:-0}</td></tr>"
+            done
+            echo "</table>"
+        fi
+
+        # 9. APPENDICE — LOG
+        echo "<h1 class='page-break'>9. Appendice — Log Completo</h1>"
+        echo "<pre>"
+        # Cerca pipeline.log, master.log o exa-dune.log
+        local log_f
+        log_f=$(find "$outdir" -maxdepth 1 \( -name "pipeline.log" -o -name "master.log" -o -name "exa-dune.log" \) 2>/dev/null | head -1)
+        if [[ -n "$log_f" && -s "$log_f" ]]; then
+            sed 's/</\&lt;/g;s/>/\&gt;/g' "$log_f" | head -300
+        else
+            echo "(nessun log disponibile — eseguire tramite pipeline per log completo)"
         fi
         echo "</pre>"
 
