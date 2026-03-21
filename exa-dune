@@ -1302,14 +1302,16 @@ cmd_web() {
     if tool_ok nuclei; then
         # nuclei: veloce, template-based, modern (preferito a nikto)
         local nuclei_target="${scheme}://${target}:${port}"
-        local nuclei_opts="-u $nuclei_target -severity low,medium,high,critical -silent -o $OUTDIR/nuclei.txt"
-        [[ "$scheme" == "https" ]] && nuclei_opts="$nuclei_opts -tlsi"
+        # -duc: no update check  -nh: no banner  -no-verify: ignora SSL self-signed
+        local nuclei_opts="-u $nuclei_target -severity low,medium,high,critical -duc -nh -no-verify -o $OUTDIR/nuclei.txt"
         run_cmd "nuclei" "nuclei $nuclei_opts 2>&1"
-        if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/nuclei.txt" ]]; then
+        if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/nuclei.txt" && -s "$OUTDIR/nuclei.txt" ]]; then
             grep -iE "\[critical\]|\[high\]" "$OUTDIR/nuclei.txt" 2>/dev/null | \
                 while IFS= read -r line; do found HIGH "Nuclei — $line"; done || true
             grep -iE "\[medium\]|\[low\]" "$OUTDIR/nuclei.txt" 2>/dev/null | \
                 while IFS= read -r line; do found MEDIUM "Nuclei — $line"; done || true
+            local nc; nc=$(wc -l < "$OUTDIR/nuclei.txt" 2>/dev/null || echo 0)
+            log "  Nuclei: $nc finding(s) → $OUTDIR/nuclei.txt"
         fi
     elif require_tool nikto; then
         local nikto_opts="-h $target -p $port"
