@@ -96,12 +96,13 @@ _FALLBACK_SNMP=""
 _FALLBACK_LFI=""
 _FALLBACK_DNS=""
 _FALLBACK_IOT_CREDS=""
+_FALLBACK_RTSP=""
 _ACTIVE_TMUX_SESSION=""
 
 _cleanup_tmpfiles() {
     rm -f "$_FALLBACK_USERS" "$_FALLBACK_PASS" "$_FALLBACK_WEB" \
           "$_FALLBACK_SNMP" "$_FALLBACK_LFI" "$_FALLBACK_DNS" \
-          "$_FALLBACK_IOT_CREDS" 2>/dev/null || true
+          "$_FALLBACK_IOT_CREDS" "$_FALLBACK_RTSP" 2>/dev/null || true
 }
 _cleanup_sigint()   {
     warn "Interrotto (SIGINT). Cleanup..."
@@ -717,7 +718,11 @@ _wl_rtsp_paths() {
         [[ -f "$f" && -s "$f" ]] && { echo "$f"; return; }
     done
     # Fallback embedded: path più comuni per brand principali
-    local tmp; tmp=$(mktemp)
+    if [[ -n "$_FALLBACK_RTSP" && -f "$_FALLBACK_RTSP" ]]; then
+        echo "$_FALLBACK_RTSP"; return
+    fi
+    _FALLBACK_RTSP=$(mktemp)
+    local tmp="$_FALLBACK_RTSP"
     cat > "$tmp" << 'EMBEDDED_RTSP'
 /
 /stream
@@ -797,10 +802,15 @@ check_root() { [[ $EUID -eq 0 ]] || { err "Richiede root (sudo)."; exit 1; }; }
 
 validate_target() {
     local t="$1"
-    # Accetta IP o hostname
+    # IP singolo
     [[ "$t" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && return 0
-    [[ "$t" =~ ^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z]{2,})+$ ]] && return 0
-    err "Target non valido: $t (usa IP o hostname)"
+    # CIDR (192.168.1.0/24 o 10.0.0.0/8)
+    [[ "$t" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[1-2][0-9]|3[0-2])$ ]] && return 0
+    # Hostname (inclusi sottodomini)
+    [[ "$t" =~ ^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9\-]+)*(\.[a-zA-Z]{2,})+$ ]] && return 0
+    # Hostname semplice senza TLD (es. "router", "camera1")
+    [[ "$t" =~ ^[a-zA-Z0-9][a-zA-Z0-9\-]{0,62}$ ]] && return 0
+    err "Target non valido: $t (usa IP, CIDR, o hostname)"
     exit 1
 }
 
@@ -808,6 +818,13 @@ validate_port() {
     local p="$1"
     [[ "$p" =~ ^[0-9]+$ ]] && [[ $p -ge 1 && $p -le 65535 ]] && return 0
     err "Porta non valida: $p (range 1-65535)"
+    exit 1
+}
+
+validate_timeout() {
+    local t="$1"
+    [[ "$t" =~ ^[0-9]+$ ]] && [[ $t -ge 1 && $t -le 1440 ]] && return 0
+    err "Timeout non valido: $t (usa un numero intero di minuti, max 1440)"
     exit 1
 }
 
@@ -822,7 +839,7 @@ setup_outdir() {
         OUTDIR="${OUTDIR_BASE}"
     fi
     if [[ "$DRY_RUN" -eq 0 ]]; then
-        mkdir -p "$OUTDIR" "$OUTDIR_BASE"
+        mkdir -p "$OUTDIR" "$OUTDIR_BASE" || { err "Impossibile creare directory output: $OUTDIR_BASE (permessi insufficienti?)"; exit 1; }
         # Log sempre nella root di sessione, non nella subdir del modulo
         _log_file="$OUTDIR_BASE/exa-dune.log"
         [[ -n "$sub" ]] && echo "--- Modulo: $sub START $(date) ---" >> "$_log_file" || true
@@ -839,9 +856,9 @@ run_cmd() {
         return
     fi
     if [[ "${TIMEOUT:-0}" -gt 0 ]]; then
-        bash -c "timeout ${TIMEOUT}m bash -c $(printf '%q' "$cmd")"
+        timeout "${TIMEOUT}m" bash -c "$cmd" || true
     else
-        bash -c "$cmd"
+        bash -c "$cmd" || true
     fi
 }
 
@@ -1131,7 +1148,7 @@ cmd_scan() {
             --udp-top)   udp_top="$2";     shift 2 ;;
             --no-full)   do_full=0;        shift ;;
             --vuln)      do_vuln=1;        shift ;;
-            --timeout)   TIMEOUT="$2";     shift 2 ;;
+            --timeout)   TIMEOUT="$2"; validate_timeout "$2"; shift 2 ;;
             --output)    OUTDIR_BASE="$2"; shift 2 ;;
             --dry-run)   DRY_RUN=1;        shift ;;
             --help|-h)   usage_scan; exit 0 ;;
@@ -1281,8 +1298,20 @@ cmd_web() {
              | openssl x509 -text -noout 2>/dev/null | tee "$OUTDIR"/cert.txt"
     fi
 
-    section "Nikto"
-    if require_tool nikto; then
+    section "Web Vulnerability Scanner"
+    if tool_ok nuclei; then
+        # nuclei: veloce, template-based, modern (preferito a nikto)
+        local nuclei_target="${scheme}://${target}:${port}"
+        local nuclei_opts="-u $nuclei_target -severity low,medium,high,critical -silent -o $OUTDIR/nuclei.txt"
+        [[ "$scheme" == "https" ]] && nuclei_opts="$nuclei_opts -tlsi"
+        run_cmd "nuclei" "nuclei $nuclei_opts 2>&1"
+        if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/nuclei.txt" ]]; then
+            grep -iE "\[critical\]|\[high\]" "$OUTDIR/nuclei.txt" 2>/dev/null | \
+                while IFS= read -r line; do found HIGH "Nuclei — $line"; done || true
+            grep -iE "\[medium\]|\[low\]" "$OUTDIR/nuclei.txt" 2>/dev/null | \
+                while IFS= read -r line; do found MEDIUM "Nuclei — $line"; done || true
+        fi
+    elif require_tool nikto; then
         local nikto_opts="-h $target -p $port"
         [[ "$scheme" == "https" ]] && nikto_opts="$nikto_opts -ssl"
         run_cmd "nikto" "nikto $nikto_opts -output $OUTDIR/nikto.txt 2>&1"
@@ -2068,7 +2097,7 @@ cmd_snmp() {
                 log "Nessuna community trovata — SNMP filtrato o community non standard"
             fi
         else
-            echo -e "${CYAN}[DRY-RUN]${NC} SNMP community brute force su $target ($(wc -l < "$cfile") stringhe)"
+            echo -e "${CYAN}[DRY-RUN]${NC} SNMP community brute force su $target ($(wc -l < "$cfile" 2>/dev/null || echo 0) stringhe)"
         fi
     fi
 
@@ -2935,7 +2964,7 @@ EOF
                 fi
             done < "$_tftp_files"
         else
-            echo -e "${CYAN}[DRY-RUN]${NC} TFTP probe di $(wc -l < "$_tftp_files") file su $target:$port"
+            echo -e "${CYAN}[DRY-RUN]${NC} TFTP probe di $(wc -l < "$_tftp_files" 2>/dev/null || echo 0) file su $target:$port"
         fi
     else
         warn "atftp non trovato — usa nmap results (apt install atftp)"
@@ -3293,7 +3322,7 @@ cmd_js() {
 
     if [[ $DRY_RUN -eq 0 ]]; then
         [[ -f "$OUTDIR/js_endpoints.txt" ]] && \
-            log "Endpoint trovati: $(wc -l < "$OUTDIR/js_endpoints.txt")"
+            log "Endpoint trovati: $(wc -l < "$OUTDIR/js_endpoints.txt" 2>/dev/null || echo 0)"
         [[ -f "$OUTDIR/js_emails.txt" ]] && \
             log "Email trovate: $(sort -u "$OUTDIR/js_emails.txt" | wc -l)"
     fi
@@ -5784,7 +5813,7 @@ cmd_fw() {
                 printf "  ${RED}%-10s${NC} ${YELLOW}%s${NC}\n" "${port// /}" "${tech// /}"
             done < "$bypass_log"
             echo "  ──────────────────────────────────────────────────────────"
-            local total_bypass; total_bypass=$(wc -l < "$bypass_log")
+            local total_bypass; total_bypass=$(wc -l < "$bypass_log" 2>/dev/null || echo 0)
             echo -e "  ${BOLD}Totale bypass confermati: ${RED}${total_bypass}${NC}"
             echo ""
 
@@ -6014,7 +6043,7 @@ cmd_pipeline() {
             local mod_findings
             mod_findings=$(find "$OUTDIR_BASE" -path "*/${module}*/findings.txt" 2>/dev/null | head -1)
             if [[ -n "$mod_findings" && -s "$mod_findings" ]]; then
-                local count; count=$(wc -l < "$mod_findings")
+                local count; count=$(wc -l < "$mod_findings" 2>/dev/null || echo 0)
                 ok "[$module] $count finding(s) registrati"
             else
                 log "[$module] Nessuna vulnerabilità rilevata — fase completata."
@@ -6710,6 +6739,7 @@ cmd_install() {
         "searchsploit:exploitdb"
         "testssl:testssl.sh"
         "svmap:sipvicious"
+        "nuclei:nuclei"
     )
 
     # ── Pacchetti pip3 (fallback se apt non disponibile) ──────────────────────
