@@ -925,6 +925,32 @@ _ensure_media_tools() {
 
 # ── Download wordlists aggiuntive da GitHub ───────────────────────────────────
 EXA_WL_DIR="/usr/share/exa-dune/wordlists"
+EXA_REPORTS_DIR="/home/kali/Desktop/EXA-DUNE-Reports"
+
+_init_reports_dir() {
+    # Crea la cartella Desktop per i report se non esiste
+    if [[ ! -d "$EXA_REPORTS_DIR" ]]; then
+        mkdir -p "$EXA_REPORTS_DIR" 2>/dev/null && \
+            ok "Cartella report Desktop creata: $EXA_REPORTS_DIR" || \
+            warn "Impossibile creare $EXA_REPORTS_DIR"
+    fi
+    # Crea anche README nella cartella
+    local readme="$EXA_REPORTS_DIR/README.txt"
+    if [[ ! -f "$readme" ]]; then
+        cat > "$readme" <<'RDME'
+EXA-DUNE Reports
+================
+Questa cartella contiene tutti i report PDF generati da exa-dune.
+Ogni report è nominato: REPORT_<target>_<data>.pdf
+
+Per generare un report:
+  exa-dune report <output-dir> --pdf
+  exa-dune pipeline <target> --auto
+
+I file originali sono in: /root/pentest/exa-dune-<target>_<timestamp>/
+RDME
+    fi
+}
 
 _wl_path_for() {
     # _wl_path_for <nome_file> — ritorna path in EXA_WL_DIR se esiste
@@ -6491,61 +6517,316 @@ cmd_report() {
 
     if [[ $do_html -eq 1 ]]; then
         local html_file="${report_file%.txt}.html"
-        _sev_color() {
-            case "$1" in
-                CRITICAL) echo "#b71c1c" ;;
-                HIGH)     echo "#e53935" ;;
-                MEDIUM)   echo "#f57c00" ;;
-                LOW)      echo "#0288d1" ;;
-                *)        echo "#388e3c" ;;
-            esac
-        }
+
+        # Conta findings per severity
+        local n_critical=0 n_high=0 n_medium=0 n_low=0 n_info=0
+        while IFS= read -r -d '' ffile; do
+            while IFS= read -r line; do
+                [[ -z "$line" ]] && continue
+                # Filtra righe rumore nmap/raw (iniziano con |, #, spazio+|)
+                echo "$line" | grep -qP '^\s*[\|#]' && continue
+                case "$line" in
+                    \[CRITICAL\]*) ((n_critical++)) || true ;;
+                    \[HIGH\]*)     ((n_high++))     || true ;;
+                    \[MEDIUM\]*)   ((n_medium++))   || true ;;
+                    \[LOW\]*)      ((n_low++))      || true ;;
+                    *)             ((n_info++))     || true ;;
+                esac
+            done < "$ffile"
+        done < <(find "$outdir" -name "findings.txt" -print0 2>/dev/null | sort -z)
+        local n_total=$(( n_critical + n_high + n_medium + n_low + n_info ))
+        local max_n=$(( n_total > 0 ? n_total : 1 ))
+
+        # Porte aperte da nmap
+        local nmap_file
+        nmap_file=$(find "$outdir" -maxdepth 2 \( -name "nmap_fast.nmap" -o -name "nmap_full.nmap" \) 2>/dev/null | head -1)
+
         {
-            cat <<'HTML'
+        cat << 'HTMLEOF'
 <!DOCTYPE html>
 <html lang="it">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>EXA-DUNE Report</title>
 <style>
-  body{font-family:monospace;background:#121212;color:#e0e0e0;margin:2em}
-  h1{color:#00bcd4} h2{color:#80cbc4;border-bottom:1px solid #333;padding-bottom:4px}
-  table{border-collapse:collapse;width:100%}
-  td,th{padding:6px 10px;border:1px solid #333;text-align:left}
-  th{background:#1e1e1e;color:#80cbc4}
-  .CRITICAL{background:#b71c1c;color:#fff;font-weight:bold;border-radius:3px;padding:2px 6px}
-  .HIGH    {color:#ef5350;font-weight:bold}
-  .MEDIUM  {color:#ffa726}
-  .LOW     {color:#29b6f6}
-  .INFO    {color:#66bb6a}
-  pre{background:#1e1e1e;padding:1em;overflow-x:auto;white-space:pre-wrap}
-  .meta{color:#757575;font-size:0.9em}
+@page{size:A4;margin:18mm 14mm}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',Arial,sans-serif;background:#0d1117;color:#c9d1d9;font-size:9.5pt;line-height:1.55}
+a{color:#58a6ff}
+.cover{background:linear-gradient(160deg,#0d1117 0%,#161b22 60%,#0d1117 100%);min-height:90vh;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;border-bottom:3px solid #58a6ff;page-break-after:always;padding:40px 20px}
+.cover-logo{font-size:3.2em;font-weight:900;color:#58a6ff;letter-spacing:8px;margin-bottom:6px}
+.cover-tool{font-size:.95em;color:#8b949e;letter-spacing:3px;margin-bottom:36px}
+.cover-divider{width:100px;height:2px;background:linear-gradient(90deg,transparent,#58a6ff,transparent);margin:0 auto 28px}
+.cover-type{font-size:.78em;color:#8b949e;letter-spacing:4px;text-transform:uppercase;margin-bottom:10px}
+.cover-target{font-size:2em;font-weight:700;color:#f0f6ff;margin:8px 0 22px}
+.cover-meta{color:#8b949e;font-size:.88em;margin:4px 0}
+.confidential{background:#b91c1c;color:#fff;padding:7px 24px;border-radius:4px;font-weight:700;font-size:.8em;letter-spacing:4px;margin-top:32px;display:inline-block}
+h1{color:#58a6ff;font-size:1.35em;margin:28px 0 10px;border-bottom:2px solid #21262d;padding-bottom:7px;page-break-after:avoid}
+h2{color:#79c0ff;font-size:1.05em;margin:18px 0 7px;page-break-after:avoid}
+h3{color:#56d364;font-size:.95em;margin:13px 0 5px}
+p{margin:6px 0}
+.page-break{page-break-before:always}
+.exec-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:14px 0}
+.stat-box{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:14px 10px;text-align:center}
+.stat-num{font-size:2.2em;font-weight:900;line-height:1}
+.stat-lbl{font-size:.75em;color:#8b949e;margin-top:5px;letter-spacing:1px}
+.sc .stat-num{color:#ff7b72}
+.sh .stat-num{color:#f97316}
+.sm .stat-num{color:#e3b341}
+.sl .stat-num{color:#58a6ff}
+.bar-row{display:flex;align-items:center;margin:5px 0;font-size:.83em}
+.bar-lbl{width:75px;color:#8b949e}
+.bar-out{flex:1;background:#21262d;border-radius:3px;height:13px;overflow:hidden}
+.bar-in{height:13px;border-radius:3px;min-width:2px}
+.bar-c{background:#ff7b72}.bar-h{background:#f97316}.bar-m{background:#e3b341}.bar-l{background:#58a6ff}.bar-i{background:#56d364}
+.bar-cnt{width:35px;text-align:right;font-weight:700;color:#c9d1d9}
+table{width:100%;border-collapse:collapse;margin:10px 0;font-size:.85em}
+th{background:#161b22;color:#58a6ff;padding:7px 9px;text-align:left;border-bottom:2px solid #30363d;font-size:.82em;letter-spacing:.5px}
+td{padding:6px 9px;border-bottom:1px solid #21262d;vertical-align:top}
+tr:nth-child(even) td{background:#0d1117}
+.sev{display:inline-block;padding:2px 7px;border-radius:3px;font-weight:700;font-size:.78em;letter-spacing:.5px}
+.sev-CRITICAL{background:#7f1d1d;color:#fca5a5;border:1px solid #b91c1c}
+.sev-HIGH{background:#431407;color:#fdba74;border:1px solid #c2410c}
+.sev-MEDIUM{background:#422006;color:#fde68a;border:1px solid #d97706}
+.sev-LOW{background:#0c1a3d;color:#93c5fd;border:1px solid #2563eb}
+.sev-INFO{background:#14532d;color:#86efac;border:1px solid #16a34a}
+.port-open{color:#56d364;font-weight:700}
+pre{background:#161b22;border:1px solid #30363d;border-radius:4px;padding:11px;white-space:pre-wrap;word-break:break-all;font-family:monospace;font-size:.78em;margin:8px 0;max-height:300px;overflow-y:auto}
+.rec{background:#0c1a3d;border-left:4px solid #58a6ff;padding:9px 13px;border-radius:0 4px 4px 0;margin:8px 0;font-size:.85em}
+.info-box{background:#14532d22;border-left:4px solid #56d364;padding:9px 13px;border-radius:0 4px 4px 0;margin:8px 0;font-size:.85em}
+.footer{margin-top:24px;padding-top:10px;border-top:1px solid #21262d;color:#8b949e;font-size:.75em;display:flex;justify-content:space-between}
+.cvss{font-family:monospace;font-weight:700;font-size:.85em}
+.tag{display:inline-block;background:#21262d;color:#8b949e;padding:1px 6px;border-radius:10px;font-size:.75em;margin:1px}
 </style>
 </head>
 <body>
-HTML
-            echo "<h1>EXA-DUNE — Report di Assessment</h1>"
-            echo "<p class='meta'>Target: <b>$target</b> | Data: $(date) | Dir: $outdir</p>"
+HTMLEOF
 
-            echo "<h2>Findings</h2><table><tr><th>Severity</th><th>Modulo</th><th>Descrizione</th></tr>"
-            while IFS= read -r -d '' ffile; do
-                local module; module=$(basename "$(dirname "$ffile")")
-                [[ "$module" == "$(basename "$outdir")" ]] && module="root"
-                while IFS= read -r line; do
-                    [[ -z "$line" ]] && continue
-                    local sev; sev=$(echo "$line" | grep -oP '^\[([A-Z]+)\]' | tr -d '[]' || echo "INFO")
-                    local msg; msg=$(echo "$line" | sed 's/^\[[A-Z]*\] //' | sed 's/</\&lt;/g;s/>/\&gt;/g')
-                    echo "<tr><td><span class='$sev'>$sev</span></td><td>$module</td><td>$msg</td></tr>"
-                done < "$ffile"
-            done < <(find "$outdir" -name "findings.txt" -print0 2>/dev/null | sort -z)
+        # COVER PAGE
+        echo "<div class='cover'>"
+        echo "  <div class='cover-logo'>EXA-DUNE</div>"
+        echo "  <div class='cover-tool'>IoT &amp; VoIP Penetration Testing Framework v${VERSION}</div>"
+        echo "  <div class='cover-divider'></div>"
+        echo "  <div class='cover-type'>Penetration Test Report</div>"
+        echo "  <div class='cover-target'>$(echo "$target" | sed 's/</\&lt;/g;s/>/\&gt;/g')</div>"
+        echo "  <div class='cover-meta'>Data: $(date '+%d/%m/%Y %H:%M')</div>"
+        echo "  <div class='cover-meta'>Directory: $(echo "$outdir" | sed 's/</\&lt;/g;s/>/\&gt;/g')</div>"
+        echo "  <div class='cover-meta'>Piattaforma: $(uname -srm 2>/dev/null || echo 'Linux')</div>"
+        echo "  <div class='confidential'>&#9888; CONFIDENZIALE &#9888;</div>"
+        echo "</div>"
+
+        # 1. EXECUTIVE SUMMARY
+        echo "<h1>1. Executive Summary</h1>"
+        echo "<p>Assessment automatizzato eseguito con <strong>exa-dune v${VERSION}</strong> sul target <strong>$(echo "$target" | sed 's/</\&lt;/g;s/>/\&gt;/g')</strong> in data $(date '+%d/%m/%Y').</p>"
+        echo "<p>Totale finding rilevati: <strong>$n_total</strong></p>"
+
+        echo "<div class='exec-grid'>"
+        echo "  <div class='stat-box sc'><div class='stat-num'>$n_critical</div><div class='stat-lbl'>CRITICAL</div></div>"
+        echo "  <div class='stat-box sh'><div class='stat-num'>$n_high</div><div class='stat-lbl'>HIGH</div></div>"
+        echo "  <div class='stat-box sm'><div class='stat-num'>$n_medium</div><div class='stat-lbl'>MEDIUM</div></div>"
+        echo "  <div class='stat-box sl'><div class='stat-num'>$n_low</div><div class='stat-lbl'>LOW</div></div>"
+        echo "</div>"
+
+        # Bar chart severity
+        echo "<h2>Distribuzione per Severity</h2>"
+        for sev_info in "CRITICAL:$n_critical:bar-c" "HIGH:$n_high:bar-h" "MEDIUM:$n_medium:bar-m" "LOW:$n_low:bar-l" "INFO:$n_info:bar-i"; do
+            local sn="${sev_info%%:*}"
+            local rest="${sev_info#*:}"
+            local sv="${rest%%:*}"
+            local sc="${rest##*:}"
+            local pct=$(( sv * 100 / max_n ))
+            echo "<div class='bar-row'><div class='bar-lbl'>$sn</div><div class='bar-out'><div class='bar-in $sc' style='width:${pct}%'></div></div><div class='bar-cnt'>$sv</div></div>"
+        done
+
+        # Rischio complessivo
+        local risk_level="Basso" risk_color="#58a6ff"
+        [[ $n_low -gt 0 ]]      && { risk_level="Basso";  risk_color="#58a6ff"; }
+        [[ $n_medium -gt 0 ]]   && { risk_level="Medio";  risk_color="#e3b341"; }
+        [[ $n_high -gt 0 ]]     && { risk_level="Alto";   risk_color="#f97316"; }
+        [[ $n_critical -gt 0 ]] && { risk_level="Critico"; risk_color="#ff7b72"; }
+        echo "<p style='margin-top:12px'>Livello di rischio complessivo: <strong style='color:${risk_color}'>${risk_level}</strong></p>"
+
+        # 2. PORTE E SERVIZI
+        echo "<h1>2. Porte e Servizi Rilevati</h1>"
+        if [[ -n "$nmap_file" ]]; then
+            echo "<table><tr><th>Porta</th><th>Protocollo</th><th>Stato</th><th>Servizio</th><th>Versione / Info</th></tr>"
+            while IFS= read -r line; do
+                echo "$line" | grep -qE "^[0-9]+/tcp.*open" || continue
+                local port_proto state svc ver
+                port_proto=$(echo "$line" | awk '{print $1}')
+                state=$(echo "$line" | awk '{print $2}')
+                svc=$(echo "$line" | awk '{print $3}')
+                ver=$(echo "$line" | awk '{for(i=4;i<=NF;i++) printf $i" "; print ""}' | sed 's/</\&lt;/g;s/>/\&gt;/g' | head -c 120)
+                local port="${port_proto%%/*}" proto="${port_proto##*/}"
+                echo "<tr><td class='port-open'>$port</td><td>$proto</td><td><span style='color:#56d364'>$state</span></td><td class='port-service' style='color:#79c0ff'>$(echo "$svc" | sed 's/</\&lt;/g;s/>/\&gt;/g')</td><td>$ver</td></tr>"
+            done < "$nmap_file"
             echo "</table>"
+        else
+            echo "<p>Nessun file nmap trovato nella directory di output.</p>"
+        fi
 
-            echo "<h2>Log Output</h2><pre>"
-            [[ -f "$outdir/exa-dune.log" ]] && \
-                sed 's/</\&lt;/g;s/>/\&gt;/g' "$outdir/exa-dune.log" | head -200 || true
-            echo "</pre>"
-            echo "</body></html>"
+        # Snapshot RTSP se presenti
+        local snap_files
+        snap_files=$(find "$outdir" -name "snapshot_*.jpg" 2>/dev/null | head -3)
+        if [[ -n "$snap_files" ]]; then
+            echo "<h2>Snapshot RTSP</h2>"
+            while IFS= read -r snap; do
+                local snap_b64; snap_b64=$(base64 -w0 "$snap" 2>/dev/null || true)
+                [[ -n "$snap_b64" ]] && echo "<img src='data:image/jpeg;base64,${snap_b64}' style='max-width:100%;border:1px solid #30363d;border-radius:4px;margin:6px 0'>"
+            done <<< "$snap_files"
+        fi
+
+        # 3. FINDINGS DETTAGLIATI
+        echo "<h1 class='page-break'>3. Findings Dettagliati</h1>"
+        echo "<table><tr><th style='width:100px'>Severity</th><th style='width:90px'>CVSS 3.1</th><th style='width:100px'>Modulo</th><th>Descrizione</th></tr>"
+        local has_findings=0
+        while IFS= read -r -d '' ffile; do
+            local module; module=$(basename "$(dirname "$ffile")")
+            [[ "$module" == "$(basename "$outdir")" ]] && module="root"
+            while IFS= read -r line; do
+                [[ -z "$line" ]] && continue
+                # Filtra rumore nmap e righe header
+                echo "$line" | grep -qP '^\s*[\|#=]|^Nmap|^Starting|^Host is' && continue
+                local sev; sev=$(echo "$line" | grep -oP '^\[([A-Z]+)\]' | tr -d '[]')
+                [[ -z "$sev" ]] && sev="INFO"
+                local msg; msg=$(echo "$line" | sed 's/^\[[A-Z]*\] //' | sed 's/</\&lt;/g;s/>/\&gt;/g')
+                local cvss_score
+                case "$sev" in
+                    CRITICAL) cvss_score="9.0 – 10.0" ;;
+                    HIGH)     cvss_score="7.0 – 8.9" ;;
+                    MEDIUM)   cvss_score="4.0 – 6.9" ;;
+                    LOW)      cvss_score="0.1 – 3.9" ;;
+                    *)        cvss_score="—" ;;
+                esac
+                echo "<tr><td><span class='sev sev-${sev}'>$sev</span></td><td><span class='cvss'>$cvss_score</span></td><td><span class='tag'>$module</span></td><td>$msg</td></tr>"
+                has_findings=1
+            done < "$ffile"
+        done < <(find "$outdir" -name "findings.txt" -print0 2>/dev/null | sort -z)
+        [[ $has_findings -eq 0 ]] && echo "<tr><td colspan='4'>Nessun finding registrato.</td></tr>"
+        echo "</table>"
+
+        # 4. WEB APPLICATION
+        local has_web=0
+        if find "$outdir" -name "gobuster.txt" -o -name "nuclei.txt" -o -name "nikto.txt" 2>/dev/null | grep -q .; then
+            has_web=1
+            echo "<h1>4. Web Application</h1>"
+
+            # Gobuster
+            while IFS= read -r -d '' f; do
+                local mod; mod=$(basename "$(dirname "$f")")
+                if [[ -s "$f" ]]; then
+                    echo "<h2>Directory/File Trovati — $mod</h2>"
+                    echo "<table><tr><th>Path</th><th>Status</th><th>Dimensione</th></tr>"
+                    local gcount=0
+                    while IFS= read -r gline; do
+                        [[ -z "$gline" || "$gline" == "="* ]] && continue
+                        ((gcount++)) || true; [[ $gcount -gt 30 ]] && break
+                        local gpath gstatus gsize
+                        gpath=$(echo "$gline" | awk '{print $1}' | sed 's/</\&lt;/g;s/>/\&gt;/g')
+                        gstatus=$(echo "$gline" | grep -oP '\(Status: \K[0-9]+' || echo "—")
+                        gsize=$(echo "$gline" | grep -oP '\[Size: \K[0-9]+' || echo "—")
+                        local sc=""; [[ "$gstatus" == "200" ]] && sc="color:#56d364;font-weight:bold"
+                        echo "<tr><td><code>$gpath</code></td><td style='$sc'>$gstatus</td><td>${gsize}B</td></tr>"
+                    done < "$f"
+                    echo "</table>"
+                fi
+            done < <(find "$outdir" -name "gobuster.txt" -print0 2>/dev/null)
+
+            # Nuclei
+            while IFS= read -r -d '' f; do
+                if [[ -s "$f" ]]; then
+                    echo "<h2>Nuclei — Vulnerabilità Web</h2>"
+                    echo "<table><tr><th>Template</th><th>Tipo</th><th>Severity</th><th>Host</th></tr>"
+                    while IFS= read -r nline; do
+                        [[ -z "$nline" ]] && continue
+                        local tpl stype ssev shost
+                        tpl=$(echo "$nline" | grep -oP '^\[[^\]]+\]' | head -1 | tr -d '[]' | sed 's/</\&lt;/g')
+                        stype=$(echo "$nline" | grep -oP '^\[[^\]]+\] \[\K[^\]]+' | sed 's/</\&lt;/g')
+                        ssev=$(echo "$nline" | grep -oP '\] \[([a-z]+)\]' | tail -1 | tr -d '[] ' | sed 's/</\&lt;/g')
+                        shost=$(echo "$nline" | awk '{print $NF}' | sed 's/</\&lt;/g;s/>/\&gt;/g')
+                        local sev_uc; sev_uc=$(echo "$ssev" | tr '[:lower:]' '[:upper:]')
+                        echo "<tr><td><code>$tpl</code></td><td>$stype</td><td><span class='sev sev-${sev_uc:-INFO}'>$ssev</span></td><td>$shost</td></tr>"
+                    done < "$f"
+                    echo "</table>"
+                fi
+            done < <(find "$outdir" -name "nuclei.txt" -print0 2>/dev/null)
+        fi
+
+        # 5. CREDENZIALI TROVATE
+        echo "<h1>5. Credenziali Trovate</h1>"
+        local has_creds=0
+        echo "<table><tr><th>Modulo</th><th>Servizio</th><th>Credenziale</th></tr>"
+        while IFS= read -r -d '' hfile; do
+            local hmod; hmod=$(basename "$(dirname "$hfile")")
+            while IFS= read -r hline; do
+                [[ "$hline" == *"login:"* ]] || continue
+                local hcred; hcred=$(echo "$hline" | sed 's/</\&lt;/g;s/>/\&gt;/g')
+                echo "<tr><td><span class='tag'>$hmod</span></td><td>hydra</td><td><code>$hcred</code></td></tr>"
+                has_creds=1
+            done < "$hfile"
+        done < <(find "$outdir" -name "hydra_*.txt" -print0 2>/dev/null)
+        # Creds RTSP/ONVIF
+        while IFS= read -r -d '' cf; do
+            local cmod; cmod=$(basename "$(dirname "$cf")")
+            while IFS= read -r cline; do
+                [[ -z "$cline" ]] && continue
+                echo "<tr><td><span class='tag'>$cmod</span></td><td>digest/onvif</td><td><code>$(echo "$cline" | sed 's/</\&lt;/g')</code></td></tr>"
+                has_creds=1
+            done < "$cf"
+        done < <(find "$outdir" \( -name "rtsp_digest_creds.txt" -o -name "onvif_creds.txt" \) -print0 2>/dev/null)
+        [[ $has_creds -eq 0 ]] && echo "<tr><td colspan='3'>Nessuna credenziale trovata.</td></tr>"
+        echo "</table>"
+
+        # 6. RACCOMANDAZIONI
+        echo "<h1>6. Raccomandazioni</h1>"
+        [[ $n_critical -gt 0 ]] && cat << 'RECS'
+<div class='rec'><strong>🔴 CRITICAL</strong> — Vulnerabilità critiche rilevate. Intervento immediato richiesto: isolare il dispositivo dalla rete, applicare patch firmware, cambiare tutte le credenziali predefinite.</div>
+RECS
+        [[ $n_high -gt 0 ]] && cat << 'RECS'
+<div class='rec'><strong>🟠 HIGH</strong> — Vulnerabilità ad alto rischio. Pianificare remediation entro 7 giorni: aggiornare firmware, disabilitare servizi non necessari, implementare firewall rules.</div>
+RECS
+        [[ $n_medium -gt 0 ]] && cat << 'RECS'
+<div class='rec'><strong>🟡 MEDIUM</strong> — Vulnerabilità a medio rischio. Pianificare remediation entro 30 giorni: rafforzare configurazione TLS, abilitare autenticazione a due fattori dove possibile.</div>
+RECS
+        local has_rtsp
+        has_rtsp=$(find "$outdir" -name "rtsp_streams.txt" -not -empty 2>/dev/null | head -1)
+        [[ -n "$has_rtsp" ]] && cat << 'RECS'
+<div class='rec'><strong>📹 RTSP</strong> — Stream RTSP rilevati. Verificare che l'accesso richieda autenticazione Digest. Limitare accesso RTSP a IP autorizzati tramite firewall.</div>
+RECS
+        cat << 'RECS'
+<div class='info-box'><strong>✅ Buone pratiche generali:</strong> Aggiornare regolarmente il firmware, utilizzare password complesse e uniche per ogni dispositivo, segmentare la rete IoT in VLAN dedicata, monitorare i log di accesso.</div>
+RECS
+
+        # 7. MODULI ESEGUITI
+        echo "<h1>7. Moduli Eseguiti</h1>"
+        echo "<table><tr><th>Modulo</th><th>File Output</th><th>Stato</th></tr>"
+        find "$outdir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | while IFS= read -r d; do
+            local mod; mod=$(basename "$d")
+            local fcount; fcount=$(find "$d" -type f 2>/dev/null | wc -l)
+            local status="<span style='color:#56d364'>✓ Completato</span>"
+            [[ $fcount -eq 0 ]] && status="<span style='color:#8b949e'>— Vuoto</span>"
+            echo "<tr><td><strong>$mod</strong></td><td>$fcount file</td><td>$status</td></tr>"
+        done
+        echo "</table>"
+
+        # 8. APPENDICE — LOG
+        echo "<h1 class='page-break'>8. Appendice — Log Completo</h1>"
+        echo "<pre>"
+        if [[ -f "$outdir/exa-dune.log" ]]; then
+            sed 's/</\&lt;/g;s/>/\&gt;/g' "$outdir/exa-dune.log" | head -300
+        else
+            echo "(nessun log disponibile)"
+        fi
+        echo "</pre>"
+
+        # FOOTER
+        echo "<div class='footer'>"
+        echo "  <span>EXA-DUNE v${VERSION} — Generato il $(date '+%d/%m/%Y %H:%M')</span>"
+        echo "  <span>Target: $(echo "$target" | sed 's/</\&lt;/g;s/>/\&gt;/g')</span>"
+        echo "  <span style='color:#b91c1c;font-weight:bold'>CONFIDENZIALE</span>"
+        echo "</div>"
+        echo "</body></html>"
+
         } > "$html_file"
         ok "Report HTML salvato: $html_file"
 
@@ -6576,6 +6857,14 @@ HTML
                 fi
             else
                 warn "Nessun tool PDF disponibile — installa: apt install wkhtmltopdf"
+            fi
+            # Auto-copy PDF su Desktop
+            if [[ -f "$pdf_file" ]]; then
+                _init_reports_dir
+                local desk_name
+                desk_name="REPORT_$(echo "$target" | tr '.' '-')_$(date +%Y%m%d_%H%M%S).pdf"
+                cp "$pdf_file" "$EXA_REPORTS_DIR/$desk_name" 2>/dev/null && \
+                    ok "Report copiato su Desktop: $EXA_REPORTS_DIR/$desk_name"
             fi
         fi
     fi
@@ -6841,6 +7130,23 @@ cmd_install() {
     fi
 
     echo ""
+    echo ""
+    echo -e "${BOLD}[SETUP] Cartella report Desktop...${NC}"
+    _init_reports_dir
+
+    echo ""
+    echo -e "${BOLD}[SETUP] Installazione tool PDF (HTML→PDF)...${NC}"
+    if [[ $DRY_RUN -eq 0 ]]; then
+        local pdf_tool; pdf_tool=$(_ensure_pdf_tool 2>/dev/null)
+        if [[ -n "$pdf_tool" ]]; then
+            ok "Tool PDF disponibile: $pdf_tool"
+        else
+            warn "Nessun tool PDF trovato — i report PDF non saranno generabili"
+        fi
+    else
+        echo -e "${CYAN}[DRY-RUN]${NC} Verifica/installazione weasyprint"
+    fi
+
     ok "exa-dune v${VERSION} pronto. Usa: exa-dune help"
 }
 
