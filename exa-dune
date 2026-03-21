@@ -6708,7 +6708,7 @@ cmd_install() {
         "tmux:tmux"
         "weasyprint:weasyprint"
         "searchsploit:exploitdb"
-        "testssl.sh:testssl.sh"
+        "testssl:testssl.sh"
         "svmap:sipvicious"
     )
 
