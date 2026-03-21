@@ -125,8 +125,11 @@ _wl_users() {
         "${CUSTOM_USERS:-}" \
         /usr/share/seclists/Usernames/top-usernames-shortlist.txt \
         /usr/share/seclists/Usernames/Names/names.txt \
-        /usr/share/wordlists/metasploit/unix_users.txt; do
-        [[ -f "$f" ]] && { echo "$f"; return; }
+        /usr/share/wordlists/metasploit/unix_users.txt \
+        "$EXA_WL_DIR/users-top.txt" \
+        "$EXA_WL_DIR/users-names.txt" \
+        "$EXA_WL_DIR/users-cirt.txt"; do
+        [[ -f "$f" && -s "$f" ]] && { echo "$f"; return; }
     done
     if [[ -z "$_FALLBACK_USERS" ]]; then
         _FALLBACK_USERS=$(mktemp)
@@ -186,8 +189,11 @@ _wl_pass() {
         "${CUSTOM_PASS:-}" \
         /usr/share/seclists/Passwords/Common-Credentials/best1050.txt \
         /usr/share/seclists/Passwords/Common-Credentials/10k-most-common.txt \
-        /usr/share/wordlists/fasttrack.txt; do
-        [[ -f "$f" ]] && { echo "$f"; return; }
+        /usr/share/wordlists/fasttrack.txt \
+        "$EXA_WL_DIR/passwords-best1050.txt" \
+        "$EXA_WL_DIR/passwords-10k.txt" \
+        "$EXA_WL_DIR/passwords-100k.txt"; do
+        [[ -f "$f" && -s "$f" ]] && { echo "$f"; return; }
     done
     if [[ -z "$_FALLBACK_PASS" ]]; then
         _FALLBACK_PASS=$(mktemp)
@@ -322,8 +328,11 @@ _wl_web() {
     for f in \
         /usr/share/seclists/Discovery/Web-Content/common.txt \
         /usr/share/wordlists/dirb/common.txt \
-        /usr/share/dirb/wordlists/common.txt; do
-        [[ -f "$f" ]] && { echo "$f"; return; }
+        /usr/share/dirb/wordlists/common.txt \
+        "$EXA_WL_DIR/web-common.txt" \
+        "$EXA_WL_DIR/web-big.txt" \
+        "$EXA_WL_DIR/web-raft-medium.txt"; do
+        [[ -f "$f" && -s "$f" ]] && { echo "$f"; return; }
     done
     if [[ -z "$_FALLBACK_WEB" ]]; then
         _FALLBACK_WEB=$(mktemp)
@@ -410,8 +419,9 @@ _wl_snmp() {
     for f in \
         "${CUSTOM_COMM:-}" \
         /usr/share/seclists/Discovery/SNMP/snmp.txt \
-        /usr/share/seclists/Discovery/SNMP/snmp-onesixtyone.txt; do
-        [[ -f "$f" ]] && { echo "$f"; return; }
+        /usr/share/seclists/Discovery/SNMP/snmp-onesixtyone.txt \
+        "$EXA_WL_DIR/snmp-communities.txt"; do
+        [[ -f "$f" && -s "$f" ]] && { echo "$f"; return; }
     done
     if [[ -z "$_FALLBACK_SNMP" ]]; then
         _FALLBACK_SNMP=$(mktemp)
@@ -495,8 +505,10 @@ _wl_lfi() {
     # LFI / path traversal wordlist per ffuf/wfuzz
     for f in \
         /usr/share/seclists/Fuzzing/LFI/LFI-Jhaddix.txt \
-        /usr/share/seclists/Fuzzing/fuzz-Bo0oM.txt; do
-        [[ -f "$f" ]] && { echo "$f"; return; }
+        /usr/share/seclists/Fuzzing/fuzz-Bo0oM.txt \
+        "$EXA_WL_DIR/lfi-jhaddix.txt" \
+        "$EXA_WL_DIR/lfi-linux.txt"; do
+        [[ -f "$f" && -s "$f" ]] && { echo "$f"; return; }
     done
     # Fallback embedded con i payload LFI più efficaci su embedded/Linux
     if [[ -z "$_FALLBACK_LFI" ]]; then
@@ -541,8 +553,10 @@ _wl_dns() {
     for f in \
         /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt \
         /usr/share/seclists/Discovery/DNS/subdomains-top1million-20000.txt \
-        /usr/share/wordlists/dnsmap.txt; do
-        [[ -f "$f" ]] && { echo "$f"; return; }
+        /usr/share/wordlists/dnsmap.txt \
+        "$EXA_WL_DIR/dns-subdomains-5k.txt" \
+        "$EXA_WL_DIR/dns-subdomains-20k.txt"; do
+        [[ -f "$f" && -s "$f" ]] && { echo "$f"; return; }
     done
     # Fallback embedded: subdomain comuni per reti aziendali/IoT
     if [[ -z "$_FALLBACK_DNS" ]]; then
@@ -616,8 +630,11 @@ EMBEDDED_DNS
 _wl_iot_creds() {
     for f in \
         /usr/share/seclists/Passwords/Default-Credentials/ssh-betterdefaultpasslist.txt \
-        /usr/share/seclists/Passwords/Default-Credentials/default-passwords.txt; do
-        [[ -f "$f" ]] && { echo "$f"; return; }
+        /usr/share/seclists/Passwords/Default-Credentials/default-passwords.txt \
+        "$EXA_WL_DIR/ssh-default-creds.txt" \
+        "$EXA_WL_DIR/iot-default-creds.txt" \
+        "$EXA_WL_DIR/router-default-creds.txt"; do
+        [[ -f "$f" && -s "$f" ]] && { echo "$f"; return; }
     done
     if [[ -z "$_FALLBACK_IOT_CREDS" ]]; then
         _FALLBACK_IOT_CREDS=$(mktemp)
@@ -690,6 +707,89 @@ admin:netman
 EMBEDDED_IOT
     fi
     echo "$_FALLBACK_IOT_CREDS"
+}
+
+_wl_rtsp_paths() {
+    # Path RTSP per telecamere IP — Reolink, Hikvision, Dahua, Axis, Bosch, Hanwha
+    for f in \
+        "$EXA_WL_DIR/rtsp-paths.txt" \
+        /usr/share/seclists/Miscellaneous/rtsp-urls.txt; do
+        [[ -f "$f" && -s "$f" ]] && { echo "$f"; return; }
+    done
+    # Fallback embedded: path più comuni per brand principali
+    local tmp; tmp=$(mktemp)
+    cat > "$tmp" << 'EMBEDDED_RTSP'
+/
+/stream
+/live
+/live.sdp
+/live/main
+/live/sub
+/live/ch00_0
+/live/ch00_1
+/h264
+/h264/main
+/h264/sub
+/mpeg4
+/mjpeg
+/video
+/video0
+/video1
+/cam
+/cam/main
+/cam/sub
+/cam0
+/cam1
+/stream0
+/stream1
+/stream2
+/channel0
+/channel1
+/ch1
+/ch2
+/ch1/main
+/ch1/sub
+/ch2/main
+/Streaming/Channels/1
+/Streaming/Channels/2
+/Streaming/Channels/101
+/Streaming/Channels/102
+/Streaming/Channels/201
+/h264Preview_01_main
+/h264Preview_01_sub
+/h264Preview_02_main
+/h264Preview_02_sub
+/onvif/media
+/onvif1
+/media
+/media/video1
+/media/video2
+/axis-media/media.amp
+/axis-media/media.amp?videocodec=h264
+/mpeg4/media.amp
+/image/jpeg.cgi
+/jpg/image.jpg
+/snapshot.jpg
+/snap.jpg
+/cgi-bin/snapshot.cgi
+/videostream.cgi
+/videostream.asf
+/video.cgi
+/mjpg/video.mjpg
+/cgi-bin/mjpg/video.mjpg
+/GetData.cgi
+/nphMotionJpeg
+/nphMotionJpeg?Resolution=320x240&Quality=Standard
+/video/mjpg.cgi
+/record/current.mjpeg
+/webcapture.jpg
+/cam_1.cgi
+/cam_2.cgi
+/nphControlCamera
+/live_mjpeg.cgi
+/live_mpeg4.cgi
+EMBEDDED_RTSP
+    echo "$tmp"
 }
 
 # ── Helpers ──────────────────────────────────────────────────
@@ -786,6 +886,106 @@ _ensure_pdf_tool() {
     fi
     err "Nessun tool PDF disponibile. Installa: apt install weasyprint"
     return 1
+}
+
+_ensure_media_tools() {
+    # Installa automaticamente ffmpeg e vlc se assenti (richiede root).
+    # Chiamata all'inizio di cmd_rtsp e da qualunque modulo che cattura media.
+    local missing=()
+    tool_ok ffmpeg || missing+=(ffmpeg)
+    tool_ok cvlc   || missing+=(vlc)
+    [[ ${#missing[@]} -eq 0 ]] && return 0
+    warn "Media tools mancanti: ${missing[*]} — installazione automatica..."
+    if [[ $EUID -eq 0 ]]; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${missing[@]}" 2>/dev/null \
+            && ok "Installati: ${missing[*]}" \
+            || warn "Installazione fallita — riprova: apt install ${missing[*]}"
+    else
+        warn "Non in root: installa manualmente → sudo apt install ${missing[*]}"
+    fi
+    return 0
+}
+
+# ── Download wordlists aggiuntive da GitHub ───────────────────────────────────
+EXA_WL_DIR="/usr/share/exa-dune/wordlists"
+
+_wl_path_for() {
+    # _wl_path_for <nome_file> — ritorna path in EXA_WL_DIR se esiste
+    local f="$EXA_WL_DIR/$1"
+    [[ -f "$f" && -s "$f" ]] && echo "$f" || echo ""
+}
+
+_download_wordlists() {
+    # Scarica wordlist aggiuntive da GitHub. Richiede root per scrivere in /usr/share.
+    check_root
+    local wl_dir="$EXA_WL_DIR"
+    mkdir -p "$wl_dir"
+    log "Directory wordlist: $wl_dir"
+
+    # Mappa: nome_file_locale → URL raw GitHub
+    declare -A WL_URLS=(
+        # SecLists — password & users
+        ["passwords-best1050.txt"]="https://raw.githubusercontent.com/danielmiessler/SecLists/master/Passwords/Common-Credentials/best1050.txt"
+        ["passwords-10k.txt"]="https://raw.githubusercontent.com/danielmiessler/SecLists/master/Passwords/Common-Credentials/10k-most-common.txt"
+        ["passwords-100k.txt"]="https://raw.githubusercontent.com/danielmiessler/SecLists/master/Passwords/Common-Credentials/100k-most-common.txt"
+        ["users-top.txt"]="https://raw.githubusercontent.com/danielmiessler/SecLists/master/Usernames/top-usernames-shortlist.txt"
+        ["users-names.txt"]="https://raw.githubusercontent.com/danielmiessler/SecLists/master/Usernames/Names/names.txt"
+        ["users-cirt.txt"]="https://raw.githubusercontent.com/danielmiessler/SecLists/master/Usernames/cirt-default-usernames.txt"
+        # SecLists — default credentials IoT/embedded
+        ["iot-default-creds.txt"]="https://raw.githubusercontent.com/danielmiessler/SecLists/master/Passwords/Default-Credentials/default-passwords.csv"
+        ["ssh-default-creds.txt"]="https://raw.githubusercontent.com/danielmiessler/SecLists/master/Passwords/Default-Credentials/ssh-betterdefaultpasslist.txt"
+        ["router-default-creds.txt"]="https://raw.githubusercontent.com/danielmiessler/SecLists/master/Passwords/Default-Credentials/router-default-creds.csv"
+        ["ftp-default-creds.txt"]="https://raw.githubusercontent.com/danielmiessler/SecLists/master/Passwords/Default-Credentials/ftp-betterdefaultpasslist.txt"
+        ["telnet-default-creds.txt"]="https://raw.githubusercontent.com/danielmiessler/SecLists/master/Passwords/Default-Credentials/telnet-betterdefaultpasslist.txt"
+        # SecLists — web content discovery
+        ["web-common.txt"]="https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/common.txt"
+        ["web-big.txt"]="https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/big.txt"
+        ["web-raft-medium.txt"]="https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/raft-medium-words.txt"
+        ["web-api-endpoints.txt"]="https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/api/api-endpoints.txt"
+        # SecLists — DNS
+        ["dns-subdomains-5k.txt"]="https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/DNS/subdomains-top1million-5000.txt"
+        ["dns-subdomains-20k.txt"]="https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/DNS/subdomains-top1million-20000.txt"
+        # SecLists — SNMP
+        ["snmp-communities.txt"]="https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/SNMP/snmp.txt"
+        # SecLists — LFI/fuzzing
+        ["lfi-jhaddix.txt"]="https://raw.githubusercontent.com/danielmiessler/SecLists/master/Fuzzing/LFI/LFI-Jhaddix.txt"
+        ["lfi-linux.txt"]="https://raw.githubusercontent.com/danielmiessler/SecLists/master/Fuzzing/LFI/LFI-linux-interesting-files.txt"
+        # Ricerca IoT — RTSP paths per telecamere IP (curata)
+        ["rtsp-paths.txt"]="https://raw.githubusercontent.com/danielmiessler/SecLists/master/Miscellaneous/rtsp-urls.txt"
+        # Password leak sets (HaveIBeenPwned top)
+        ["passwords-leaked-top200.txt"]="https://raw.githubusercontent.com/danielmiessler/SecLists/master/Passwords/Leaked-Databases/rockyou-75.txt"
+        # Exploits / CVE
+        ["web-cgi-bin.txt"]="https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/CGI-XPlatform.fuzz.txt"
+        ["web-iot-camera.txt"]="https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/CMS/IP-Cameras.fuzz.txt"
+    )
+
+    local ok_count=0 fail_count=0
+    for fname in "${!WL_URLS[@]}"; do
+        local url="${WL_URLS[$fname]}"
+        local dest="$wl_dir/$fname"
+        if [[ -f "$dest" && -s "$dest" ]]; then
+            log "  Già presente: $fname ($(wc -l < "$dest") righe)"
+            ((ok_count++)) || true
+            continue
+        fi
+        printf "  Download %-45s " "$fname..."
+        if curl -sfL --max-time 30 "$url" -o "$dest" 2>/dev/null && [[ -s "$dest" ]]; then
+            echo "OK ($(wc -l < "$dest") righe)"
+            ((ok_count++)) || true
+        else
+            echo "FAIL"
+            rm -f "$dest"
+            ((fail_count++)) || true
+        fi
+    done
+
+    ok "Wordlist scaricate: $ok_count OK, $fail_count fallite → $wl_dir"
+
+    # Symlink in /usr/share/seclists se seclists non è installato
+    if [[ ! -d /usr/share/seclists ]]; then
+        warn "SecLists non installato. Considera: apt install seclists"
+        warn "Oppure installa da GitHub: git clone --depth 1 https://github.com/danielmiessler/SecLists /usr/share/seclists"
+    fi
 }
 
 # ── Globali ──────────────────────────────────────────────────
@@ -2781,6 +2981,9 @@ cmd_rtsp() {
     setup_outdir "$target" "rtsp"
     log "Target: $target | Porte: $port,8554 | Output: $OUTDIR"
 
+    # Assicura ffmpeg e vlc installati (installa automaticamente se root)
+    _ensure_media_tools
+
     section "Nmap RTSP Scripts"
     run_cmd "nmap_rtsp" \
         "nmap -p $port,8554 --script rtsp-url-brute,rtsp-methods \
@@ -2790,15 +2993,19 @@ cmd_rtsp() {
             while IFS= read -r line; do found MEDIUM "RTSP:$port — $line"; done || true
     fi
 
-    section "RTSP Path Enumeration (curl)"
-    local rtsp_paths=(
-        "/" "/stream" "/live" "/live.sdp" "/video" "/video0" "/cam"
-        "/cam0" "/cam1" "/channel1" "/h264" "/mpeg4" "/mjpeg"
-        "/stream1" "/stream2" "/media" "/media/video1" "/onvif/media"
-        "/axis-media/media.amp" "/mpeg4/media.amp" "/image/jpeg.cgi"
-        "/h264Preview_01_main" "/h264Preview_01_sub" "/h264Preview_02_main"
-        "/Streaming/Channels/1" "/Streaming/Channels/2" "/ch1/main"
-    )
+    section "RTSP Path Enumeration"
+    # Usa wordlist dedicata (brand-aware) con fallback embedded
+    local rtsp_wl_file; rtsp_wl_file=$(_wl_rtsp_paths)
+    local rtsp_paths=()
+    if [[ -f "$rtsp_wl_file" ]]; then
+        while IFS= read -r p; do
+            [[ -n "$p" && "$p" != \#* ]] && rtsp_paths+=("$p")
+        done < "$rtsp_wl_file"
+        log "  Wordlist RTSP: $rtsp_wl_file (${#rtsp_paths[@]} path)"
+    else
+        rtsp_paths=("/" "/stream" "/live" "/live.sdp" "/video" "/h264" "/mjpeg"
+                    "/h264Preview_01_main" "/Streaming/Channels/1")
+    fi
     local ul; ul=$(_wl_users); local pl; pl=$(_wl_pass)
     local open_streams=()
 
@@ -2812,7 +3019,8 @@ cmd_rtsp() {
                 found MEDIUM "RTSP — snapshot catturato: $snap_out" || \
                 log "  Snapshot ffmpeg fallito (possibile auth richiesta)"
         elif command -v cvlc &>/dev/null; then
-            cvlc --intf dummy --video-filter scene --scene-path "$OUTDIR" \
+            cvlc --allow-user-root --intf dummy \
+                 --video-filter scene --scene-path "$OUTDIR" \
                  --scene-prefix snapshot --scene-format jpg --run-time 2 \
                  "$surl" vlc://quit &>/dev/null && \
                 found MEDIUM "RTSP — snapshot VLC salvato in $OUTDIR/" || \
@@ -6375,9 +6583,10 @@ cmd_help() {
         http)    banner; usage_http   ;;
         post)    banner; usage_post   ;;
         fw)      banner; usage_fw     ;;
-        auto)     banner; usage_auto     ;;
-        pipeline) banner; usage_pipeline ;;
-        report)  banner; usage_report ;;
+        auto)      banner; usage_auto     ;;
+        pipeline)  banner; usage_pipeline ;;
+        report)    banner; usage_report   ;;
+        install)   banner; usage_install  ;;
         *)
             banner
             echo -e "${BOLD}Uso:${NC}  exa-dune <subcommand> <TARGET> [OPTIONS]"
@@ -6412,8 +6621,10 @@ cmd_help() {
             printf "  %-10s %s\n" "post"    "Post-exploitation + reverse shell (shell/web/ftp/smb/snmp/revshell)"
             printf "  %-10s %s\n" "fw"      "Firewall bypass + analysis  (ACK/FIN/frag/src-port/IPv6/UPnP/SIP-ALG)"
             printf "  %-10s %s\n" "auto"     "Full orchestrated assessment (tmux, auto-profile)"
-            printf "  %-10s %s\n" "pipeline" "Smart pipeline: scan→attack→post→PDF report"
-            printf "  %-10s %s\n" "report"  "Generate report from output dir"
+            printf "  %-10s %s\n" "pipeline"  "Smart pipeline: scan→attack→post→PDF report"
+            printf "  %-10s %s\n" "report"    "Generate report from output dir"
+            printf "  %-10s %s\n" "install"   "Installa tutti i tool mancanti  (richiede root)"
+            printf "  %-10s %s\n" "wordlists" "Scarica wordlist aggiuntive da GitHub → /usr/share/exa-dune/"
             echo ""
             echo -e "${BOLD}Esempi:${NC}"
             echo "  exa-dune scan 10.0.0.1 --stealth"
@@ -6430,6 +6641,175 @@ cmd_help() {
             echo "  --dry-run          Mostra comandi senza eseguirli"
             ;;
     esac
+}
+
+# ============================================================
+#  SUBCOMMAND: install
+# ============================================================
+usage_install() {
+    echo "Uso: exa-dune install [--wordlists] [--dry-run]"
+    echo ""
+    echo "  Installa automaticamente tutti i tool richiesti da exa-dune."
+    echo "  Deve essere eseguito come root."
+    echo ""
+    echo "Opzioni:"
+    echo "  --wordlists    Scarica anche le wordlist aggiuntive da GitHub"
+    echo "  --dry-run      Mostra cosa verrebbe installato senza installare"
+}
+
+cmd_install() {
+    local do_wordlists=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --wordlists) do_wordlists=1; shift ;;
+            --dry-run)   DRY_RUN=1;      shift ;;
+            --help|-h)   usage_install; exit 0 ;;
+            *) shift ;;
+        esac
+    done
+
+    check_root
+    banner
+
+    echo -e "${BOLD}=== exa-dune v${VERSION} — Installazione Tool ===${NC}"
+    echo ""
+
+    # ── Pacchetti apt ──────────────────────────────────────────────────────────
+    # formato: "nome_comando:pacchetto_apt"
+    local APT_TOOLS=(
+        "nmap:nmap"
+        "hydra:hydra"
+        "nikto:nikto"
+        "gobuster:gobuster"
+        "ffuf:ffuf"
+        "curl:curl"
+        "wget:wget"
+        "git:git"
+        "python3:python3"
+        "pip3:python3-pip"
+        "nc:netcat-openbsd"
+        "openssl:openssl"
+        "dig:dnsutils"
+        "host:bind9-host"
+        "dnsrecon:dnsrecon"
+        "sslscan:sslscan"
+        "enum4linux:enum4linux"
+        "smbclient:smbclient"
+        "snmpwalk:snmp"
+        "snmpget:snmp"
+        "ipmitool:ipmitool"
+        "mosquitto_sub:mosquitto-clients"
+        "atftp:atftp"
+        "redis-cli:redis-tools"
+        "ldapsearch:ldap-utils"
+        "arp-scan:arp-scan"
+        "ffmpeg:ffmpeg"
+        "cvlc:vlc"
+        "tmux:tmux"
+        "weasyprint:weasyprint"
+        "searchsploit:exploitdb"
+        "testssl.sh:testssl.sh"
+        "svmap:sipvicious"
+    )
+
+    # ── Pacchetti pip3 (fallback se apt non disponibile) ──────────────────────
+    local PIP_TOOLS=(
+        "weasyprint:weasyprint"
+        "svmap:sipvicious"
+    )
+
+    echo -e "${BOLD}[1/3] Controllo tool apt...${NC}"
+    local apt_missing=()
+    local apt_present=()
+    for entry in "${APT_TOOLS[@]}"; do
+        local cmd="${entry%%:*}"
+        local pkg="${entry##*:}"
+        if tool_ok "$cmd"; then
+            apt_present+=("$cmd")
+        else
+            apt_missing+=("$pkg")
+            if [[ $DRY_RUN -eq 1 ]]; then
+                echo -e "  ${YELLOW}[MANCANTE]${NC} $cmd → apt install $pkg"
+            fi
+        fi
+    done
+    echo "  Presenti: ${#apt_present[@]} | Mancanti: ${#apt_missing[@]}"
+
+    if [[ ${#apt_missing[@]} -gt 0 ]]; then
+        if [[ $DRY_RUN -eq 0 ]]; then
+            log "Aggiornamento lista pacchetti..."
+            apt-get update -qq 2>/dev/null || warn "apt update fallito — continuo comunque"
+            log "Installazione pacchetti: ${apt_missing[*]}"
+            # Installa rimuovendo duplicati
+            local unique_pkgs
+            unique_pkgs=$(echo "${apt_missing[@]}" | tr ' ' '\n' | sort -u | tr '\n' ' ')
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $unique_pkgs 2>/dev/null \
+                && ok "Pacchetti apt installati" \
+                || warn "Alcuni pacchetti apt non disponibili — controlla manualmente"
+        fi
+    else
+        ok "Tutti i tool apt già presenti"
+    fi
+
+    echo ""
+    echo -e "${BOLD}[2/3] Controllo tool pip3...${NC}"
+    local pip_installed=0
+    for entry in "${PIP_TOOLS[@]}"; do
+        local cmd="${entry%%:*}"
+        local pkg="${entry##*:}"
+        if ! tool_ok "$cmd"; then
+            if [[ $DRY_RUN -eq 0 ]]; then
+                log "  pip3 install $pkg"
+                pip3 install -q "$pkg" 2>/dev/null && ok "  $pkg installato" || warn "  $pkg fallito (pip3)"
+            else
+                echo -e "  ${YELLOW}[MANCANTE]${NC} $cmd → pip3 install $pkg"
+            fi
+            ((pip_installed++)) || true
+        fi
+    done
+    [[ $pip_installed -eq 0 ]] && ok "Tutti i tool pip3 già presenti"
+
+    echo ""
+    echo -e "${BOLD}[3/3] Verifica installazione...${NC}"
+    local all_ok=1
+    local status_lines=()
+    for entry in "${APT_TOOLS[@]}"; do
+        local cmd="${entry%%:*}"
+        if tool_ok "$cmd"; then
+            status_lines+=("  ${GREEN}✓${NC} $cmd")
+        else
+            status_lines+=("  ${RED}✗${NC} $cmd")
+            all_ok=0
+        fi
+    done
+    # Stampa in colonne
+    local i=0
+    for line in "${status_lines[@]}"; do
+        echo -e "$line"
+    done
+
+    if [[ $all_ok -eq 1 ]]; then
+        ok "Tutti i tool exa-dune sono pronti."
+    else
+        warn "Alcuni tool non installati. Funzionalità limitate — i moduli salteranno i passi che richiedono tool mancanti."
+    fi
+
+    # ── Wordlist aggiuntive da GitHub ─────────────────────────────────────────
+    if [[ $do_wordlists -eq 1 ]]; then
+        echo ""
+        echo -e "${BOLD}[BONUS] Download wordlist aggiuntive da GitHub...${NC}"
+        if [[ $DRY_RUN -eq 0 ]]; then
+            _download_wordlists
+        else
+            echo -e "${CYAN}[DRY-RUN]${NC} Verrebbe eseguito: _download_wordlists → $EXA_WL_DIR"
+        fi
+    else
+        echo ""
+        log "Suggerimento: esegui 'exa-dune install --wordlists' per scaricare wordlist aggiuntive da GitHub (SecLists + IoT)."
+    fi
+
+    echo ""
+    ok "exa-dune v${VERSION} pronto. Usa: exa-dune help"
 }
 
 # ============================================================
@@ -6649,6 +7029,8 @@ case "$subcommand" in
     auto)     cmd_auto     "$@" ;;
     pipeline) cmd_pipeline "${@}" ;;
     report)  cmd_report  "$@" ;;
+    install) cmd_install "$@" ;;
+    wordlists) _download_wordlists ;;
     help|-h|--help) cmd_help "$@" ;;
     version|--version) echo "exa-dune $VERSION"; exit 0 ;;
     *) err "Subcommand sconosciuto: $subcommand"; cmd_help; exit 1 ;;
