@@ -3692,7 +3692,7 @@ cmd_mdns() {
     [[ -n "$iface" ]] && iface_flag="--interface $iface"
 
     if command -v avahi-browse &>/dev/null; then
-        run_cmd "avahi-browse --all --resolve --terminate $iface_flag 2>/dev/null" "$avahi_out"
+        run_cmd "avahi_browse" "avahi-browse --all --resolve --terminate $iface_flag 2>/dev/null | tee $avahi_out"
         if [[ -s "$avahi_out" ]]; then
             # Parse servizi trovati e registra findings
             while IFS= read -r line; do
@@ -3709,7 +3709,7 @@ cmd_mdns() {
                 fi
                 if echo "$line" | grep -qE "^\+.*_[a-z]+\._tcp|^\+.*_[a-z]+\._udp"; then
                     stype=$(echo "$line" | awk '{print $NF}')
-                    finding "MEDIUM" "mDNS" "Servizio $stype su $line"
+                    found "MEDIUM" "mDNS" "Servizio $stype su $line"
                 fi
             done < "$avahi_out"
             ok "avahi-browse completato: $(wc -l < "$avahi_out") righe"
@@ -3722,12 +3722,11 @@ cmd_mdns() {
     section "nmap mDNS/DNS-SD Scan"
     local nmap_mdns="$OUTDIR/nmap_mdns.txt"
     if [[ "$target" != "local" ]]; then
-        run_cmd "nmap -sU -p 5353 --script dns-service-discovery \
-            -oN $OUTDIR/nmap_mdns.txt $NMAP_TIMING $target 2>/dev/null" "$nmap_mdns"
+        run_cmd "nmap_mdns" "nmap -sU -p 5353 --script dns-service-discovery -oN $nmap_mdns $NMAP_TIMING $target 2>/dev/null"
         if [[ -s "$nmap_mdns" ]]; then
             while IFS= read -r line; do
                 echo "$line" | grep -qE "^\|.*_[a-z]+\." || continue
-                finding "MEDIUM" "mDNS" "DNS-SD: $line"
+                found "MEDIUM" "mDNS" "DNS-SD: $line"
             done < "$nmap_mdns"
         fi
     else
@@ -3737,11 +3736,11 @@ cmd_mdns() {
     # ── nmap broadcast-mdns (passive) ────────────────────────
     section "mDNS Broadcast Discovery"
     local bcast_out="$OUTDIR/mdns_broadcast.txt"
-    run_cmd "nmap --script broadcast-dns-service-discovery $NMAP_TIMING 2>/dev/null" "$bcast_out"
+    run_cmd "nmap_mdns_bcast" "nmap --script broadcast-dns-service-discovery $NMAP_TIMING 2>/dev/null | tee $bcast_out"
     if [[ -s "$bcast_out" ]]; then
         while IFS= read -r line; do
             echo "$line" | grep -qE "^\|.*_[a-z]+\." || continue
-            finding "LOW" "mDNS" "Broadcast: $line"
+            found "LOW" "mDNS" "Broadcast: $line"
         done < "$bcast_out"
     fi
 
@@ -3786,12 +3785,11 @@ cmd_wsd() {
     # ── WS-Discovery via nmap ────────────────────────────────
     section "WS-Discovery (nmap broadcast)"
     local wsd_nmap="$OUTDIR/wsd_nmap.txt"
-    run_cmd "nmap -sU -p $port --script broadcast-wsd-discover \
-        $NMAP_TIMING $target 2>/dev/null" "$wsd_nmap"
+    run_cmd "nmap_wsd" "nmap -sU -p $port --script broadcast-wsd-discover $NMAP_TIMING $target 2>/dev/null | tee $wsd_nmap"
     if [[ -s "$wsd_nmap" ]]; then
         while IFS= read -r line; do
             echo "$line" | grep -qE "Types:|Address:|XAddrs:" || continue
-            finding "MEDIUM" "WSD" "WS-Discovery: $line"
+            found "MEDIUM" "WSD" "WS-Discovery: $line"
         done < "$wsd_nmap"
         ok "nmap WSD completato"
     fi
@@ -3855,7 +3853,7 @@ PYEOF
                 if echo "$line" | grep -qE "Risposta da|Types|XAddrs|Scopes"; then
                     echo "$line" | grep -q "Risposta da" && {
                         local dev_ip; dev_ip=$(echo "$line" | grep -oP '[\d.]+(?=:)')
-                        finding "MEDIUM" "WSD" "Dispositivo WSD rilevato: $dev_ip"
+                        found "MEDIUM" "WSD" "Dispositivo WSD rilevato: $dev_ip"
                         found_wsd=1
                     }
                 fi
@@ -3908,7 +3906,7 @@ PYEOF
             while IFS= read -r line; do
                 echo "$line" | grep -q "^\[SSDP\].*\." && {
                     local ssdp_ip; ssdp_ip=$(echo "$line" | grep -oP '[\d]+\.[\d]+\.[\d]+\.[\d]+' | head -1)
-                    [[ -n "$ssdp_ip" ]] && finding "LOW" "SSDP" "Dispositivo SSDP: $ssdp_ip → $line"
+                    [[ -n "$ssdp_ip" ]] && found "LOW" "SSDP" "Dispositivo SSDP: $ssdp_ip → $line"
                 }
             done < "$ssdp_out"
         fi
@@ -3953,12 +3951,11 @@ cmd_bacnet() {
     # ── nmap BACnet NSE scripts ───────────────────────────────
     section "BACnet/IP — nmap bacnet-info"
     local nmap_bacnet="$OUTDIR/nmap_bacnet.txt"
-    run_cmd "nmap -sU -p $port --script bacnet-info \
-        -oN $OUTDIR/nmap_bacnet.txt $NMAP_TIMING $target 2>/dev/null" "$nmap_bacnet"
+    run_cmd "nmap_bacnet" "nmap -sU -p $port --script bacnet-info -oN $nmap_bacnet $NMAP_TIMING $target 2>/dev/null"
     if [[ -s "$nmap_bacnet" ]]; then
         while IFS= read -r line; do
             echo "$line" | grep -qE "^\|.*(" || continue
-            finding "HIGH" "BACnet" "$line"
+            found "HIGH" "BACnet" "$line"
         done < "$nmap_bacnet"
         ok "nmap BACnet completato"
     fi
@@ -4005,7 +4002,7 @@ except Exception as e:
 PYEOF
         if grep -q "I-Am risposta" "$whois_out" 2>/dev/null; then
             while IFS= read -r line; do
-                echo "$line" | grep -q "I-Am risposta" && finding "HIGH" "BACnet" "Dispositivo BACnet: $line"
+                echo "$line" | grep -q "I-Am risposta" && found "HIGH" "BACnet" "Dispositivo BACnet: $line"
             done < "$whois_out"
         else
             log "Nessuna risposta BACnet I-Am ricevuta"
@@ -4015,8 +4012,7 @@ PYEOF
     # ── nmap scan BACnet port ────────────────────────────────
     section "BACnet Port Scan"
     local bacnet_tcp="$OUTDIR/nmap_bacnet_tcp.txt"
-    run_cmd "nmap -p $port -sV --script bacnet-info \
-        $NMAP_TIMING $target 2>/dev/null" "$bacnet_tcp"
+    run_cmd "nmap_bacnet_tcp" "nmap -p $port -sV --script bacnet-info $NMAP_TIMING $target 2>/dev/null | tee $bacnet_tcp"
 
     ok "BACnet audit completato → $OUTDIR"
 }
@@ -4090,9 +4086,9 @@ WL
     # ── nmap RTMP port check ──────────────────────────────────
     section "RTMP Port Scan"
     local nmap_rtmp="$OUTDIR/nmap_rtmp.txt"
-    run_cmd "nmap -p $port -sV $NMAP_TIMING $target 2>/dev/null" "$nmap_rtmp"
+    run_cmd "nmap_rtmp" "nmap -p $port -sV $NMAP_TIMING $target 2>/dev/null | tee $nmap_rtmp"
     if grep -qE "$port/tcp.*open" "$nmap_rtmp" 2>/dev/null; then
-        finding "MEDIUM" "RTMP" "RTMP porta $port aperta su $target"
+        found "MEDIUM" "RTMP" "RTMP porta $port aperta su $target"
     fi
 
     # ── ffprobe RTMP metadata probe ───────────────────────────
@@ -4113,7 +4109,7 @@ WL
             if [[ -n "$meta" && "$meta" != *'"streams": []'* ]]; then
                 echo "[FOUND] $rtmp_url" 
                 echo "$meta" >> "$ffprobe_out"
-                finding "HIGH" "RTMP" "Stream RTMP accessibile senza auth: $rtmp_url"
+                found "HIGH" "RTMP" "Stream RTMP accessibile senza auth: $rtmp_url"
                 _found_rtmp=1
             fi
         done < "$_rtmp_apps"
@@ -4133,7 +4129,7 @@ WL
             timeout 10 rtmpdump -r "rtmp://${target}:${port}/live" \
                 --stop 1 -o /dev/null 2>&1 | head -20 | tee "$rtmpdump_out" || true
             if grep -qi "connected\|rtmp\|server" "$rtmpdump_out" 2>/dev/null; then
-                finding "MEDIUM" "RTMP" "Server RTMP risponde: $(head -2 "$rtmpdump_out")"
+                found "MEDIUM" "RTMP" "Server RTMP risponde: $(head -2 "$rtmpdump_out")"
             fi
         fi
     else
@@ -4214,7 +4210,7 @@ cmd_camcve() {
         local resp; resp=$(curl $curl_opts "$url" 2>/dev/null || true)
         if [[ -n "$pattern" ]]; then
             if echo "$resp" | grep -qi "$pattern"; then
-                finding "$severity" "CAM-CVE" "$cve VULNERABLE: $desc ($url)"
+                found "$severity" "CAM-CVE" "$cve VULNERABLE: $desc ($url)"
                 echo "[VULN] $cve $desc" | tee -a "$cve_out"
                 echo "$resp" | head -5 >> "$cve_out"
             else
@@ -4224,7 +4220,7 @@ cmd_camcve() {
         else
             local code; code=$(curl $curl_opts -o /dev/null -w "%{http_code}" "$url" 2>/dev/null || echo 000)
             if [[ "$code" == "200" ]]; then
-                finding "$severity" "CAM-CVE" "$cve POSSIBLMENTE VULNERABILE ($code): $desc"
+                found "$severity" "CAM-CVE" "$cve POSSIBLMENTE VULNERABILE ($code): $desc"
                 echo "[WARN] $cve $code $desc" | tee -a "$cve_out"
             else
                 echo "[SAFE] $cve HTTP $code $desc" >> "$cve_out"
@@ -4347,15 +4343,15 @@ cmd_sipfuzz() {
     local sipsak_out="$OUTDIR/sipsak_probe.txt"
     if command -v sipsak &>/dev/null; then
         # Single OPTIONS probe con verbose
-        run_cmd "sipsak -v -s sip:probe@${target}:${port} 2>&1" "$sipsak_out"
+        run_cmd "sipsak_probe" "sipsak -v -s sip:probe@${target}:${port} 2>&1 | tee $sipsak_out"
         if [[ -s "$sipsak_out" ]]; then
             # Server banner e Allow
             local server_hdr; server_hdr=$(grep -i "^Server:" "$sipsak_out" 2>/dev/null | head -1 || true)
             local allow_hdr; allow_hdr=$(grep -i "^Allow:" "$sipsak_out" 2>/dev/null | head -1 || true)
-            [[ -n "$server_hdr" ]] && finding "INFO" "SIP-FUZZ" "Server: $server_hdr"
-            [[ -n "$allow_hdr" ]] && finding "INFO" "SIP-FUZZ" "Metodi SIP permessi: $allow_hdr"
+            [[ -n "$server_hdr" ]] && found "INFO" "SIP-FUZZ" "Server: $server_hdr"
+            [[ -n "$allow_hdr" ]] && found "INFO" "SIP-FUZZ" "Metodi SIP permessi: $allow_hdr"
             if grep -q "200\|OK" "$sipsak_out" 2>/dev/null; then
-                finding "MEDIUM" "SIP-FUZZ" "Server SIP risponde a $method senza auth"
+                found "MEDIUM" "SIP-FUZZ" "Server SIP risponde a $method senza auth"
             fi
         fi
     else
@@ -4368,7 +4364,7 @@ cmd_sipfuzz() {
     if command -v sipsak &>/dev/null && [[ $DRY_RUN -eq 0 ]]; then
         timeout 20 sipsak -T -s "sip:trace@${target}:${port}" 2>&1 | tee "$trace_out" || true
         if grep -qi "hop\|Via\|200\|486" "$trace_out" 2>/dev/null; then
-            finding "INFO" "SIP-FUZZ" "SIP trace: $(wc -l < "$trace_out") hop(s) rilevati"
+            found "INFO" "SIP-FUZZ" "SIP trace: $(wc -l < "$trace_out") hop(s) rilevati"
         fi
     elif [[ $DRY_RUN -eq 1 ]]; then
         echo -e "${CYAN}[DRY-RUN]${NC} sipsak -T -s sip:trace@${target}:${port}" 
@@ -4379,9 +4375,9 @@ cmd_sipfuzz() {
         section "SIP INVITE Stress Test"
         local flood_out="$OUTDIR/sipsak_flood.txt"
         if command -v sipsak &>/dev/null; then
-            run_cmd "sipsak -f $count -s sip:stress@${target}:${port} 2>&1" "$flood_out"
+            run_cmd "sipsak_flood" "sipsak -f $count -s sip:stress@${target}:${port} 2>&1 | tee $flood_out"
             if grep -qi "flood\|request sent\|reply" "$flood_out" 2>/dev/null; then
-                finding "HIGH" "SIP-FUZZ" "INVITE stress test: server $target risponde — possibile DoS"
+                found "HIGH" "SIP-FUZZ" "INVITE stress test: server $target risponde — possibile DoS"
             fi
         fi
     fi
@@ -4389,12 +4385,11 @@ cmd_sipfuzz() {
     # ── SIP nmap fuzzer NSE ───────────────────────────────────
     section "SIP Header Analysis (nmap sip-methods)"
     local nmap_sip="$OUTDIR/nmap_sip_methods.txt"
-    run_cmd "nmap -sU -p $port --script sip-methods,sip-enum-users \
-        $NMAP_TIMING $target 2>/dev/null" "$nmap_sip"
+    run_cmd "nmap_sip" "nmap -sU -p $port --script sip-methods,sip-enum-users $NMAP_TIMING $target 2>/dev/null | tee $nmap_sip"
     if [[ -s "$nmap_sip" ]]; then
         while IFS= read -r line; do
             echo "$line" | grep -qE "^\|.*Method|^\|.*Extension" || continue
-            finding "INFO" "SIP-FUZZ" "$line"
+            found "INFO" "SIP-FUZZ" "$line"
         done < "$nmap_sip"
     fi
 
@@ -4437,15 +4432,14 @@ cmd_enip() {
     # ── nmap EtherNet/IP NSE scripts ─────────────────────────
     section "EtherNet/IP — nmap enip-info"
     local nmap_enip="$OUTDIR/nmap_enip.txt"
-    run_cmd "nmap -p $port -sV --script enip-info \
-        -oN $OUTDIR/nmap_enip.txt $NMAP_TIMING $target 2>/dev/null" "$nmap_enip"
+    run_cmd "nmap_enip" "nmap -p $port -sV --script enip-info -oN $nmap_enip $NMAP_TIMING $target 2>/dev/null"
     if [[ -s "$nmap_enip" ]]; then
         while IFS= read -r line; do
             echo "$line" | grep -qE "^\|.*(Product|Vendor|Serial|Revision|Identity)" || continue
-            finding "HIGH" "EtherNet/IP" "$line"
+            found "HIGH" "EtherNet/IP" "$line"
         done < "$nmap_enip"
         grep -qE "$port/tcp.*open" "$nmap_enip" 2>/dev/null && \
-            finding "HIGH" "EtherNet/IP" "EtherNet/IP porta $port aperta — PLC/ICS esposto"
+            found "HIGH" "EtherNet/IP" "EtherNet/IP porta $port aperta — PLC/ICS esposto"
     fi
 
     # ── UDP CIP List Identity broadcast ──────────────────────
@@ -4507,7 +4501,7 @@ except Exception as e:
 PYEOF
         if grep -q "EtherNet/IP.*Risposta" "$cip_out" 2>/dev/null; then
             while IFS= read -r line; do
-                echo "$line" | grep -q "Risposta" && finding "HIGH" "EtherNet/IP" "Dispositivo CIP risponde: $line"
+                echo "$line" | grep -q "Risposta" && found "HIGH" "EtherNet/IP" "Dispositivo CIP risponde: $line"
             done < "$cip_out"
         else
             log "Nessuna risposta EtherNet/IP (dispositivo non presente o filtrato)"
@@ -4517,10 +4511,9 @@ PYEOF
     # ── nmap UDP EtherNet/IP ──────────────────────────────────
     section "EtherNet/IP UDP Scan"
     local nmap_enip_udp="$OUTDIR/nmap_enip_udp.txt"
-    run_cmd "nmap -sU -p $port --script enip-info \
-        $NMAP_TIMING $target 2>/dev/null" "$nmap_enip_udp"
+    run_cmd "nmap_enip_udp" "nmap -sU -p $port --script enip-info $NMAP_TIMING $target 2>/dev/null | tee $nmap_enip_udp"
     [[ -s "$nmap_enip_udp" ]] && grep -qE "^\|" "$nmap_enip_udp" && \
-        finding "HIGH" "EtherNet/IP" "EtherNet/IP UDP: $(grep '^\|' "$nmap_enip_udp" | head -1)"
+        found "HIGH" "EtherNet/IP" "EtherNet/IP UDP: $(grep '^\|' "$nmap_enip_udp" | head -1)"
 
     ok "EtherNet/IP audit completato → $OUTDIR"
 }
