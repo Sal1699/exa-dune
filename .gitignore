@@ -16,3 +16,4 @@ reports/
 *creds*.txt
 *credentials*
 *passwords*
+__pycache__/

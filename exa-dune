@@ -1034,6 +1034,7 @@ _ensure_media_tools() {
 # ── Download wordlists aggiuntive da GitHub ───────────────────────────────────
 EXA_WL_DIR="/usr/share/exa-dune/wordlists"
 EXA_REPORTS_DIR="/home/kali/Desktop/EXA-DUNE-Reports"
+EXA_SCRIPTS_DIR="/usr/share/exa-dune/scripts"
 
 _init_reports_dir() {
     # Crea la cartella Desktop per i report se non esiste
@@ -1857,6 +1858,12 @@ cmd_web() {
         echo -e "${CYAN}[DRY-RUN]${NC} Form auth bypass + default creds test su ${base_url}"
     fi
 
+    local xss_script="$EXA_SCRIPTS_DIR/js/xss_generator.js"
+    if [[ -f "$xss_script" ]] && command -v node &>/dev/null; then
+        section "XSS Payload Testing (xss_generator.js)"
+        run_cmd "xss_test_js" "node \"$xss_script\" --target ${scheme}://${target}:${port} --mode test 2>&1 | tee \"$OUTDIR\"/xss_test.txt"
+    fi
+
     ok "Web audit completato → $OUTDIR"
 }
 
@@ -2038,6 +2045,12 @@ cmd_sip() {
         fi
     else
         echo -e "${CYAN}[DRY-RUN]${NC} SIP toll fraud probe (INVITE PSTN) → $target:$port"
+    fi
+
+    local sip_script="$EXA_SCRIPTS_DIR/python/sip_enum.py"
+    if [[ -f "$sip_script" ]]; then
+        section "SIP User Enumeration (sip_enum.py)"
+        run_cmd "sip_enum_py" "python3 \"$sip_script\" $target --port $port --range ${ext_range:-100-500} --transport udp 2>&1 | tee \"$OUTDIR\"/sip_enum_py.txt"
     fi
 
     ok "SIP audit completato → $OUTDIR"
@@ -3113,6 +3126,12 @@ cmd_mqtt() {
         done
     fi
 
+    local mqtt_script="$EXA_SCRIPTS_DIR/python/mqtt_audit.py"
+    if [[ -f "$mqtt_script" ]]; then
+        section "MQTT Deep Audit (mqtt_audit.py)"
+        run_cmd "mqtt_audit_py" "python3 \"$mqtt_script\" $target --port $port 2>&1 | tee \"$OUTDIR\"/mqtt_audit.txt"
+    fi
+
     ok "MQTT audit completato → $OUTDIR"
 }
 
@@ -3227,6 +3246,12 @@ cmd_modbus() {
         local fc3_data; fc3_data=$(grep -c "[0-9a-f]" "$OUTDIR/modbus_fc3.txt" 2>/dev/null || echo 0)
         [[ $fc3_data -gt 2 ]] && \
             found HIGH "Modbus FC3 — registri leggibili senza autenticazione: scrittura probabilmente possibile"
+    fi
+
+    local modbus_script="$EXA_SCRIPTS_DIR/python/modbus_rw.py"
+    if [[ -f "$modbus_script" ]]; then
+        section "Modbus R/W PoC (modbus_rw.py)"
+        run_cmd "modbus_rw_py" "python3 \"$modbus_script\" $target --port $port --action enum 2>&1 | tee \"$OUTDIR\"/modbus_rw.txt"
     fi
 
     ok "Modbus/ICS audit completato → $OUTDIR"
@@ -3359,6 +3384,12 @@ cmd_upnp() {
         grep -oP '(?<=<manufacturer>)[^<]+|(?<=<modelName>)[^<]+|(?<=<firmwareVersion>)[^<]+' \
             "$OUTDIR/upnp_description.txt" 2>/dev/null \
             | tee "$OUTDIR/upnp_device_info.txt" || true
+    fi
+
+    local upnp_script="$EXA_SCRIPTS_DIR/python/upnp_exploit.py"
+    if [[ -f "$upnp_script" ]]; then
+        section "UPnP Exploitation (upnp_exploit.py)"
+        run_cmd "upnp_exploit_py" "python3 \"$upnp_script\" $target --action addport 2>&1 | tee \"$OUTDIR\"/upnp_exploit.txt"
     fi
 
     ok "UPnP audit completato → $OUTDIR"
@@ -3804,6 +3835,12 @@ s.close()
             fi
         fi
     done
+
+    local rtsp_fp_script="$EXA_SCRIPTS_DIR/python/rtsp_fingerprint.py"
+    if [[ -f "$rtsp_fp_script" ]]; then
+        section "RTSP Vendor Fingerprint (rtsp_fingerprint.py)"
+        run_cmd "rtsp_fp_py" "python3 \"$rtsp_fp_script\" $target --port $port 2>&1 | tee \"$OUTDIR\"/rtsp_fingerprint.txt"
+    fi
 
     ok "RTSP audit completato → $OUTDIR"
 }
@@ -4271,6 +4308,12 @@ cmd_coap() {
 
     else
         warn "coap-client non trovato — usa nmap results (apt install libcoap2-bin)"
+    fi
+
+    local coap_script="$EXA_SCRIPTS_DIR/python/coap_scan.py"
+    if [[ -f "$coap_script" ]]; then
+        section "CoAP Discovery (custom scanner)"
+        run_cmd "coap_scan" "python3 \"$coap_script\" $target --port $port --action discover 2>&1 | tee \"$OUTDIR\"/coap_scan.txt"
     fi
 
     ok "CoAP audit completato → $OUTDIR"
@@ -5032,6 +5075,12 @@ cmd_camcve() {
                 "$base_url:8000" "onvif\|soap\|device" "MEDIUM"
             ;;
     esac
+
+    local cam_batch_script="$EXA_SCRIPTS_DIR/python/cam_cve_batch.py"
+    if [[ -f "$cam_batch_script" ]]; then
+        section "Camera CVE Batch Check (cam_cve_batch.py)"
+        run_cmd "cam_cve_batch_py" "python3 \"$cam_batch_script\" $target --vendor ${vendor:-auto} 2>&1 | tee \"$OUTDIR\"/cam_cve_batch.txt"
+    fi
 
     ok "Camera CVE scan completato → $OUTDIR (vendor: $vendor)"
 }
@@ -5911,6 +5960,12 @@ cmd_http() {
                 echo "?${param}= header injection" >> "$OUTDIR/http_injection.txt"
             fi
         done
+    fi
+
+    local http_fuzz_script="$EXA_SCRIPTS_DIR/python/http_iot_fuzz.py"
+    if [[ -f "$http_fuzz_script" ]]; then
+        section "HTTP IoT Fuzzing (http_iot_fuzz.py)"
+        run_cmd "http_fuzz_py" "python3 \"$http_fuzz_script\" $target --port $port --scheme $scheme --mode all 2>&1 | tee \"$OUTDIR\"/http_fuzz.txt"
     fi
 
     ok "HTTP exploitation completato → $OUTDIR"
@@ -9804,6 +9859,67 @@ usage_install() {
     echo "  --dry-run      Mostra cosa verrebbe installato senza installare"
 }
 
+_install_scripts() {
+    local scripts_dir="$EXA_SCRIPTS_DIR"
+    local repo_scripts_dir
+    repo_scripts_dir="$(dirname "$SCRIPT_PATH")/scripts"
+
+    mkdir -p "$scripts_dir/python" "$scripts_dir/js" "$scripts_dir/sh"
+
+    if [[ -d "$repo_scripts_dir" ]]; then
+        log "Installazione script da repo locale..."
+        cp -r "$repo_scripts_dir/python/"*.py "$scripts_dir/python/" 2>/dev/null || true
+        cp -r "$repo_scripts_dir/js/"*.js      "$scripts_dir/js/"     2>/dev/null || true
+        cp -r "$repo_scripts_dir/sh/"*.sh      "$scripts_dir/sh/"     2>/dev/null || true
+        chmod +x "$scripts_dir/sh/"*.sh     2>/dev/null || true
+        chmod +x "$scripts_dir/python/"*.py 2>/dev/null || true
+    else
+        log "Download script da GitHub..."
+        local base_url="https://raw.githubusercontent.com/Sal1699/exa-dune/main/scripts"
+        local py_scripts=(sip_enum.py onvif_brute.py modbus_rw.py coap_scan.py rtsp_fingerprint.py mqtt_audit.py upnp_exploit.py cam_cve_batch.py http_iot_fuzz.py sip_pcap_creds.py)
+        local js_scripts=(websocket_audit.js xss_generator.js)
+        local sh_scripts=(voip_capture.sh net_recon.sh)
+
+        for f in "${py_scripts[@]}"; do
+            printf "  Download %-40s " "$f..."
+            curl -sfL --max-time 30 "$base_url/python/$f" -o "$scripts_dir/python/$f" 2>/dev/null \
+                && echo "OK" || echo "FAIL"
+        done
+        for f in "${js_scripts[@]}"; do
+            printf "  Download %-40s " "$f..."
+            curl -sfL --max-time 30 "$base_url/js/$f" -o "$scripts_dir/js/$f" 2>/dev/null \
+                && echo "OK" || echo "FAIL"
+        done
+        for f in "${sh_scripts[@]}"; do
+            printf "  Download %-40s " "$f..."
+            curl -sfL --max-time 30 "$base_url/sh/$f" -o "$scripts_dir/sh/$f" 2>/dev/null \
+                && echo "OK" || { echo "FAIL"; continue; }
+            chmod +x "$scripts_dir/sh/$f"
+        done
+    fi
+
+    ok "Script installati in: $scripts_dir"
+
+    # Installa dipendenze Python
+    log "Verifica dipendenze Python..."
+    python3 -c "import paho.mqtt.client" 2>/dev/null \
+        && ok "paho-mqtt OK" \
+        || { pip3 install paho-mqtt -q 2>/dev/null && ok "paho-mqtt installato" || warn "paho-mqtt non installato"; }
+    python3 -c "import scapy" 2>/dev/null \
+        && ok "scapy OK" \
+        || warn "scapy non trovato (sip_pcap_creds.py limitato)"
+
+    # Node.js check per script JS
+    if command -v node &>/dev/null; then
+        ok "Node.js: $(node --version)"
+        node -e "require('ws')" 2>/dev/null \
+            && ok "ws OK" \
+            || { npm install -g ws 2>/dev/null && ok "ws installato" || warn "ws npm package non installato (websocket_audit.js limitato)"; }
+    else
+        warn "Node.js non trovato — script JS disabilitati. Installa: apt install nodejs"
+    fi
+}
+
 cmd_install() {
     local do_wordlists=0
     while [[ $# -gt 0 ]]; do
@@ -9975,6 +10091,14 @@ cmd_install() {
         fi
     else
         echo -e "${CYAN}[DRY-RUN]${NC} Verifica/installazione weasyprint"
+    fi
+
+    echo ""
+    echo -e "${BOLD}[4/4] Installazione script ausiliari...${NC}"
+    if [[ $DRY_RUN -eq 0 ]]; then
+        _install_scripts
+    else
+        echo -e "${CYAN}[DRY-RUN]${NC} _install_scripts → $EXA_SCRIPTS_DIR"
     fi
 
     ok "exa-dune v${VERSION} pronto. Usa: exa-dune help"
@@ -10157,6 +10281,12 @@ PYEOF
         break  # Usa solo il primo porto raggiungibile
     done
 
+    local onvif_script="$EXA_SCRIPTS_DIR/python/onvif_brute.py"
+    if [[ -f "$onvif_script" ]]; then
+        section "ONVIF Default Credentials (onvif_brute.py)"
+        run_cmd "onvif_brute" "python3 \"$onvif_script\" $target --port $port 2>&1 | tee \"$OUTDIR\"/onvif_brute.txt"
+    fi
+
     ok "ONVIF audit completato → $OUTDIR"
 }
 
@@ -10241,6 +10371,12 @@ cmd_update() {
         version_after=$(grep -m1 '^VERSION=' "$updated_script" | cut -d'"' -f2 || echo "sconosciuta")
         ok "Aggiornamento completato: $version_before → $version_after"
         ok "Script installato in: /usr/local/bin/exa-dune"
+
+        # Aggiorna script ausiliari
+        if [[ -d "$repo_dir/scripts" ]]; then
+            log "Aggiornamento script ausiliari..."
+            _install_scripts
+        fi
     else
         warn "Repository git non trovato. Download diretto da GitHub..."
         local url="https://raw.githubusercontent.com/Sal1699/exa-dune/main/exa-dune"
