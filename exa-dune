@@ -78,6 +78,8 @@ found() {
         if [[ "${JSON_OUTPUT:-0}" -eq 1 && -n "$findings_dir" ]]; then
             _json_append_finding "$sev" "$msg" "$findings_dir"
         fi
+        # SQLite: registra finding nel DB storico
+        _db_insert_finding "$sev" "$msg" 2>/dev/null || true
     fi
 }
 
@@ -944,6 +946,9 @@ setup_outdir() {
         # Log sempre nella root di sessione, non nella subdir del modulo
         _log_file="$OUTDIR_BASE/exa-dune.log"
         [[ -n "$sub" ]] && echo "--- Modulo: $sub START $(date) ---" >> "$_log_file" || true
+        # SQLite: inizializza DB e registra assessment
+        _db_init 2>/dev/null || true
+        _db_insert_assessment "$target" "${sub:-global}" "$OUTDIR_BASE" 2>/dev/null || true
     else
         _log_file=""
     fi
@@ -7900,6 +7905,8 @@ HTMLEOF
         # 1. EXECUTIVE SUMMARY
         echo "<h1>1. Executive Summary</h1>"
         echo "<p>Assessment automatizzato eseguito con <strong>exa-dune v${VERSION}</strong> sul target <strong>$(echo "$target" | sed 's/</\&lt;/g;s/>/\&gt;/g')</strong> in data $(date '+%d/%m/%Y').</p>"
+        # Sommario Esecutivo narrativo
+        _exec_summary_narrative "$target" "$n_critical" "$n_high" "$n_medium" "$n_low" "$outdir"
         echo "<p>Totale finding rilevati: <strong>$n_total</strong></p>"
 
         echo "<div class='exec-grid'>"
@@ -9016,6 +9023,13 @@ cmd_help() {
         network-sweep) banner; usage_network_sweep ;;
         self-test)     banner; usage_self_test     ;;
         diff)          banner; usage_diff          ;;
+        update)        banner; usage_update        ;;
+        resume)        banner; usage_resume        ;;
+        schedule)      banner; usage_schedule      ;;
+        firmware)      banner; usage_firmware      ;;
+        voip-enum)     banner; usage_voip_enum     ;;
+        config-audit)  banner; usage_config_audit  ;;
+        history)       banner; usage_history       ;;
         *)
             banner
             echo -e "${BOLD}Uso:${NC}  exa-dune <subcommand> <TARGET> [OPTIONS]"
@@ -9065,6 +9079,15 @@ cmd_help() {
             printf "  %-15s %s\n" "install"       "Installa tutti i tool mancanti  (richiede root)"
             printf "  %-15s %s\n" "wordlists"     "Scarica wordlist aggiuntive da GitHub"
             echo ""
+            echo -e "${BOLD}Subcommands aggiuntivi:${NC}"
+            printf "  %-15s %s\n" "update"        "Aggiorna exa-dune dal repo git o da GitHub"
+            printf "  %-15s %s\n" "resume"        "Riprende assessment interrotto (legge session.json)"
+            printf "  %-15s %s\n" "schedule"      "Gestione scan periodici via cron"
+            printf "  %-15s %s\n" "firmware"      "Analisi firmware: binwalk, credenziali, SUID, certificati"
+            printf "  %-15s %s\n" "voip-enum"     "Enum VoIP avanzato: rate limit, user enum, toll fraud"
+            printf "  %-15s %s\n" "config-audit"  "Audit file di configurazione: credenziali, SNMP, TLS"
+            printf "  %-15s %s\n" "history"       "Storico assessment da database SQLite"
+            echo ""
             echo -e "${BOLD}Esempi:${NC}"
             echo "  exa-dune scan 192.168.1.1 --stealth"
             echo "  exa-dune web 192.168.1.1 --port 8080 --scheme http"
@@ -9078,6 +9101,14 @@ cmd_help() {
             echo "  exa-dune cam-cve 192.168.1.1 --vendor commend"
             echo "  exa-dune report /root/pentest/exa-dune-192-168-1-1_20260322/ --pdf"
             echo "  exa-dune diff /root/pentest/old/ /root/pentest/new/ --pdf"
+            echo "  exa-dune update"
+            echo "  exa-dune resume /root/pentest/exa-dune-192-168-1-1_20260322/"
+            echo "  exa-dune schedule --add --target 192.168.1.1 --cron '0 2 * * *' --profile voip-gateway"
+            echo "  exa-dune firmware /root/firmware.bin --vendor audiocodes"
+            echo "  exa-dune voip-enum 192.168.1.5 --flood-test --range 100-999"
+            echo "  exa-dune config-audit /root/pentest/configs/ --recursive"
+            echo "  exa-dune history --last 10"
+            echo "  exa-dune history --target 192.168.1.1"
             echo "  exa-dune self-test"
             echo "  exa-dune self-test --install-missing"
             echo ""
@@ -9461,6 +9492,1265 @@ PYEOF
 }
 
 # ============================================================
+#  FUNZIONALITÀ 1 — exa-dune update
+# ============================================================
+usage_update() {
+    echo "Uso: exa-dune update [OPTIONS]"
+    echo ""
+    echo "  Aggiorna exa-dune all'ultima versione dal repository git."
+    echo "  Se il repo git non è trovato, scarica direttamente da GitHub."
+    echo ""
+    echo "Opzioni:"
+    echo "  --dry-run      Mostra cosa verrebbe fatto senza eseguire"
+}
+
+cmd_update() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dry-run) DRY_RUN=1; shift ;;
+            --help|-h) usage_update; exit 0 ;;
+            *) err "Opzione sconosciuta: $1"; usage_update; exit 1 ;;
+        esac
+    done
+
+    banner
+    section "Update exa-dune"
+
+    local version_before="$VERSION"
+    log "Versione corrente: $version_before"
+
+    # Cerca la directory del repo git partendo da SCRIPT_PATH
+    local script_dir; script_dir=$(dirname "$SCRIPT_PATH")
+    local repo_dir=""
+    local search_dir="$script_dir"
+    for _ in 1 2 3 4 5; do
+        if [[ -d "$search_dir/.git" ]]; then
+            repo_dir="$search_dir"
+            break
+        fi
+        search_dir=$(dirname "$search_dir")
+        [[ "$search_dir" == "/" ]] && break
+    done
+
+    if [[ -n "$repo_dir" ]]; then
+        log "Repository git trovato: $repo_dir"
+        if [[ "$DRY_RUN" -eq 1 ]]; then
+            echo -e "${CYAN}[DRY-RUN]${NC} git -C $repo_dir pull origin main"
+            echo -e "${CYAN}[DRY-RUN]${NC} cp <script> /usr/local/bin/exa-dune && chmod +x /usr/local/bin/exa-dune"
+            return 0
+        fi
+
+        local git_output
+        git_output=$(git -C "$repo_dir" pull origin main 2>&1) || {
+            err "git pull fallito: $git_output"
+            exit 1
+        }
+        log "$git_output"
+
+        if echo "$git_output" | grep -q "Already up to date"; then
+            ok "exa-dune è già all'ultima versione ($version_before)"
+            return 0
+        fi
+
+        # Trova il file exa-dune nel repo
+        local updated_script=""
+        if [[ -f "$repo_dir/exa-dune" ]]; then
+            updated_script="$repo_dir/exa-dune"
+        else
+            updated_script=$(find "$repo_dir" -maxdepth 2 -name "exa-dune" -not -path "*/.git/*" 2>/dev/null | head -1)
+        fi
+
+        if [[ -z "$updated_script" ]]; then
+            err "File exa-dune non trovato nel repo dopo il pull"
+            exit 1
+        fi
+
+        cp "$updated_script" /usr/local/bin/exa-dune
+        chmod +x /usr/local/bin/exa-dune
+
+        local version_after
+        version_after=$(grep -m1 '^VERSION=' "$updated_script" | cut -d'"' -f2 || echo "sconosciuta")
+        ok "Aggiornamento completato: $version_before → $version_after"
+        ok "Script installato in: /usr/local/bin/exa-dune"
+    else
+        warn "Repository git non trovato. Download diretto da GitHub..."
+        local url="https://raw.githubusercontent.com/Sal1699/exa-dune/main/exa-dune"
+        if [[ "$DRY_RUN" -eq 1 ]]; then
+            echo -e "${CYAN}[DRY-RUN]${NC} curl -fsSL $url -o /usr/local/bin/exa-dune"
+            echo -e "${CYAN}[DRY-RUN]${NC} chmod +x /usr/local/bin/exa-dune"
+            return 0
+        fi
+
+        curl -fsSL "$url" -o /tmp/exa-dune-update || {
+            err "Download fallito da: $url"
+            exit 1
+        }
+
+        local version_after
+        version_after=$(grep -m1 '^VERSION=' /tmp/exa-dune-update | cut -d'"' -f2 || echo "sconosciuta")
+        cp /tmp/exa-dune-update /usr/local/bin/exa-dune
+        chmod +x /usr/local/bin/exa-dune
+        rm -f /tmp/exa-dune-update
+        ok "Aggiornamento completato via download diretto: $version_before → $version_after"
+        ok "Script installato in: /usr/local/bin/exa-dune"
+    fi
+}
+
+# ============================================================
+#  FUNZIONALITÀ 2 — exa-dune resume <dir>
+# ============================================================
+
+# Mappa modulo → funzione cmd_*
+_module_cmd_map() {
+    local mod="$1"
+    case "$mod" in
+        scan)    echo "cmd_scan" ;;
+        web)     echo "cmd_web" ;;
+        sip)     echo "cmd_sip" ;;
+        smb)     echo "cmd_smb" ;;
+        creds)   echo "cmd_creds" ;;
+        snmp)    echo "cmd_snmp" ;;
+        ftp)     echo "cmd_ftp" ;;
+        ssh)     echo "cmd_ssh" ;;
+        telnet)  echo "cmd_telnet" ;;
+        mqtt)    echo "cmd_mqtt" ;;
+        modbus)  echo "cmd_modbus" ;;
+        upnp)    echo "cmd_upnp" ;;
+        ssl)     echo "cmd_ssl" ;;
+        tftp)    echo "cmd_tftp" ;;
+        rtsp)    echo "cmd_rtsp" ;;
+        dns)     echo "cmd_dns" ;;
+        vnc)     echo "cmd_vnc" ;;
+        rdp)     echo "cmd_rdp" ;;
+        ldap)    echo "cmd_ldap" ;;
+        *)       echo "" ;;
+    esac
+}
+
+_session_init() {
+    local outdir="$1" target="$2"
+    shift 2
+    local modules_all=("$@")
+    [[ "$DRY_RUN" -eq 1 ]] && return
+
+    local ts; ts=$(date -u +%Y-%m-%dT%H:%M:%S)
+    local modules_json; modules_json=$(printf '"%s",' "${modules_all[@]}" | sed 's/,$//')
+    python3 -c "
+import json
+d={
+    'target': '$target',
+    'modules_done': [],
+    'modules_pending': [$(printf '"%s",' "${modules_all[@]}" | sed 's/,$//')],
+    'timestamp': '$ts'
+}
+print(json.dumps(d, indent=2))
+" > "$outdir/session.json" 2>/dev/null || true
+}
+
+_session_mark_done() {
+    local outdir="$1" module="$2"
+    [[ "$DRY_RUN" -eq 1 ]] && return
+    local session_file="$outdir/session.json"
+    [[ -f "$session_file" ]] || return 0
+    # FIX 3 — usa flock per operazione atomica + variabili via env (no interpolazione)
+    export SESSION_FILE="$session_file" MODULE="$module"
+    (
+        flock -x 200
+        local _py_smd; _py_smd=$(mktemp /tmp/exa_smd_XXXXXX.py)
+        cat > "$_py_smd" << 'PYEOF'
+import json, os
+f = os.environ['SESSION_FILE']
+mod = os.environ['MODULE']
+with open(f) as fh:
+    d = json.load(fh)
+if mod not in d.get('modules_done', []):
+    d.setdefault('modules_done', []).append(mod)
+if mod in d.get('modules_pending', []):
+    d['modules_pending'].remove(mod)
+with open(f + '.tmp', 'w') as fh:
+    json.dump(d, fh, indent=2)
+os.replace(f + '.tmp', f)
+PYEOF
+        python3 "$_py_smd" 2>/dev/null || true
+        rm -f "$_py_smd"
+    ) 200>"$session_file.lock"
+    unset SESSION_FILE MODULE
+}
+
+_session_get_pending() {
+    local outdir="$1"
+    [[ ! -f "$outdir/session.json" ]] && return
+    # FIX 5 — env var invece di interpolazione diretta nel Python
+    local _sf="$outdir/session.json"
+    local _py; _py=$(mktemp /tmp/exa_gp_XXXXXX.py)
+    cat > "$_py" << 'PYEOF'
+import json, os
+with open(os.environ['SESSION_FILE']) as f:
+    d = json.load(f)
+for m in d.get('modules_pending', []):
+    print(m)
+PYEOF
+    SESSION_FILE="$_sf" python3 "$_py" 2>/dev/null || true
+    rm -f "$_py"
+}
+
+usage_resume() {
+    echo "Uso: exa-dune resume <DIR> [OPTIONS]"
+    echo ""
+    echo "  Riprende un assessment precedente leggendo session.json dalla directory."
+    echo ""
+    echo "Opzioni:"
+    echo "  --dry-run      Mostra cosa verrebbe fatto senza eseguire"
+}
+
+cmd_resume() {
+    local outdir=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dry-run) DRY_RUN=1; shift ;;
+            --help|-h) usage_resume; exit 0 ;;
+            -*)        err "Opzione sconosciuta: $1"; usage_resume; exit 1 ;;
+            *)         outdir="$1"; shift ;;
+        esac
+    done
+
+    [[ -z "$outdir" ]] && { err "Directory non specificata"; usage_resume; exit 1; }
+    # FIX 4 — validazione path: deve essere assoluto e non contenere ..
+    [[ "$outdir" = /* ]] || { err "Path deve essere assoluto"; exit 1; }
+    [[ "$outdir" =~ \.\. ]] && { err "Path traversal non consentito"; exit 1; }
+    [[ -d "$outdir" ]] || { err "Directory non trovata: $outdir"; exit 1; }
+    local session_file="$outdir/session.json"
+    [[ ! -f "$session_file" ]] && { err "session.json non trovato in: $outdir"; exit 1; }
+
+    banner
+    section "Resume Assessment"
+
+    local target modules_done modules_pending ts
+    # FIX 5 — env var invece di interpolazione $session_file nel Python
+    local _py_rs; _py_rs=$(mktemp /tmp/exa_rs_XXXXXX.py)
+    cat > "$_py_rs" << 'PYEOF'
+import json, os, sys
+f = os.environ['SESSION_FILE']
+key = os.environ.get('PY_KEY', 'target')
+with open(f) as fh:
+    d = json.load(fh)
+if key == 'modules_done':
+    for m in d.get('modules_done', []):
+        print(m)
+else:
+    print(d.get(key, ''))
+PYEOF
+    target=$(SESSION_FILE="$session_file" PY_KEY="target" python3 "$_py_rs" 2>/dev/null || echo "")
+    ts=$(SESSION_FILE="$session_file" PY_KEY="timestamp" python3 "$_py_rs" 2>/dev/null || echo "")
+    mapfile -t modules_done < <(SESSION_FILE="$session_file" PY_KEY="modules_done" python3 "$_py_rs" 2>/dev/null || true)
+    rm -f "$_py_rs"
+    mapfile -t modules_pending < <(_session_get_pending "$outdir")
+
+    local n_done=${#modules_done[@]}
+    local n_pending=${#modules_pending[@]}
+    local n_total=$(( n_done + n_pending ))
+
+    log "Target:   $target"
+    log "Sessione: $ts"
+    log "Completati: $n_done / $n_total moduli"
+    [[ $n_done -gt 0 ]] && log "Moduli completati: ${modules_done[*]}"
+
+    if [[ $n_pending -eq 0 ]]; then
+        ok "Assessment già completato. Nessun modulo pending."
+        return 0
+    fi
+
+    log "Moduli pending: ${modules_pending[*]}"
+
+    OUTDIR_BASE="$outdir"
+
+    for mod in "${modules_pending[@]}"; do
+        section "Esecuzione modulo: $mod"
+        local fn; fn=$(_module_cmd_map "$mod")
+        if [[ -z "$fn" ]]; then
+            warn "Modulo '$mod' non riconosciuto — saltato"
+            _session_mark_done "$outdir" "$mod"
+            continue
+        fi
+
+        if [[ "$DRY_RUN" -eq 1 ]]; then
+            echo -e "${CYAN}[DRY-RUN]${NC} $fn $target"
+        else
+            "$fn" "$target" || warn "Modulo $mod terminato con errore (continuo)"
+            _session_mark_done "$outdir" "$mod"
+            ok "Modulo $mod completato"
+        fi
+    done
+
+    ok "Resume completato. Assessment per $target terminato."
+}
+
+# ============================================================
+#  FUNZIONALITÀ 3 — exa-dune schedule
+# ============================================================
+usage_schedule() {
+    echo "Uso: exa-dune schedule [--add|--list|--remove ID] [OPTIONS]"
+    echo ""
+    echo "  Gestisce scan periodici via cron."
+    echo ""
+    echo "Opzioni:"
+    echo "  --add              Aggiunge un cron job"
+    echo "  --list             Mostra i cron job exa-dune attivi"
+    echo "  --remove ID        Rimuove il cron job con ID specificato"
+    echo "  --target TARGET    Target per il cron job (richiesto con --add)"
+    echo "  --cron EXPR        Espressione cron (es. '0 2 * * *')"
+    echo "  --profile PROFILE  Profilo pipeline (es. voip-gateway, ip-camera)"
+    echo "  --dry-run"
+}
+
+cmd_schedule() {
+    local action="" target="" cron_expr="" profile="default" remove_id=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --add)         action="add";  shift ;;
+            --list)        action="list"; shift ;;
+            --remove)      action="remove"; _req_arg "--remove" "${2:-}"; remove_id="$2"; shift 2 ;;
+            --target)      _req_arg "--target" "${2:-}"; target="$2"; shift 2 ;;
+            --cron)        _req_arg "--cron" "${2:-}"; cron_expr="$2"; shift 2 ;;
+            --profile)     _req_arg "--profile" "${2:-}"; profile="$2"; shift 2 ;;
+            --dry-run)     DRY_RUN=1; shift ;;
+            --help|-h)     usage_schedule; exit 0 ;;
+            -*)            err "Opzione sconosciuta: $1"; usage_schedule; exit 1 ;;
+            *)             [[ -z "$target" ]] && target="$1"; shift ;;
+        esac
+    done
+
+    banner
+    section "Gestione Scheduled Scan"
+
+    local exa_bin="/usr/local/bin/exa-dune"
+    local sched_base="/root/pentest/scheduled"
+
+    case "${action:-list}" in
+        list)
+            log "Cron job exa-dune attivi:"
+            local crontab_out; crontab_out=$(crontab -l 2>/dev/null || echo "")
+            if echo "$crontab_out" | grep -q "exa-dune"; then
+                local idx=0
+                while IFS= read -r line; do
+                    echo "$line" | grep -q "exa-dune" || continue
+                    ((idx++)) || true
+                    printf "  [%d] %s\n" "$idx" "$line"
+                done <<< "$crontab_out"
+            else
+                log "Nessun cron job exa-dune trovato."
+            fi
+            ;;
+        add)
+            [[ -z "$target" ]]     && { err "--target richiesto per --add"; exit 1; }
+            [[ -z "$cron_expr" ]]  && { err "--cron richiesto per --add"; exit 1; }
+
+            # FIX 2 — Valida cron expression (solo caratteri sicuri, esattamente 5 campi)
+            [[ "$cron_expr" =~ ^[0-9*/,\ -]{9,}$ ]] || { err "Cron expression non valida: $cron_expr"; exit 1; }
+            local field_count; field_count=$(echo "$cron_expr" | wc -w)
+            [[ $field_count -eq 5 ]] || { err "Cron expression deve avere 5 campi (trovati: $field_count)"; exit 1; }
+
+            # FIX 2 — Shell-escape variabili prima di inserirle nel cron
+            local safe_target="${target//./-}"
+            local q_target; q_target=$(printf '%q' "$target")
+            local q_profile; q_profile=$(printf '%q' "$profile")
+            local q_output; q_output=$(printf '%q' "$sched_base/${safe_target}_\$(date +%Y%m%d_%H%M%S)")
+            local job_cmd="$exa_bin pipeline $q_target --profile $q_profile --output $q_output"
+            # Aggiungi diff contro run precedente
+            local full_job="$job_cmd && (ls -dt $sched_base/${safe_target}_* 2>/dev/null | head -2 | xargs -r sh -c 'if [ \$(echo \"\$*\" | wc -w) -ge 2 ]; then $exa_bin diff \$(echo \"\$*\" | awk \"{print \\\$2}\") \$(echo \"\$*\" | awk \"{print \\\$1}\") --output \$(echo \"\$*\" | awk \"{print \\\$1}\")/diff_vs_prev.html; fi' _)"
+
+            if [[ "$DRY_RUN" -eq 1 ]]; then
+                echo -e "${CYAN}[DRY-RUN]${NC} Aggiunge cron: $cron_expr $full_job"
+                return 0
+            fi
+
+            mkdir -p "$sched_base"
+            local existing; existing=$(crontab -l 2>/dev/null || echo "")
+            (echo "$existing"; echo "$cron_expr $full_job # exa-dune-schedule:$safe_target") | crontab -
+            ok "Cron job aggiunto per $target (profilo: $profile)"
+            log "Espressione cron: $cron_expr"
+            log "Output in: $sched_base/${safe_target}_<timestamp>/"
+            ;;
+        remove)
+            [[ -z "$remove_id" ]] && { err "ID non specificato per --remove"; exit 1; }
+            if [[ "$DRY_RUN" -eq 1 ]]; then
+                echo -e "${CYAN}[DRY-RUN]${NC} Rimuove cron job ID: $remove_id"
+                return 0
+            fi
+            local existing; existing=$(crontab -l 2>/dev/null || echo "")
+            local idx=0 new_cron=""
+            while IFS= read -r line; do
+                if echo "$line" | grep -q "exa-dune"; then
+                    ((idx++)) || true
+                    [[ "$idx" -eq "$remove_id" ]] && { log "Rimosso: $line"; continue; }
+                fi
+                new_cron+="$line"$'\n'
+            done <<< "$existing"
+            echo "$new_cron" | crontab -
+            ok "Cron job #$remove_id rimosso"
+            ;;
+        *)
+            err "Azione sconosciuta: $action"
+            usage_schedule; exit 1
+            ;;
+    esac
+}
+
+# ============================================================
+#  FUNZIONALITÀ 4 — exa-dune firmware
+# ============================================================
+usage_firmware() {
+    echo "Uso: exa-dune firmware <FILE_O_URL> [OPTIONS]"
+    echo ""
+    echo "  Analisi firmware: estrazione, credenziali hardcoded, certificati, SUID."
+    echo ""
+    echo "Opzioni:"
+    echo "  --vendor VENDOR    Analisi vendor-specifica (audiocodes|reolink|axis|commend)"
+    echo "  --output DIR       Directory output"
+    echo "  --dry-run"
+}
+
+cmd_firmware() {
+    local firmware_src="" vendor="" output_dir=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --vendor)  _req_arg "--vendor" "${2:-}"; vendor="$2"; shift 2 ;;
+            --output)  _req_arg "--output" "${2:-}"; output_dir="$2"; shift 2 ;;
+            --dry-run) DRY_RUN=1; shift ;;
+            --help|-h) usage_firmware; exit 0 ;;
+            -*)        err "Opzione sconosciuta: $1"; usage_firmware; exit 1 ;;
+            *)         firmware_src="$1"; shift ;;
+        esac
+    done
+
+    [[ -z "$firmware_src" ]] && { err "FILE o URL del firmware mancante"; usage_firmware; exit 1; }
+
+    banner
+    section "Firmware Analysis"
+
+    local ts; ts=$(date +%Y%m%d_%H%M%S)
+    # FIX 7 — rimuovi caratteri non sicuri dal nome file
+    local safe_name; safe_name=$(basename "$firmware_src" | tr -cd '[:alnum:]._-' | tr ' ' '_')
+    output_dir="${output_dir:-/root/pentest/firmware_${safe_name}_${ts}}"
+    OUTDIR_BASE="$output_dir"
+    OUTDIR="$output_dir"
+
+    if [[ "$DRY_RUN" -eq 0 ]]; then
+        mkdir -p "$output_dir"
+        _log_file="$output_dir/firmware.log"
+    fi
+
+    local firmware_file="$firmware_src"
+
+    # 1. Download se URL
+    if echo "$firmware_src" | grep -qE '^https?://'; then
+        log "Download firmware da: $firmware_src"
+        firmware_file="$output_dir/$safe_name"
+        if [[ "$DRY_RUN" -eq 1 ]]; then
+            echo -e "${CYAN}[DRY-RUN]${NC} curl -fL '$firmware_src' -o '$firmware_file'"
+        else
+            curl -fL "$firmware_src" -o "$firmware_file" || { err "Download fallito"; exit 1; }
+            ok "Firmware scaricato: $firmware_file"
+        fi
+    else
+        [[ ! -f "$firmware_src" && "$DRY_RUN" -eq 0 ]] && { err "File non trovato: $firmware_src"; exit 1; }
+        firmware_file="$firmware_src"
+    fi
+
+    # 2. Analisi binwalk
+    section "Binwalk — Estrazione filesystem"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        echo -e "${CYAN}[DRY-RUN]${NC} binwalk -e '$firmware_file' --directory='$output_dir/extracted'"
+        echo -e "${CYAN}[DRY-RUN]${NC} binwalk --entropy '$firmware_file'"
+    else
+        if require_tool binwalk; then
+            log "Estrazione filesystem con binwalk..."
+            binwalk -e "$firmware_file" --directory="$output_dir/extracted" 2>&1 | tee "$output_dir/binwalk_extract.txt" || true
+            ok "Estrazione completata → $output_dir/extracted"
+
+            log "Analisi entropia..."
+            binwalk --entropy "$firmware_file" 2>&1 | tee "$output_dir/binwalk_entropy.txt" || true
+
+            # Rileva zone ad alta entropia (possibile cifratura)
+            if grep -qE "Rising|Falling|[0-9]\.[89][0-9]" "$output_dir/binwalk_entropy.txt" 2>/dev/null; then
+                found MEDIUM "Firmware: zone ad alta entropia rilevate (possibile cifratura/compressione)"
+            fi
+        else
+            warn "binwalk non disponibile — estrazione saltata"
+        fi
+    fi
+
+    # 3. Ricerca credenziali hardcoded
+    section "Ricerca Credenziali Hardcoded"
+    local extract_dir="$output_dir/extracted"
+
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        echo -e "${CYAN}[DRY-RUN]${NC} grep credenziali in filesystem estratto"
+    else
+        if [[ -d "$extract_dir" ]]; then
+            # /etc/passwd e /etc/shadow
+            local passwd_files
+            mapfile -t passwd_files < <(find "$extract_dir" -name "passwd" -o -name "shadow" 2>/dev/null)
+            for pf in "${passwd_files[@]}"; do
+                log "Trovato: $pf"
+                while IFS= read -r line; do
+                    [[ -z "$line" || "$line" == "#"* ]] && continue
+                    local user; user=$(echo "$line" | cut -d: -f1)
+                    local hash; hash=$(echo "$line" | cut -d: -f2)
+                    if [[ "$hash" != "x" && "$hash" != "!" && "$hash" != "*" && -n "$hash" ]]; then
+                        found CRITICAL "Firmware: hash password in chiaro per utente '$user' in $(basename "$pf"): $hash"
+                    fi
+                    # Root senza password
+                    if [[ "$user" == "root" && ("$hash" == "" || "$hash" == "::") ]]; then
+                        found CRITICAL "Firmware: root senza password in $(basename "$pf")"
+                    fi
+                done < "$pf"
+                cp "$pf" "$output_dir/found_$(basename "$pf")" 2>/dev/null || true
+            done
+
+            # Chiavi private
+            local key_files
+            mapfile -t key_files < <(find "$extract_dir" -type f -exec grep -lF "BEGIN PRIVATE KEY" {} \; 2>/dev/null)
+            for kf in "${key_files[@]}"; do
+                found CRITICAL "Firmware: chiave privata trovata in: $kf"
+                cp "$kf" "$output_dir/found_privkey_$(basename "$kf")" 2>/dev/null || true
+            done
+
+            # Pattern password in file di config
+            log "Ricerca pattern password nei file di configurazione..."
+            find "$extract_dir" -type f -size -500k \
+                \( -name "*.conf" -o -name "*.cfg" -o -name "*.ini" -o -name "*.xml" \
+                   -o -name "*.txt" -o -name "*.sh" -o -name "*.env" \) 2>/dev/null | \
+            while IFS= read -r cf; do
+                local matches
+                matches=$(grep -iP '(password|passwd|secret|api.?key|token)\s*[=:]\s*\S+' "$cf" 2>/dev/null | grep -v "^#" | head -5 || true)
+                if [[ -n "$matches" ]]; then
+                    found HIGH "Firmware: credenziale potenziale in $cf"
+                    echo "$matches" | while IFS= read -r m; do
+                        found HIGH "  → $m"
+                    done
+                fi
+            done
+
+            # SUID binaries
+            section "Binari SUID nel Filesystem Estratto"
+            find "$extract_dir" -perm -4000 -type f 2>/dev/null | while IFS= read -r sf; do
+                found MEDIUM "Firmware: binario SUID trovato: $sf"
+            done
+
+            # Certificati TLS
+            section "Analisi Certificati TLS"
+            find "$extract_dir" -type f \( -name "*.pem" -o -name "*.crt" -o -name "*.cer" \) 2>/dev/null | \
+            while IFS= read -r cert; do
+                log "Analisi certificato: $cert"
+                if require_tool openssl; then
+                    local cert_info
+                    cert_info=$(openssl x509 -in "$cert" -noout -text 2>/dev/null || true)
+                    if [[ -n "$cert_info" ]]; then
+                        local subject; subject=$(echo "$cert_info" | grep -i "Subject:" | head -1 | sed 's/.*Subject: //')
+                        local issuer;  issuer=$(echo "$cert_info"  | grep -i "Issuer:"  | head -1 | sed 's/.*Issuer: //')
+                        local expiry;  expiry=$(echo "$cert_info"  | grep -i "Not After" | head -1 | sed 's/.*Not After : //')
+                        found INFO "Firmware: certificato TLS — Subject: $subject"
+                        [[ "$subject" == "$issuer" ]] && found MEDIUM "Firmware: certificato self-signed in $cert"
+                        # Verifica scadenza
+                        if openssl x509 -in "$cert" -noout -checkend 0 2>/dev/null | grep -q "will expire\|has expired"; then
+                            found HIGH "Firmware: certificato SCADUTO: $cert (scadenza: $expiry)"
+                        fi
+                        echo "$cert_info" > "$output_dir/cert_$(basename "$cert").txt"
+                    fi
+                fi
+            done
+        else
+            warn "Directory estratta non trovata. Binwalk potrebbe non aver estratto correttamente."
+        fi
+    fi
+
+    # 4. Analisi vendor-specifica
+    if [[ -n "$vendor" ]]; then
+        section "Analisi Vendor-Specifica: $vendor"
+        case "$vendor" in
+            audiocodes)
+                log "Regole AudioCodes MP20x..."
+                [[ "$DRY_RUN" -eq 0 && -d "$extract_dir" ]] && {
+                    find "$extract_dir" -name "*.ini" -o -name "AudioCodes*" 2>/dev/null | while IFS= read -r f; do
+                        grep -iP 'SIPPassword|AdminPassword|WebPassword' "$f" 2>/dev/null | while IFS= read -r m; do
+                            found HIGH "AudioCodes: credenziale potenziale: $m"
+                        done
+                    done
+                }
+                ;;
+            reolink)
+                log "Regole Reolink..."
+                [[ "$DRY_RUN" -eq 0 && -d "$extract_dir" ]] && {
+                    find "$extract_dir" -name "*.json" 2>/dev/null | while IFS= read -r f; do
+                        grep -iP '"password"\s*:\s*"[^"]+"' "$f" 2>/dev/null | while IFS= read -r m; do
+                            found HIGH "Reolink: password JSON: $m"
+                        done
+                    done
+                }
+                ;;
+            axis)
+                log "Regole Axis..."
+                [[ "$DRY_RUN" -eq 0 && -d "$extract_dir" ]] && {
+                    find "$extract_dir" -name "param.cgi" -o -name "*.accc" 2>/dev/null | while IFS= read -r f; do
+                        found INFO "Axis: file configurazione trovato: $f"
+                    done
+                }
+                ;;
+            commend)
+                log "Regole Commend SIP Station..."
+                [[ "$DRY_RUN" -eq 0 && -d "$extract_dir" ]] && {
+                    find "$extract_dir" -name "*.xml" -o -name "*.cfg" 2>/dev/null | while IFS= read -r f; do
+                        grep -iP 'SIP.*[Pp]assword|admin.*[Pp]assword' "$f" 2>/dev/null | while IFS= read -r m; do
+                            found HIGH "Commend: credenziale potenziale: $m"
+                        done
+                    done
+                }
+                ;;
+            *)
+                warn "Vendor '$vendor' non riconosciuto. Vendor supportati: audiocodes, reolink, axis, commend"
+                ;;
+        esac
+    fi
+
+    ok "Analisi firmware completata → $output_dir"
+}
+
+# ============================================================
+#  FUNZIONALITÀ 5 — exa-dune voip-enum
+# ============================================================
+usage_voip_enum() {
+    echo "Uso: exa-dune voip-enum <TARGET> [OPTIONS]"
+    echo ""
+    echo "  Enumerazione avanzata SIP/VoIP: rate limiting, user enum, toll fraud, ext scan."
+    echo ""
+    echo "Opzioni:"
+    echo "  --range RANGE      Range extension (default: 100-500)"
+    echo "  --flood-test       Abilita SIP OPTIONS flood test (rate limiting check)"
+    echo "  --port PORT        Porta SIP (default: 5060)"
+    echo "  --output DIR       Directory output"
+    echo "  --dry-run"
+}
+
+cmd_voip_enum() {
+    local target="" range="100-500" flood_test=0 sip_port=5060 output_dir=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --range)      _req_arg "--range" "${2:-}"; range="$2"; shift 2 ;;
+            --flood-test) flood_test=1; shift ;;
+            --port)       _req_arg "--port" "${2:-}"; sip_port="$2"; shift 2 ;;
+            --output)     _req_arg "--output" "${2:-}"; output_dir="$2"; shift 2 ;;
+            --dry-run)    DRY_RUN=1; shift ;;
+            --help|-h)    usage_voip_enum; exit 0 ;;
+            -*)           err "Opzione sconosciuta: $1"; usage_voip_enum; exit 1 ;;
+            *)            target="$1"; shift ;;
+        esac
+    done
+
+    [[ -z "$target" ]] && { err "TARGET mancante"; usage_voip_enum; exit 1; }
+
+    banner
+    local ts; ts=$(date +%Y%m%d_%H%M%S)
+    output_dir="${output_dir:-/root/pentest/exa-dune-${target//./-}_${ts}}"
+    setup_outdir "$target" "voip_enum"
+
+    section "VoIP Enum — $target:$sip_port"
+
+    # 1. SIP OPTIONS flood test
+    if [[ $flood_test -eq 1 ]]; then
+        section "SIP OPTIONS Flood Test (rate limiting check)"
+        if [[ "$DRY_RUN" -eq 1 ]]; then
+            echo -e "${CYAN}[DRY-RUN]${NC} sipsak -s sip:$target:$sip_port -o 100 — SIP OPTIONS flood"
+        else
+            if require_tool sipsak; then
+                log "Invio 100 SIP OPTIONS in 10 secondi..."
+                local flood_out="$OUTDIR/sip_flood.txt"
+                local count_429=0 count_ok=0 count_fail=0
+                for i in $(seq 1 100); do
+                    local resp; resp=$(sipsak -s "sip:flood_test@${target}:${sip_port}" -q 2>&1 || true)
+                    if echo "$resp" | grep -q "429\|Too Many"; then
+                        ((count_429++)) || true
+                    elif echo "$resp" | grep -qE "200|180|100"; then
+                        ((count_ok++)) || true
+                    else
+                        ((count_fail++)) || true
+                    fi
+                    echo "[$i] $resp" >> "$flood_out"
+                    sleep 0.1
+                done
+                echo "Flood results: 200/OK=$count_ok  429/RateLimit=$count_429  altri=$count_fail" >> "$flood_out"
+                if [[ $count_429 -gt 0 ]]; then
+                    found INFO "SIP: rate limiting attivo — $count_429/100 richieste con 429 Too Many Requests"
+                else
+                    found HIGH "SIP: nessun rate limiting rilevato — server vulnerabile a SIP OPTIONS flood"
+                fi
+            fi
+        fi
+    fi
+
+    # 2. SIP REGISTER con credenziali false — user enumeration
+    section "SIP REGISTER Auth Behavior (user enumeration)"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        echo -e "${CYAN}[DRY-RUN]${NC} sipsak -s sip:99999@$target:$sip_port -R — test utente inesistente"
+        echo -e "${CYAN}[DRY-RUN]${NC} Analisi risposta 401 vs 403 per user enumeration"
+    else
+        if require_tool sipsak; then
+            local reg_out="$OUTDIR/sip_register_enum.txt"
+            log "Test SIP REGISTER con utente inesistente (99999)..."
+            local resp_nouser; resp_nouser=$(sipsak -s "sip:99999@${target}:${sip_port}" -R 2>&1 || true)
+            echo "=== Utente inesistente (99999) ===" >> "$reg_out"
+            echo "$resp_nouser" >> "$reg_out"
+
+            log "Test SIP REGISTER con utente realistico (100)..."
+            local resp_user100; resp_user100=$(sipsak -s "sip:100@${target}:${sip_port}" -R 2>&1 || true)
+            echo "=== Utente realistico (100) ===" >> "$reg_out"
+            echo "$resp_user100" >> "$reg_out"
+
+            # Analisi risposta
+            local code_nouser; code_nouser=$(echo "$resp_nouser" | grep -oP 'SIP/2\.0 \K[0-9]+' | head -1 || echo "timeout")
+            local code_user;   code_user=$(echo "$resp_user100"   | grep -oP 'SIP/2\.0 \K[0-9]+' | head -1 || echo "timeout")
+
+            found INFO "SIP REGISTER: utente inesistente → $code_nouser"
+            found INFO "SIP REGISTER: utente 100        → $code_user"
+
+            if [[ "$code_nouser" != "$code_user" ]]; then
+                found HIGH "SIP: comportamento diverso per utenti validi/invalidi → possibile user enumeration (${code_nouser} vs ${code_user})"
+            else
+                found LOW "SIP: stesso codice risposta per utenti validi/invalidi → user enumeration limitata"
+            fi
+        fi
+    fi
+
+    # 3. SIP INVITE senza auth — toll fraud check
+    section "SIP INVITE Unauthenticated (toll fraud check)"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        echo -e "${CYAN}[DRY-RUN]${NC} sipsak -s sip:+391234567890@$target:$sip_port -I — INVITE senza auth"
+    else
+        if require_tool sipsak; then
+            local invite_out="$OUTDIR/sip_invite_unauth.txt"
+            log "Test SIP INVITE non autenticato verso numero esterno..."
+            local resp_invite; resp_invite=$(sipsak -s "sip:+391234567890@${target}:${sip_port}" -I 2>&1 || true)
+            echo "$resp_invite" >> "$invite_out"
+            local invite_code; invite_code=$(echo "$resp_invite" | grep -oP 'SIP/2\.0 \K[0-9]+' | head -1 || echo "timeout")
+            found INFO "SIP INVITE non auth → $invite_code"
+            if echo "$resp_invite" | grep -qE "200 OK|180 Ringing|100 Trying"; then
+                found CRITICAL "SIP: INVITE non autenticato accettato → TOLL FRAUD RISK! Chiamate non autorizzate possibili"
+            else
+                found INFO "SIP: INVITE non autenticato rifiutato ($invite_code) — OK"
+            fi
+        fi
+    fi
+
+    # 4. SIP extension range scan con svwar
+    section "SIP Extension Range Scan ($range)"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        echo -e "${CYAN}[DRY-RUN]${NC} svwar -e$range $target -m REGISTER"
+    else
+        if require_tool svwar; then
+            local svwar_out="$OUTDIR/sip_extensions.txt"
+            log "Scan extension SIP range $range su $target..."
+            svwar -e"$range" "$target" -m REGISTER 2>&1 | tee "$svwar_out" || true
+            local ext_count; ext_count=$(grep -c "extension" "$svwar_out" 2>/dev/null || echo 0)
+            [[ $ext_count -gt 0 ]] && found HIGH "SIP: $ext_count extension trovati nel range $range"
+        else
+            warn "svwar non disponibile — install: pip3 install sipvicious"
+        fi
+    fi
+
+    # 5. TLS SIP check (porta 5061)
+    section "TLS SIP Check (porta 5061)"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        echo -e "${CYAN}[DRY-RUN]${NC} nc -z -w3 $target 5061"
+        echo -e "${CYAN}[DRY-RUN]${NC} openssl s_client -connect $target:5061 -starttls sip"
+    else
+        if nc -z -w3 "$target" 5061 2>/dev/null; then
+            found INFO "SIP TLS: porta 5061 aperta su $target"
+            if require_tool openssl; then
+                local tls_out="$OUTDIR/sip_tls_cert.txt"
+                log "Recupero certificato SIP TLS..."
+                echo "" | timeout 10 openssl s_client -connect "${target}:5061" 2>/dev/null | \
+                    openssl x509 -noout -text 2>/dev/null | tee "$tls_out" || true
+                if [[ -s "$tls_out" ]]; then
+                    local subj; subj=$(grep "Subject:" "$tls_out" | head -1 | sed 's/.*Subject: //')
+                    found INFO "SIP TLS: certificato Subject: $subj"
+                    grep -q "self.signed\|self signed\|Self Signed" "$tls_out" 2>/dev/null && \
+                        found MEDIUM "SIP TLS: certificato self-signed rilevato"
+                fi
+            fi
+        else
+            found INFO "SIP TLS: porta 5061 non raggiungibile su $target (SIP non cifrato)"
+        fi
+    fi
+
+    ok "voip-enum completato → $OUTDIR"
+    _json_write_summary "$OUTDIR" "voip_enum"
+}
+
+# ============================================================
+#  FUNZIONALITÀ 6 — exa-dune config-audit
+# ============================================================
+usage_config_audit() {
+    echo "Uso: exa-dune config-audit <DIR_O_FILE> [OPTIONS]"
+    echo ""
+    echo "  Analisi file di configurazione: credenziali, SNMP deboli, SIP, certificati."
+    echo ""
+    echo "Opzioni:"
+    echo "  --recursive    Analizza ricorsivamente la directory"
+    echo "  --output DIR   Directory output"
+    echo "  --dry-run"
+}
+
+cmd_config_audit() {
+    local config_path="" recursive=0 output_dir=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --recursive) recursive=1; shift ;;
+            --output)    _req_arg "--output" "${2:-}"; output_dir="$2"; shift 2 ;;
+            --dry-run)   DRY_RUN=1; shift ;;
+            --help|-h)   usage_config_audit; exit 0 ;;
+            -*)          err "Opzione sconosciuta: $1"; usage_config_audit; exit 1 ;;
+            *)           config_path="$1"; shift ;;
+        esac
+    done
+
+    [[ -z "$config_path" ]] && { err "FILE o DIR mancante"; usage_config_audit; exit 1; }
+    [[ ! -e "$config_path" && "$DRY_RUN" -eq 0 ]] && { err "Percorso non trovato: $config_path"; exit 1; }
+
+    banner
+    local ts; ts=$(date +%Y%m%d_%H%M%S)
+    local safe_name; safe_name=$(basename "$config_path" | tr '/' '_' | tr ' ' '_')
+    output_dir="${output_dir:-/root/pentest/config_audit_${safe_name}_${ts}}"
+    OUTDIR_BASE="$output_dir"
+    OUTDIR="$output_dir"
+
+    if [[ "$DRY_RUN" -eq 0 ]]; then
+        mkdir -p "$output_dir"
+        _log_file="$output_dir/config_audit.log"
+    fi
+
+    section "Config Audit — $config_path"
+
+    # Costruisci lista file da analizzare
+    local files=()
+    if [[ -f "$config_path" ]]; then
+        files=("$config_path")
+    elif [[ -d "$config_path" ]]; then
+        if [[ $recursive -eq 1 ]]; then
+            mapfile -t files < <(find "$config_path" -type f 2>/dev/null)
+        else
+            mapfile -t files < <(find "$config_path" -maxdepth 1 -type f 2>/dev/null)
+        fi
+    fi
+
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        echo -e "${CYAN}[DRY-RUN]${NC} Analisi $(echo "${#files[@]}") file in $config_path"
+        return 0
+    fi
+
+    local total_findings=0
+
+    for cf in "${files[@]}"; do
+        [[ ! -f "$cf" || ! -r "$cf" ]] && continue
+        # Salta file binari (check rapido)
+        file "$cf" 2>/dev/null | grep -qiE "ELF|binary|data|image|archive" && continue
+        local fname; fname=$(basename "$cf")
+
+        # 1. Credenziali in chiaro
+        local cred_matches
+        cred_matches=$(grep -niP '(password|passwd|secret)\s*[=:]\s*\S+' "$cf" 2>/dev/null | grep -v "^[[:space:]]*#" | head -10 || true)
+        if [[ -n "$cred_matches" ]]; then
+            found HIGH "CONFIG: credenziali in chiaro in $cf"
+            echo "$cred_matches" | while IFS= read -r m; do
+                found HIGH "  → $(echo "$m" | head -c 200)"
+            done
+            ((total_findings++)) || true
+        fi
+
+        # 2. Community SNMP deboli
+        if grep -qiP 'community\s+(public|private|community)' "$cf" 2>/dev/null; then
+            found HIGH "CONFIG: community SNMP debole (public/private) in $cf"
+            ((total_findings++)) || true
+        fi
+
+        # 3. SIP senza TLS
+        if grep -qiP 'transport\s*=\s*UDP' "$cf" 2>/dev/null; then
+            if ! grep -qiP 'transport\s*=\s*TLS' "$cf" 2>/dev/null; then
+                found MEDIUM "CONFIG: SIP con trasporto UDP senza TLS configurato in $cf"
+                ((total_findings++)) || true
+            fi
+        fi
+
+        # 4. Certificati TLS
+        if [[ "$fname" =~ \.(pem|crt|cer)$ ]]; then
+            if require_tool openssl; then
+                local cert_out="$output_dir/cert_$(basename "$cf").txt"
+                openssl x509 -in "$cf" -noout -text 2>/dev/null > "$cert_out" || true
+                if [[ -s "$cert_out" ]]; then
+                    local subj; subj=$(grep "Subject:" "$cert_out" | head -1 | sed 's/.*Subject: //')
+                    local issuer; issuer=$(grep "Issuer:" "$cert_out" | head -1 | sed 's/.*Issuer: //')
+                    found INFO "CONFIG: certificato TLS: $subj (in $cf)"
+                    [[ "$subj" == "$issuer" ]] && found MEDIUM "CONFIG: certificato self-signed: $cf"
+                    if openssl x509 -in "$cf" -noout -checkend 0 2>/dev/null | grep -q "will expire\|has expired"; then
+                        found HIGH "CONFIG: certificato SCADUTO: $cf"
+                        ((total_findings++)) || true
+                    fi
+                fi
+            fi
+        fi
+
+        # 5. Telnet abilitato
+        if grep -qiP '(telnet\s+enable|service\s+telnet|telnet\s*=\s*on|enable\s+telnet)' "$cf" 2>/dev/null; then
+            found HIGH "CONFIG: Telnet abilitato in $cf"
+            ((total_findings++)) || true
+        fi
+
+        # 6. Hash password MD5/DES deboli
+        if grep -qP '\$1\$[A-Za-z0-9./]{8}\$' "$cf" 2>/dev/null; then
+            found MEDIUM "CONFIG: hash password MD5 (\$1\$) rilevato in $cf — algoritmo debole"
+            ((total_findings++)) || true
+        fi
+        # DES (13 caratteri, pattern vecchio /etc/passwd)
+        if grep -qP '^[a-z_][a-z0-9_-]{0,31}:[A-Za-z0-9./]{13}:' "$cf" 2>/dev/null; then
+            found MEDIUM "CONFIG: hash DES (vecchio stile) rilevato in $cf"
+            ((total_findings++)) || true
+        fi
+
+        # 7. IP/hostname RFC1918 interni esposti
+        local internal_ips
+        internal_ips=$(grep -oP '(10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}\.[0-9]{1,3}|192\.168\.[0-9]{1,3}\.[0-9]{1,3})' "$cf" 2>/dev/null | sort -u | head -10 || true)
+        if [[ -n "$internal_ips" ]]; then
+            found LOW "CONFIG: IP RFC1918 interni esposti in $cf:"
+            echo "$internal_ips" | while IFS= read -r ip; do
+                found LOW "  → $ip"
+            done
+        fi
+    done
+
+    log "Analisi completata. Finding totali: $total_findings"
+    ok "Config audit completato → $output_dir"
+}
+
+# ============================================================
+#  FUNZIONALITÀ 7 — Executive Summary narrativo nel report HTML
+#  (Integrata in cmd_report tramite patch della sezione Executive Summary)
+# ============================================================
+# La funzione _exec_summary_narrative genera il testo narrativo
+_exec_summary_narrative() {
+    local target="$1" n_critical="$2" n_high="$3" n_medium="$4" n_low="$5"
+    local outdir="$6"
+    local data; data=$(date '+%d/%m/%Y')
+    local n_total=$(( n_critical + n_high + n_medium + n_low ))
+
+    echo "<div style='background:#0c1a3d;border-left:5px solid #58a6ff;padding:18px 20px;border-radius:0 6px 6px 0;margin:16px 0;font-size:.93em;line-height:1.7'>"
+    echo "<p style='margin-bottom:8px'><strong>Il target <span style='color:#58a6ff'>$(echo "$target" | sed 's/</\&lt;/g;s/>/\&gt;/g')</span> è stato sottoposto a vulnerability assessment in data $data.</strong></p>"
+    echo "<p>L'analisi ha rilevato <strong>$n_total</strong> vulnerabilità: "
+    echo "<span style='color:#ff7b72;font-weight:700'>$n_critical critiche</span>, "
+    echo "<span style='color:#f97316;font-weight:700'>$n_high alte</span>, "
+    echo "<span style='color:#e3b341;font-weight:700'>$n_medium medie</span>, "
+    echo "<span style='color:#58a6ff;font-weight:700'>$n_low basse</span>.</p>"
+
+    if [[ $n_critical -gt 0 ]]; then
+        echo "<p style='color:#ff7b72;font-weight:700'>&#9888; Sono presenti $n_critical vulnerabilità critiche che richiedono intervento immediato.</p>"
+    fi
+    if [[ $((n_critical + n_high)) -gt 0 ]]; then
+        echo "<p><strong>Finding critici e alti rilevati:</strong></p><ul style='margin:6px 0 6px 18px'>"
+        while IFS= read -r -d '' ffile; do
+            while IFS= read -r line; do
+                [[ -z "$line" ]] && continue
+                case "$line" in
+                    \[CRITICAL\]*|\[HIGH\]*)
+                        local clean; clean=$(echo "$line" | sed 's/^\[[A-Z]*\] //' | sed 's/</\&lt;/g;s/>/\&gt;/g' | head -c 200)
+                        local sev_tag; sev_tag=$(echo "$line" | grep -oP '^\[[A-Z]+\]' | tr -d '[]')
+                        local sev_color="#f97316"; [[ "$sev_tag" == "CRITICAL" ]] && sev_color="#ff7b72"
+                        echo "<li><span style='color:${sev_color};font-weight:700'>[$sev_tag]</span> $clean</li>"
+                        ;;
+                esac
+            done < "$ffile"
+        done < <(find "$outdir" -name "findings.txt" -print0 2>/dev/null | sort -z)
+        echo "</ul>"
+    fi
+
+    echo "<p style='margin-top:10px'>Si raccomanda di procedere con la remediation prioritizzando le vulnerabilità critiche e alte, "
+    echo "verificando le configurazioni di accesso remoto, le credenziali predefinite e i servizi non cifrati.</p>"
+    echo "</div>"
+}
+
+# ============================================================
+#  FUNZIONALITÀ 8 — Storico assessment in SQLite
+# ============================================================
+EXA_DB="/root/pentest/exa-dune.db"
+
+_db_init() {
+    [[ "$DRY_RUN" -eq 1 ]] && return
+    command -v sqlite3 &>/dev/null || { warn "sqlite3 non disponibile — storia assessment disabilitata"; return 1; }
+    mkdir -p "$(dirname "$EXA_DB")"
+    sqlite3 "$EXA_DB" << 'DBEOF' 2>/dev/null
+CREATE TABLE IF NOT EXISTS assessments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    target TEXT,
+    module TEXT,
+    timestamp TEXT,
+    outdir TEXT,
+    findings_count INTEGER DEFAULT 0,
+    critical_count INTEGER DEFAULT 0,
+    high_count INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS findings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    assessment_id INTEGER,
+    severity TEXT,
+    message TEXT,
+    timestamp TEXT
+);
+DBEOF
+    return 0
+}
+
+_db_insert_assessment() {
+    [[ "$DRY_RUN" -eq 1 ]] && return
+    command -v python3 &>/dev/null || return 1
+    local target="$1" module="${2:-}" outdir="${3:-}"
+    local ts; ts=$(date -u +%Y-%m-%dT%H:%M:%S)
+    export V_TARGET="$target" V_MODULE="$module" V_OUTDIR="$outdir" V_TS="$ts"
+    _EXA_DB_ASSESSMENT_ID=$(python3 - <<'PYEOF'
+import sqlite3, os
+db = os.environ['EXA_DB']
+conn = sqlite3.connect(db)
+cur = conn.execute(
+    "INSERT INTO assessments (target,module,timestamp,outdir) VALUES (?,?,?,?)",
+    (os.environ['V_TARGET'], os.environ['V_MODULE'], os.environ['V_TS'], os.environ['V_OUTDIR'])
+)
+conn.commit()
+print(cur.lastrowid)
+conn.close()
+PYEOF
+2>/dev/null || echo "")
+    export _EXA_DB_ASSESSMENT_ID
+    unset V_TARGET V_MODULE V_OUTDIR V_TS
+}
+
+_db_update_assessment() {
+    [[ "$DRY_RUN" -eq 1 ]] && return
+    command -v sqlite3 &>/dev/null || return 1
+    local id="${_EXA_DB_ASSESSMENT_ID:-}"
+    [[ -z "$id" ]] && return
+    local outdir="$1"
+    local n_total=0 n_crit=0 n_high=0
+    if [[ -n "$outdir" ]]; then
+        while IFS= read -r -d '' ffile; do
+            while IFS= read -r line; do
+                [[ -z "$line" ]] && continue
+                case "$line" in
+                    \[CRITICAL\]*) ((n_crit++)) || true; ((n_total++)) || true ;;
+                    \[HIGH\]*)     ((n_high++)) || true; ((n_total++)) || true ;;
+                    \[MEDIUM\]*|\[LOW\]*) ((n_total++)) || true ;;
+                esac
+            done < "$ffile"
+        done < <(find "$outdir" -name "findings.txt" -print0 2>/dev/null)
+    fi
+    export V_ID="$id" V_NTOTAL="$n_total" V_NCRIT="$n_crit" V_NHIGH="$n_high"
+    python3 - <<'PYEOF' 2>/dev/null || true
+import sqlite3, os
+db = os.environ['EXA_DB']
+conn = sqlite3.connect(db)
+conn.execute(
+    "UPDATE assessments SET findings_count=?, critical_count=?, high_count=? WHERE id=?",
+    (int(os.environ['V_NTOTAL']), int(os.environ['V_NCRIT']), int(os.environ['V_NHIGH']), int(os.environ['V_ID']))
+)
+conn.commit()
+conn.close()
+PYEOF
+    unset V_ID V_NTOTAL V_NCRIT V_NHIGH
+}
+
+_db_insert_finding() {
+    [[ "$DRY_RUN" -eq 1 ]] && return
+    command -v python3 &>/dev/null || return 1
+    local sev="$1" msg="$2"
+    local id="${_EXA_DB_ASSESSMENT_ID:-0}"
+    local ts; ts=$(date -u +%Y-%m-%dT%H:%M:%S)
+    export V_ID="$id" V_SEV="$sev" V_MSG="$msg" V_TS="$ts"
+    python3 - <<'PYEOF' 2>/dev/null || true
+import sqlite3, os
+db = os.environ['EXA_DB']
+conn = sqlite3.connect(db)
+conn.execute(
+    "INSERT INTO findings (assessment_id,severity,message,timestamp) VALUES (?,?,?,?)",
+    (int(os.environ['V_ID']), os.environ['V_SEV'], os.environ['V_MSG'], os.environ['V_TS'])
+)
+conn.commit()
+conn.close()
+PYEOF
+    unset V_ID V_SEV V_MSG V_TS
+}
+
+usage_history() {
+    echo "Uso: exa-dune history [OPTIONS]"
+    echo ""
+    echo "  Mostra lo storico degli assessment dal database SQLite."
+    echo ""
+    echo "Opzioni:"
+    echo "  --target TARGET    Filtra per target"
+    echo "  --last N           Mostra ultimi N assessment"
+    echo "  --findings ID      Mostra finding dell'assessment con ID specificato"
+}
+
+cmd_history() {
+    local filter_target="" last_n="" findings_id=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --target)   _req_arg "--target" "${2:-}"; filter_target="$2"; shift 2 ;;
+            --last)     _req_arg "--last" "${2:-}"; last_n="$2"; shift 2 ;;
+            --findings) _req_arg "--findings" "${2:-}"; findings_id="$2"; shift 2 ;;
+            --help|-h)  usage_history; exit 0 ;;
+            -*)         err "Opzione sconosciuta: $1"; usage_history; exit 1 ;;
+            *)          shift ;;
+        esac
+    done
+
+    # FIX 6 — validazione numerica
+    if [[ -n "$last_n" ]]; then
+        [[ "$last_n" =~ ^[0-9]+$ ]] || { err "--last richiede un numero intero positivo"; exit 1; }
+    fi
+    if [[ -n "$findings_id" ]]; then
+        [[ "$findings_id" =~ ^[0-9]+$ ]] || { err "--findings richiede un ID numerico"; exit 1; }
+    fi
+
+    command -v python3 &>/dev/null || { err "python3 non disponibile"; exit 1; }
+    _db_init
+
+    if [[ ! -f "$EXA_DB" ]]; then
+        log "Database non ancora creato: $EXA_DB"
+        log "Verrà creato automaticamente alla prossima esecuzione di un modulo."
+        return 0
+    fi
+
+    banner
+    section "Storico Assessment (${EXA_DB})"
+
+    # Temp script helper per query parametrizzate (evita heredoc in subshell)
+    local _py_tmp; _py_tmp=$(mktemp /tmp/exa_hist_XXXXXX.py)
+    # shellcheck disable=SC2064
+    trap "rm -f '$_py_tmp'" RETURN
+
+    if [[ -n "$findings_id" ]]; then
+        # Mostra header assessment — FIX 1d parametri bind
+        cat > "$_py_tmp" << 'PYEOF'
+import sqlite3, os
+db = os.environ['EXA_DB']
+conn = sqlite3.connect(db)
+row = conn.execute(
+    "SELECT target,module,timestamp,outdir FROM assessments WHERE id=?",
+    (int(os.environ['V_FID']),)
+).fetchone()
+conn.close()
+if row:
+    print('|'.join(str(c) if c is not None else '' for c in row))
+PYEOF
+        local rec
+        export V_FID="$findings_id"
+        rec=$(python3 "$_py_tmp" 2>/dev/null || echo "")
+        unset V_FID
+        if [[ -z "$rec" ]]; then
+            err "Assessment ID $findings_id non trovato"
+            rm -f "$_py_tmp"
+            exit 1
+        fi
+        local a_target a_module a_ts a_outdir
+        IFS='|' read -r a_target a_module a_ts a_outdir <<< "$rec"
+        log "Assessment #$findings_id — Target: $a_target  Modulo: $a_module  Data: $a_ts"
+        log "Output: $a_outdir"
+        echo ""
+        printf "  %-10s %-12s %s\n" "SEVERITY" "TIMESTAMP" "MESSAGGIO"
+        printf "  %-10s %-12s %s\n" "─────────" "───────────" "──────────────────────────────────"
+        cat > "$_py_tmp" << 'PYEOF'
+import sqlite3, os
+db = os.environ['EXA_DB']
+conn = sqlite3.connect(db)
+for row in conn.execute(
+    "SELECT severity, timestamp, message FROM findings WHERE assessment_id=? ORDER BY id",
+    (int(os.environ['V_FID']),)
+):
+    print('|'.join(str(c) if c is not None else '' for c in row))
+conn.close()
+PYEOF
+        export V_FID="$findings_id"
+        local findings_rows
+        findings_rows=$(python3 "$_py_tmp" 2>/dev/null || true)
+        unset V_FID
+        while IFS='|' read -r sev ts msg; do
+            local color
+            case "$sev" in
+                CRITICAL) color='\033[1;31m' ;;
+                HIGH)     color='\033[0;31m' ;;
+                MEDIUM)   color='\033[1;33m' ;;
+                LOW)      color='\033[0;36m' ;;
+                *)        color='\033[0;32m' ;;
+            esac
+            printf "  ${color}%-10s${NC} %-20s %s\n" "$sev" "$ts" "$msg"
+        done <<< "$findings_rows"
+        rm -f "$_py_tmp"
+        return 0
+    fi
+
+    # Query principale — FIX 1d parametri bind
+    printf "  %-5s %-18s %-12s %-22s %-8s %-8s %-8s %s\n" \
+        "ID" "TARGET" "MODULO" "DATA" "FINDING" "CRIT" "HIGH" "OUTDIR"
+    printf "  %s\n" "─────────────────────────────────────────────────────────────────────────────────────"
+
+    cat > "$_py_tmp" << 'PYEOF'
+import sqlite3, os
+db = os.environ['EXA_DB']
+ft = os.environ.get('V_FILTER_TARGET', '')
+ln = os.environ.get('V_LAST_N', '')
+conn = sqlite3.connect(db)
+if ft:
+    q = "SELECT id,target,module,timestamp,findings_count,critical_count,high_count,outdir FROM assessments WHERE target=? ORDER BY id DESC"
+    params = [ft]
+else:
+    q = "SELECT id,target,module,timestamp,findings_count,critical_count,high_count,outdir FROM assessments ORDER BY id DESC"
+    params = []
+if ln:
+    q += " LIMIT ?"
+    params.append(int(ln))
+for row in conn.execute(q, params):
+    print('|'.join(str(c) if c is not None else '' for c in row))
+conn.close()
+PYEOF
+    export V_FILTER_TARGET="${filter_target}" V_LAST_N="${last_n}"
+    local assess_rows
+    assess_rows=$(python3 "$_py_tmp" 2>/dev/null || true)
+    unset V_FILTER_TARGET V_LAST_N
+    while IFS='|' read -r id tgt mod ts fc cc hc od; do
+        local color='\033[0;32m'
+        [[ "${cc:-0}" -gt 0 ]] && color='\033[1;31m'
+        [[ "${cc:-0}" -eq 0 && "${hc:-0}" -gt 0 ]] && color='\033[0;31m'
+        printf "  ${color}%-5s${NC} %-18s %-12s %-22s %-8s %-8s %-8s %s\n" \
+            "${id}" "${tgt:0:18}" "${mod:0:12}" "${ts:0:22}" "${fc:-0}" "${cc:-0}" "${hc:-0}" "${od:0:40}"
+    done <<< "$assess_rows"
+
+    cat > "$_py_tmp" << 'PYEOF'
+import sqlite3, os
+db = os.environ['EXA_DB']
+ft = os.environ.get('V_FILTER_TARGET', '')
+conn = sqlite3.connect(db)
+if ft:
+    row = conn.execute("SELECT COUNT(*) FROM assessments WHERE target=?", (ft,)).fetchone()
+else:
+    row = conn.execute("SELECT COUNT(*) FROM assessments").fetchone()
+print(row[0] if row else 0)
+conn.close()
+PYEOF
+    echo ""
+    export V_FILTER_TARGET="${filter_target}"
+    local total
+    total=$(python3 "$_py_tmp" 2>/dev/null || echo 0)
+    unset V_FILTER_TARGET
+    rm -f "$_py_tmp"
+    log "Totale assessment in archivio: $total"
+}
+
+# ============================================================
 #  MAIN DISPATCHER
 # ============================================================
 [[ $# -eq 0 ]] && { cmd_help; exit 0; }
@@ -9521,6 +10811,13 @@ case "$subcommand" in
     self-test)      cmd_self_test     "$@" ;;
     diff)           cmd_diff          "$@" ;;
     wordlists)      _download_wordlists ;;
+    update)         cmd_update        "$@" ;;
+    resume)         cmd_resume        "$@" ;;
+    schedule)       cmd_schedule      "$@" ;;
+    firmware)       cmd_firmware      "$@" ;;
+    voip-enum)      cmd_voip_enum     "$@" ;;
+    config-audit)   cmd_config_audit  "$@" ;;
+    history)        cmd_history       "$@" ;;
     help|-h|--help) cmd_help "$@" ;;
     version|--version) echo "exa-dune $VERSION"; exit 0 ;;
     *) err "Subcommand sconosciuto: $subcommand"; cmd_help; exit 1 ;;
