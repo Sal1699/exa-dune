@@ -74,7 +74,106 @@ found() {
     if [[ "${DRY_RUN:-0}" -eq 0 ]]; then
         local findings_dir="${OUTDIR_BASE:-${OUTDIR:-}}"
         [[ -n "$findings_dir" ]] && echo "[${sev}] ${msg}" >> "$findings_dir/findings.txt" || true
+        # JSON output se abilitato
+        if [[ "${JSON_OUTPUT:-0}" -eq 1 && -n "$findings_dir" ]]; then
+            _json_append_finding "$sev" "$msg" "$findings_dir"
+        fi
     fi
+}
+
+# ── JSON output helpers ───────────────────────────────────────────────────────
+_json_escape() {
+    # Escape stringa per JSON (sostituisce " \ e caratteri di controllo)
+    local s="$*"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    s="${s//$'\t'/\\t}"
+    echo "$s"
+}
+
+_json_append_finding() {
+    local sev="$1" msg="$2" dir="$3"
+    local ts; ts=$(date -u +%Y-%m-%dT%H:%M:%S)
+    local target_val; target_val=$(basename "$dir" | grep -oP '(\d{1,3}[-.]){3}\d{1,3}' | head -1 | tr '-' '.' 2>/dev/null || echo "unknown")
+    local json_file="$dir/findings.json"
+    local escaped_msg; escaped_msg=$(_json_escape "$msg")
+    local escaped_target; escaped_target=$(_json_escape "$target_val")
+    # Inizializza array JSON se non esiste
+    if [[ ! -f "$json_file" ]]; then
+        echo '{"findings":[' > "$json_file"
+        echo "  {\"severity\":\"${sev}\",\"message\":\"${escaped_msg}\",\"timestamp\":\"${ts}\",\"target\":\"${escaped_target}\"}" >> "$json_file"
+    else
+        # Rimuove la chiusura dell'array e aggiunge nuovo finding
+        # Usiamo un file temporaneo
+        local tmp; tmp=$(mktemp)
+        # Rimuovi ultima riga (chiusura array]} se presente)
+        if grep -q '^\]}' "$json_file" 2>/dev/null; then
+            head -n -1 "$json_file" > "$tmp"
+            echo "  ,{\"severity\":\"${sev}\",\"message\":\"${escaped_msg}\",\"timestamp\":\"${ts}\",\"target\":\"${escaped_target}\"}" >> "$tmp"
+        else
+            cp "$json_file" "$tmp"
+            echo "  ,{\"severity\":\"${sev}\",\"message\":\"${escaped_msg}\",\"timestamp\":\"${ts}\",\"target\":\"${escaped_target}\"}" >> "$tmp"
+        fi
+        mv "$tmp" "$json_file"
+    fi
+    # Chiudi sempre il file con ]} — verrà aggiornato ad ogni chiamata
+    echo ']}' >> "$json_file"
+}
+
+_json_write_summary() {
+    local dir="${1:-${OUTDIR_BASE:-${OUTDIR:-}}}"
+    local module="${2:-unknown}"
+    [[ -z "$dir" || "${DRY_RUN:-0}" -eq 1 ]] && return
+    local ts; ts=$(date -u +%Y-%m-%dT%H:%M:%S)
+    local target_val; target_val=$(basename "$dir" | grep -oP '(\d{1,3}[-.]){3}\d{1,3}' | head -1 | tr '-' '.' 2>/dev/null || echo "unknown")
+
+    # Raccogli porte aperte da nmap
+    local ports_json=""
+    local nmap_f; nmap_f=$(find "$dir" -maxdepth 2 -name "nmap_fast.nmap" 2>/dev/null | head -1)
+    if [[ -n "$nmap_f" ]]; then
+        local ports_list; ports_list=$(grep -E "^[0-9]+/tcp.*open" "$nmap_f" 2>/dev/null | awk '{print $1}' | tr '\n' ',' | sed 's/,$//' || true)
+        if [[ -n "$ports_list" ]]; then
+            # Converti "80/tcp,443/tcp" in array JSON
+            local IFS=','
+            local pa="" first=1
+            for p in $ports_list; do
+                local ep; ep=$(_json_escape "$p")
+                [[ $first -eq 1 ]] && pa="\"${ep}\"" && first=0 || pa="${pa},\"${ep}\""
+            done
+            ports_json="[$pa]"
+        fi
+    fi
+    [[ -z "$ports_json" ]] && ports_json="[]"
+
+    # Raccogli findings dal file JSON se esiste
+    local findings_json="[]"
+    if [[ -f "$dir/findings.json" ]]; then
+        findings_json=$(python3 -c "
+import json,sys
+try:
+    d=json.load(open('$dir/findings.json'))
+    print(json.dumps(d.get('findings',[])))
+except:
+    print('[]')
+" 2>/dev/null || echo "[]")
+    fi
+
+    local escaped_target; escaped_target=$(_json_escape "$target_val")
+    local escaped_module; escaped_module=$(_json_escape "$module")
+
+    cat > "$dir/summary.json" << EOF
+{
+  "target": "${escaped_target}",
+  "module": "${escaped_module}",
+  "timestamp": "${ts}",
+  "exa_dune_version": "${VERSION}",
+  "findings": ${findings_json},
+  "ports_open": ${ports_json}
+}
+EOF
+    ok "Summary JSON: $dir/summary.json"
 }
 section(){ echo -e "\n${BOLD}${CYAN}━━ $* ━━${NC}"; [[ -n "$_log_file" ]] && echo "━━ $* ━━" >> "$_log_file" || true; }
 # _req_arg OPTION VALUE — verifica che VALUE non sia vuoto
@@ -1046,12 +1145,65 @@ NMAP_RATE_FAST=3000
 NMAP_RATE_FULL=5000
 CURL_TIMEOUT=10
 CMD_TIMEOUT=8
+ADAPTIVE=0
+JSON_OUTPUT=0
 
 apply_stealth() {
     if [[ $STEALTH -eq 1 ]]; then
         NMAP_TIMING="-T2"; NMAP_RATE_FAST=300; NMAP_RATE_FULL=500
         warn "Stealth mode: nmap -T2, rate ridotto"
     fi
+}
+
+# ── Rate Limiting Adattivo ─────────────────────────────────────────────────
+# Analizza il log nmap appena completato e riduce il rate se rileva segnali
+# di rate-limiting o host irresponsivi. Chiamata solo se ADAPTIVE=1.
+_adaptive_rate_check() {
+    local log_file="${1:-}"
+    [[ "${ADAPTIVE:-0}" -ne 1 ]] && return
+    [[ -z "$log_file" || ! -f "$log_file" ]] && return
+
+    local total_packets reset_count unresponsive_count
+    # Conta pacchetti totali inviati (stima da nmap output)
+    total_packets=$(grep -c "Sending\|sent" "$log_file" 2>/dev/null || echo 0)
+    # Conta RST/reset ricevuti
+    reset_count=$(grep -ciE "reset|RST|connection refused" "$log_file" 2>/dev/null || echo 0)
+    # Conta host non rispondenti
+    unresponsive_count=$(grep -ciE "host down|no response|filtered" "$log_file" 2>/dev/null || echo 0)
+
+    local changed=0
+
+    # Se >10% reset → riduci rate del 20%
+    if [[ $total_packets -gt 0 && $reset_count -gt 0 ]]; then
+        local pct
+        if [[ $total_packets -gt 0 ]]; then
+            pct=$(( reset_count * 100 / total_packets ))
+        else
+            pct=0
+        fi
+        if [[ $pct -gt 10 ]]; then
+            local old_rate=$NMAP_RATE_FAST
+            NMAP_RATE_FAST=$(( NMAP_RATE_FAST * 80 / 100 ))
+            [[ $NMAP_RATE_FAST -lt 50 ]] && NMAP_RATE_FAST=50
+            NMAP_RATE_FULL=$(( NMAP_RATE_FULL * 80 / 100 ))
+            [[ $NMAP_RATE_FULL -lt 100 ]] && NMAP_RATE_FULL=100
+            warn "[ADAPTIVE] Rilevati ${reset_count} TCP reset (${pct}%) — rate ridotto: ${old_rate} → ${NMAP_RATE_FAST} pps"
+            changed=1
+        fi
+    fi
+
+    # Se host irresponsivo → passa a -T2 (stealth)
+    if [[ $unresponsive_count -gt 5 ]]; then
+        if [[ "$NMAP_TIMING" != "-T2" ]]; then
+            warn "[ADAPTIVE] Host non responsivo (${unresponsive_count} occorrenze) — passaggio a timing -T2"
+            NMAP_TIMING="-T2"
+            [[ $NMAP_RATE_FAST -gt 300 ]] && NMAP_RATE_FAST=300
+            [[ $NMAP_RATE_FULL -gt 500 ]] && NMAP_RATE_FULL=500
+            changed=1
+        fi
+    fi
+
+    [[ $changed -eq 0 ]] && log "[ADAPTIVE] Nessun adattamento necessario (reset=${reset_count}, unresponsive=${unresponsive_count})"
 }
 
 # ── Attack Suggester ─────────────────────────────────────────────────────────
@@ -1210,18 +1362,22 @@ cmd_scan() {
     run_cmd "nmap_fast" \
         "nmap -sV -sC -O --min-rate $NMAP_RATE_FAST $NMAP_TIMING \
          -oA \"$OUTDIR\"/nmap_fast $target 2>&1 | tee \"$OUTDIR\"/nmap_fast.log"
+    # Rate limiting adattivo: analizza il log appena prodotto
+    [[ "${ADAPTIVE:-0}" -eq 1 ]] && _adaptive_rate_check "$OUTDIR/nmap_fast.log"
 
     if [[ $do_full -eq 1 ]]; then
         section "Nmap Full (-p-)"
         run_cmd "nmap_full" \
             "nmap -sV -p- --min-rate $NMAP_RATE_FULL $NMAP_TIMING \
              -oA \"$OUTDIR\"/nmap_full $target 2>&1 | tee \"$OUTDIR\"/nmap_full.log"
+        [[ "${ADAPTIVE:-0}" -eq 1 ]] && _adaptive_rate_check "$OUTDIR/nmap_full.log"
     fi
 
     section "Nmap UDP top $udp_top"
     run_cmd "nmap_udp" \
         "nmap -sU --top-ports $udp_top $NMAP_TIMING \
          -oA \"$OUTDIR\"/nmap_udp $target 2>&1 | tee \"$OUTDIR\"/nmap_udp.log"
+    [[ "${ADAPTIVE:-0}" -eq 1 ]] && _adaptive_rate_check "$OUTDIR/nmap_udp.log"
 
     section "Searchsploit (da nmap XML)"
     if require_tool searchsploit && [[ $DRY_RUN -eq 0 ]]; then
@@ -4170,11 +4326,11 @@ WL
 usage_camcve() {
     echo "Uso: exa-dune cam-cve <TARGET> [OPTIONS]"
     echo ""
-    echo "  Camera CVE Scanner — verifica vulnerabilità note su telecamere IP."
-    echo "  Supporta: Hikvision, Dahua, Axis, Reolink, Uniview, Foscam."
+    echo "  Camera CVE Scanner — verifica vulnerabilità note su telecamere IP e device VoIP."
+    echo "  Supporta: Hikvision, Dahua, Axis, Reolink, Uniview, Foscam, AudioCodes, Commend."
     echo ""
     echo "Opzioni:"
-    echo "  --vendor VENDOR  hikvision|dahua|axis|reolink|generic (default: auto)"
+    echo "  --vendor VENDOR  hikvision|dahua|axis|reolink|audiocodes|commend|generic (default: auto)"
     echo "  --port PORT      HTTP port (default: 80)"
     echo "  --ssl            Usa HTTPS (443)"
     echo "  --output DIR"
@@ -4216,6 +4372,14 @@ cmd_camcve() {
             echo "$headers" | grep -qi "axis\|vapix" && vendor="axis"
             echo "$headers" | grep -qi "reolink" && vendor="reolink"
             echo "$headers" | grep -qi "uniview\|univideo" && vendor="uniview"
+            echo "$headers" | grep -qi "audiocodes\|mp20\|mediant\|audiocos" && vendor="audiocodes"
+            echo "$headers" | grep -qi "commend\|et962\|commander" && vendor="commend"
+            # Prova anche SNMP sysDescr per VoIP device
+            if [[ "$vendor" == "auto" ]] && command -v snmpwalk &>/dev/null; then
+                local snmp_desc; snmp_desc=$(snmpwalk -v2c -c public "$target" 1.3.6.1.2.1.1.1.0 2>/dev/null | head -1 || true)
+                echo "$snmp_desc" | grep -qi "audiocodes\|mp20\|mediant" && vendor="audiocodes"
+                echo "$snmp_desc" | grep -qi "commend\|et962" && vendor="commend"
+            fi
             [[ "$vendor" == "auto" ]] && vendor="generic"
             ok "Vendor rilevato: $vendor"
         fi
@@ -4302,6 +4466,101 @@ cmd_camcve() {
             # CGI exec endpoint
             _cam_check "INFO-DISC-CGI" "Reolink exec.cgi unauthenticated access" \
                 "$base_url/cgi-bin/api.cgi?cmd=Logout&rs=xxxx" "value\|code" "LOW"
+            ;;
+        audiocodes)
+            # ── AudioCodes MP20x ─────────────────────────────────────────────
+            # CVE-2019-9955: XSS in pagina di management web (GET /Forms/*)
+            _cam_check "CVE-2019-9955" "AudioCodes XSS in web management /Forms/login_security_1.htm" \
+                "$base_url/Forms/login_security_1.htm" "login\|security\|html\|form" "HIGH"
+            _cam_check "CVE-2019-9955-form" "AudioCodes XSS via /Forms/ (pattern generico)" \
+                "$base_url/Forms/" "title\|form\|input\|script" "HIGH"
+            # CVE-2016-4960: Directory traversal via path nel firmware upgrade
+            _cam_check "CVE-2016-4960" "AudioCodes directory traversal via firmware upgrade path" \
+                "$base_url/Forms/firmware_upgrade_1.htm" "upgrade\|firmware\|upload\|path" "HIGH"
+            # Default credentials check via web management
+            _cam_check "DEFAULT-CREDS-LOGIN" "AudioCodes default credentials page esposta" \
+                "$base_url/Forms/login_security_1.htm" "login\|LoginForm\|password" "MEDIUM"
+            # Pagina di management senza auth
+            _cam_check "MGMT-NOAUTH" "AudioCodes management page senza autenticazione" \
+                "$base_url/Forms/" "AudioCodes\|Management\|System" "HIGH"
+            # SNMP community "public" espone configurazione SIP
+            if [[ $DRY_RUN -eq 0 ]] && command -v snmpwalk &>/dev/null; then
+                log "AudioCodes: verifica SNMP community 'public' per config SIP..."
+                local snmp_sip; snmp_sip=$(snmpwalk -v2c -c public -t 3 "$target" \
+                    1.3.6.1.4.1.5003 2>/dev/null | head -10 || true)
+                if [[ -n "$snmp_sip" ]]; then
+                    found HIGH "AudioCodes SNMP 'public' espone config SIP (OID 1.3.6.1.4.1.5003): $(echo "$snmp_sip" | head -2)"
+                    echo "[SNMP-SIP] $snmp_sip" | head -10 >> "$cve_out"
+                else
+                    log "  SNMP OID AudioCodes non raggiungibile o community non 'public'"
+                fi
+            elif [[ $DRY_RUN -eq 1 ]]; then
+                echo -e "${CYAN}[DRY-RUN]${NC} snmpwalk -v2c -c public $target 1.3.6.1.4.1.5003 (AudioCodes SIP OID)"
+            fi
+            # Default creds brute force indicativo (solo check rapido)
+            for cred_pair in "admin:admin" "Admin:Admin" "root:1234" "user:user"; do
+                local ac_user; ac_user="${cred_pair%%:*}"
+                local ac_pass; ac_pass="${cred_pair##*:}"
+                if [[ $DRY_RUN -eq 0 ]]; then
+                    local ac_code; ac_code=$(curl $curl_opts -o /dev/null -w "%{http_code}" \
+                        -u "${ac_user}:${ac_pass}" "$base_url/Forms/login_security_1.htm" 2>/dev/null || echo 000)
+                    if [[ "$ac_code" == "200" ]]; then
+                        found CRITICAL "AudioCodes credenziali default trovate: ${ac_user}:${ac_pass} (HTTP $ac_code)"
+                        echo "[DEFAULT-CRED] $ac_user:$ac_pass" >> "$cve_out"
+                    fi
+                else
+                    echo -e "${CYAN}[DRY-RUN]${NC} Provo credenziali AudioCodes: ${cred_pair} su $base_url"
+                fi
+            done
+            ;;
+        commend)
+            # ── Commend ET962-BF5xx ──────────────────────────────────────────
+            # Default credentials check
+            for cred_pair in "admin:admin" "Admin:Admin" "user:user" "root:root"; do
+                local ce_user; ce_user="${cred_pair%%:*}"
+                local ce_pass; ce_pass="${cred_pair##*:}"
+                if [[ $DRY_RUN -eq 0 ]]; then
+                    local ce_code; ce_code=$(curl $curl_opts -o /dev/null -w "%{http_code}" \
+                        -u "${ce_user}:${ce_pass}" "$base_url/" 2>/dev/null || echo 000)
+                    if [[ "$ce_code" == "200" ]]; then
+                        found CRITICAL "Commend ET962 credenziali default: ${ce_user}:${ce_pass} (HTTP $ce_code)"
+                        echo "[DEFAULT-CRED] $ce_user:$ce_pass" >> "$cve_out"
+                    fi
+                else
+                    echo -e "${CYAN}[DRY-RUN]${NC} Provo credenziali Commend ET962: ${cred_pair} su $base_url"
+                fi
+            done
+            # Web management su porta 80: /cgi-bin/ paths
+            _cam_check "COMMEND-CGI" "Commend ET962 CGI directory esposta" \
+                "$base_url/cgi-bin/" "cgi\|bin\|Index\|directory" "HIGH"
+            _cam_check "COMMEND-CGI-STATUS" "Commend ET962 CGI status endpoint" \
+                "$base_url/cgi-bin/status.cgi" "status\|system\|version" "MEDIUM"
+            _cam_check "COMMEND-CGI-CONFIG" "Commend ET962 CGI config endpoint" \
+                "$base_url/cgi-bin/config.cgi" "config\|admin\|password" "HIGH"
+            # RTSP stream su porta 554 spesso senza auth
+            if [[ $DRY_RUN -eq 0 ]]; then
+                log "Commend ET962: verifica RTSP su porta 554 senza autenticazione..."
+                local rtsp_check; rtsp_check=$(curl -s --max-time 5 \
+                    "rtsp://${target}:554/" 2>/dev/null || \
+                    nc -z -w 3 "$target" 554 2>/dev/null && echo "porta aperta" || true)
+                if echo "$rtsp_check" | grep -qi "porta aperta\|RTSP\|200 OK"; then
+                    found HIGH "Commend ET962 RTSP porta 554 raggiungibile (possibile stream senza auth)"
+                    echo "[RTSP-OPEN] porta 554 aperta" >> "$cve_out"
+                fi
+            else
+                echo -e "${CYAN}[DRY-RUN]${NC} Verifica RTSP Commend ET962: rtsp://${target}:554/"
+            fi
+            # SIP registration senza autenticazione
+            if [[ $DRY_RUN -eq 0 ]] && command -v svmap &>/dev/null; then
+                log "Commend ET962: verifica SIP registration senza autenticazione..."
+                local sip_check_out="$OUTDIR/commend_sip_check.txt"
+                timeout 15 svmap --transport=udp "$target" -p 5060 2>/dev/null | tee "$sip_check_out" || true
+                if grep -qi "200\|SIP\|registration" "$sip_check_out" 2>/dev/null; then
+                    found HIGH "Commend ET962 SIP service risponde — verifica auth su porta 5060"
+                fi
+            elif [[ $DRY_RUN -eq 1 ]]; then
+                echo -e "${CYAN}[DRY-RUN]${NC} svmap --transport=udp $target -p 5060 (Commend SIP check)"
+            fi
             ;;
         generic|*)
             # Generic camera checks (work across multiple vendors)
@@ -7102,14 +7361,19 @@ usage_auto() {
     echo "  Auto-rileva il tipo di device e lancia i moduli pertinenti"
     echo ""
     echo "Profili:"
-    echo "  voip     — SIP/VoIP (Web + SIP + SNMP + TFTP)"
-    echo "  camera   — IP Camera (Web + RTSP)"
-    echo "  router   — Router/Firewall (Web + SSH + SNMP + DNS)"
-    echo "  nas      — NAS (Web + SMB + SSH + NFS)"
-    echo "  printer  — Stampante (Web + SNMP + IPP + PJL)"
-    echo "  switch   — Switch gestito (Web + SSH + Telnet + SNMP)"
-    echo "  ics      — ICS/SCADA (Modbus + BACnet + EtherNet/IP)"
-    echo "  generic  — Full (tutti i moduli)"
+    echo "  voip         — SIP/VoIP (Web + SIP + SNMP + TFTP)"
+    echo "  voip-gateway — VoIP Gateway dedicato (AudioCodes MP20x, Commend ET962, GAI-Tronics)"
+    echo "                 Sequenza: scan → sip → snmp → ssh → telnet → web → tftp → ssl → creds"
+    echo "  ip-camera    — IP Camera dedicata (Axis, Reolink)"
+    echo "                 Sequenza: scan → rtsp → onvif → cam-cve → web → snmp → ssl → creds"
+    echo "  iot-adapter  — IoT generico (SIP + SNMP + MQTT + HTTP + TFTP + SSH + creds)"
+    echo "  camera       — IP Camera generica (Web + RTSP)"
+    echo "  router       — Router/Firewall (Web + SSH + SNMP + DNS)"
+    echo "  nas          — NAS (Web + SMB + SSH + NFS)"
+    echo "  printer      — Stampante (Web + SNMP + IPP + PJL)"
+    echo "  switch       — Switch gestito (Web + SSH + Telnet + SNMP)"
+    echo "  ics          — ICS/SCADA (Modbus + BACnet + EtherNet/IP)"
+    echo "  generic      — Full (tutti i moduli)"
     echo ""
     echo "Opzioni:"
     echo "  --profile PROFILE"
@@ -7310,6 +7574,45 @@ cmd_auto() {
             _auto_mod "modbus" modbus "$target"
             _auto_mod "snmp"   snmp   "$target"
             _auto_mod "web_80" web    "$target" --port 80 --scheme http
+            ;;
+        voip-gateway)
+            # AudioCodes MP20x, Commend SIP Station, GAI-Tronics Commander VoIP
+            _auto_mod "sip"         sip    "$target"
+            _auto_mod "snmp"        snmp   "$target"
+            _auto_mod "ssh"         ssh    "$target"
+            _auto_mod "telnet"      telnet "$target"
+            _auto_mod "web_80"      web    "$target" --port 80  --scheme http
+            _auto_mod "web_443"     web    "$target" --port 443 --scheme https
+            _auto_mod "web_8080"    web    "$target" --port 8080 --scheme http
+            _auto_mod "tftp"        tftp   "$target"
+            _auto_mod "ssl_443"     ssl    "$target"
+            _auto_mod "creds_http"  creds  "$target" http
+            _auto_mod "creds_https" creds  "$target" https
+            _auto_mod "creds_sip"   creds  "$target" sip
+            ;;
+        ip-camera)
+            # Axis, Reolink
+            _auto_mod "rtsp"        rtsp   "$target"
+            _auto_mod "onvif"       onvif  "$target"
+            _auto_mod "cam-cve"     cam-cve "$target"
+            _auto_mod "web_80"      web    "$target" --port 80  --scheme http
+            _auto_mod "web_443"     web    "$target" --port 443 --scheme https
+            _auto_mod "snmp"        snmp   "$target"
+            _auto_mod "ssl_443"     ssl    "$target"
+            _auto_mod "creds_http"  creds  "$target" http --port 80
+            _auto_mod "creds_rtsp"  creds  "$target" rtsp
+            ;;
+        iot-adapter)
+            # Generico IoT
+            _auto_mod "sip"         sip    "$target"
+            _auto_mod "snmp"        snmp   "$target"
+            _auto_mod "mqtt"        mqtt   "$target"
+            _auto_mod "web_80"      web    "$target" --port 80  --scheme http
+            _auto_mod "tftp"        tftp   "$target"
+            _auto_mod "ssh"         ssh    "$target"
+            _auto_mod "creds_http"  creds  "$target" http
+            _auto_mod "creds_ssh"   creds  "$target" ssh
+            _auto_mod "creds_telnet" creds "$target" telnet
             ;;
         generic|*)
             _auto_mod "web_80"   web    "$target" --port 80  --scheme http
@@ -8104,6 +8407,569 @@ RECS
 }
 
 # ============================================================
+#  SUBCOMMAND: network-sweep
+# ============================================================
+usage_network_sweep() {
+    echo "Uso: exa-dune network-sweep <CIDR> [OPTIONS]"
+    echo ""
+    echo "  Sweep di rete: arp-scan → nmap veloce → fingerprinting device → tabella riepilogativa"
+    echo ""
+    echo "Opzioni:"
+    echo "  --iface IFACE      Interfaccia di rete (default: auto-detect)"
+    echo "  --auto             Lancia auto-profiling su ogni host trovato"
+    echo "  --output DIR       Directory output (default: auto-generata)"
+    echo "  --dry-run          Mostra comandi senza eseguirli"
+    echo "  --timeout N        Timeout secondi per nmap per host (default: 30)"
+    echo ""
+    echo "Tipi device rilevati automaticamente:"
+    echo "  voip-gateway   — porte 5060/5061/2000"
+    echo "  ip-camera      — porte 554/8554/8000"
+    echo "  mqtt-broker    — porta 1883"
+    echo "  embedded-device — porta 23 (telnet)"
+    echo "  generic        — default"
+}
+
+cmd_network_sweep() {
+    local cidr="" iface="" do_auto=0 outdir="" sweep_timeout=30
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --iface)   _req_arg "$1" "${2:-}"; iface="$2";      shift 2 ;;
+            --auto)    do_auto=1;              shift ;;
+            --output)  _req_arg "$1" "${2:-}"; outdir="$2";     shift 2 ;;
+            --dry-run) DRY_RUN=1;             shift ;;
+            --timeout) _req_arg "$1" "${2:-}"; sweep_timeout="$2"; shift 2 ;;
+            --help|-h) usage_network_sweep; exit 0 ;;
+            -*)        err "Opzione sconosciuta: $1"; usage_network_sweep; exit 1 ;;
+            *)         cidr="$1"; shift ;;
+        esac
+    done
+    [[ -z "$cidr" ]] && { err "CIDR mancante (es: 192.168.1.0/24)"; usage_network_sweep; exit 1; }
+    check_root
+
+    local ts; ts=$(date +%Y%m%d_%H%M%S)
+    outdir="${outdir:-/root/pentest/exa-dune-sweep_${ts}}"
+    [[ $DRY_RUN -eq 0 ]] && mkdir -p "$outdir"
+    local sweep_log="$outdir/sweep.log"
+    [[ $DRY_RUN -eq 0 ]] && _log_file="$sweep_log" || _log_file=""
+
+    log "Network Sweep: $cidr | Output: $outdir"
+
+    # ── Rileva interfaccia ──────────────────────────────────────────────────
+    if [[ -z "$iface" ]]; then
+        iface=$(ip route show | grep -oP 'dev \K\S+' | head -1 2>/dev/null || echo "eth0")
+        log "Interfaccia auto-rilevata: $iface"
+    fi
+
+    # ── ARP Scan ────────────────────────────────────────────────────────────
+    section "ARP Scan — $cidr"
+    local arp_out="$outdir/arp_sweep.txt"
+    if [[ $DRY_RUN -eq 1 ]]; then
+        echo -e "${CYAN}[DRY-RUN]${NC} arp-scan -I $iface $cidr"
+    else
+        if require_tool arp-scan; then
+            arp-scan -I "$iface" "$cidr" 2>/dev/null | tee "$arp_out" || true
+        else
+            warn "arp-scan non disponibile — uso nmap ping sweep come fallback"
+            nmap -sn "$cidr" -oG "$arp_out" 2>/dev/null || true
+        fi
+    fi
+
+    # ── Estrai host vivi ────────────────────────────────────────────────────
+    local live_hosts=()
+    if [[ $DRY_RUN -eq 0 && -f "$arp_out" ]]; then
+        # Da arp-scan: righe con IP e MAC
+        while IFS= read -r line; do
+            local ip; ip=$(echo "$line" | grep -oP '^\d{1,3}(\.\d{1,3}){3}' | head -1 || true)
+            [[ -n "$ip" ]] && live_hosts+=("$ip")
+        done < <(grep -E '^[0-9]+\.' "$arp_out" 2>/dev/null | grep -v "^Starting\|^Ending\|^Interface\|^ARP" || true)
+        # Fallback da nmap -sn output gnmap
+        if [[ ${#live_hosts[@]} -eq 0 ]]; then
+            while IFS= read -r line; do
+                local ip; ip=$(echo "$line" | grep -oP 'Host: \K\d{1,3}(\.\d{1,3}){3}' | head -1 || true)
+                [[ -n "$ip" ]] && live_hosts+=("$ip")
+            done < <(grep "Status: Up" "$arp_out" 2>/dev/null || true)
+        fi
+    elif [[ $DRY_RUN -eq 1 ]]; then
+        live_hosts=("192.168.1.1" "192.168.1.10")  # esempio dry-run
+    fi
+
+    log "Host vivi rilevati: ${#live_hosts[@]}"
+
+    # ── Nmap veloce + fingerprinting ────────────────────────────────────────
+    section "Nmap veloce + fingerprinting host"
+    local results=()  # Ogni entry: "IP|MAC|TIPO|PORTE|COMANDO"
+
+    for host in "${live_hosts[@]}"; do
+        local nmap_f="$outdir/nmap_${host//./-}.nmap"
+        local nmap_g="$outdir/nmap_${host//./-}.gnmap"
+
+        if [[ $DRY_RUN -eq 1 ]]; then
+            echo -e "${CYAN}[DRY-RUN]${NC} nmap -sV --top-ports 100 --host-timeout ${sweep_timeout}s -oN $nmap_f $host"
+            local dev_type="generic"
+            results+=("$host|XX:XX:XX:XX:XX:XX|$dev_type|(dry-run)|exa-dune auto $host --profile $dev_type")
+            continue
+        fi
+
+        log "Scanning $host ..."
+        nmap -sV --top-ports 100 \
+            --host-timeout "${sweep_timeout}s" \
+            $NMAP_TIMING \
+            -oN "$nmap_f" -oG "$nmap_g" \
+            "$host" 2>/dev/null || true
+
+        # Estrai porte aperte
+        local open_ports=""
+        [[ -f "$nmap_f" ]] && open_ports=$(grep -E "^[0-9]+/tcp.*open" "$nmap_f" | awk '{print $1}' | tr '\n' ',' | sed 's/,$//' || true)
+
+        # Estrai MAC da arp output
+        local mac="N/A"
+        mac=$(grep -w "$host" "$arp_out" 2>/dev/null | awk '{print $2}' | head -1 || echo "N/A")
+
+        # Fingerprinting tipo device
+        local dev_type="generic"
+        # Verifica porte caratteristiche
+        echo "$open_ports" | grep -qE "5060|5061|2000" && dev_type="voip-gateway"
+        [[ "$dev_type" == "generic" ]] && echo "$open_ports" | grep -qE "554|8554|8000" && dev_type="ip-camera"
+        [[ "$dev_type" == "generic" ]] && echo "$open_ports" | grep -q "1883"            && dev_type="mqtt-broker"
+        [[ "$dev_type" == "generic" ]] && echo "$open_ports" | grep -q "23/"             && dev_type="embedded-device"
+
+        local cmd_sug="exa-dune auto $host --profile $dev_type"
+        [[ "$dev_type" == "mqtt-broker" ]] && cmd_sug="exa-dune mqtt $host"
+
+        results+=("$host|$mac|$dev_type|$open_ports|$cmd_sug")
+        ok "  $host → tipo: $dev_type | porte: ${open_ports:-nessuna}"
+    done
+
+    # ── Tabella riepilogativa ───────────────────────────────────────────────
+    section "Tabella Riepilogativa Sweep"
+    echo ""
+    printf "${BOLD}%-17s %-19s %-16s %-30s %s${NC}\n" "IP" "MAC" "TIPO" "PORTE APERTE" "COMANDO SUGGERITO"
+    printf '%0.s─' {1..110}; echo
+    local results_file="$outdir/sweep_results.txt"
+    [[ $DRY_RUN -eq 0 ]] && printf "%-17s %-19s %-16s %-30s %s\n" "IP" "MAC" "TIPO" "PORTE APERTE" "COMANDO SUGGERITO" > "$results_file"
+
+    for entry in "${results[@]}"; do
+        IFS='|' read -r r_ip r_mac r_type r_ports r_cmd <<< "$entry"
+        local color="$NC"
+        case "$r_type" in
+            voip-gateway)   color="$CYAN"   ;;
+            ip-camera)      color="$GREEN"  ;;
+            mqtt-broker)    color="$YELLOW" ;;
+            embedded-device) color="$RED"   ;;
+        esac
+        local ports_short; ports_short=$(echo "$r_ports" | cut -c1-28)
+        printf "${color}%-17s${NC} %-19s %-16s %-30s %s\n" \
+            "$r_ip" "$r_mac" "$r_type" "$ports_short" "$r_cmd"
+        [[ $DRY_RUN -eq 0 ]] && printf "%-17s %-19s %-16s %-30s %s\n" \
+            "$r_ip" "$r_mac" "$r_type" "$r_ports" "$r_cmd" >> "$results_file"
+    done
+    echo ""
+
+    ok "Risultati sweep salvati: ${results_file:-/dev/null}"
+
+    # ── Auto-profiling ──────────────────────────────────────────────────────
+    if [[ $do_auto -eq 1 ]]; then
+        section "Auto-profiling su host rilevati"
+        for entry in "${results[@]}"; do
+            IFS='|' read -r r_ip r_mac r_type r_ports r_cmd <<< "$entry"
+            [[ "$r_type" == "mqtt-broker" ]] && continue  # usa cmd diretto
+            log "Avvio auto-assessment: $r_ip ($r_type)"
+            local auto_outdir="$outdir/auto_${r_ip//./-}"
+            if [[ $DRY_RUN -eq 0 ]]; then
+                exa-dune auto "$r_ip" --profile "$r_type" --no-tmux --output "$auto_outdir" || true
+            else
+                echo -e "${CYAN}[DRY-RUN]${NC} exa-dune auto $r_ip --profile $r_type --no-tmux --output $auto_outdir"
+            fi
+        done
+    fi
+
+    ok "Network sweep completato → $outdir"
+}
+
+# ============================================================
+#  SUBCOMMAND: self-test
+# ============================================================
+usage_self_test() {
+    echo "Uso: exa-dune self-test [OPTIONS]"
+    echo ""
+    echo "  Verifica la disponibilità di tutti i tool usati da exa-dune."
+    echo "  Stampa una tabella: TOOL | STATUS | VERSIONE | PACCHETTO APT"
+    echo ""
+    echo "Opzioni:"
+    echo "  --install-missing  Installa automaticamente i tool mancanti via apt"
+    echo "  --dry-run          Mostra cosa verrebbe installato"
+}
+
+cmd_self_test() {
+    local install_missing=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --install-missing) install_missing=1; shift ;;
+            --dry-run)         DRY_RUN=1;         shift ;;
+            --help|-h)         usage_self_test; exit 0 ;;
+            -*)                err "Opzione sconosciuta: $1"; usage_self_test; exit 1 ;;
+            *)                 shift ;;
+        esac
+    done
+
+    banner
+    echo -e "${BOLD}=== exa-dune v${VERSION} — Self-Test Tool Availability ===${NC}"
+    echo ""
+
+    # Formato: "comando:pacchetto_apt:descrizione"
+    local TOOLS=(
+        "nmap:nmap:Port scanner"
+        "hydra:hydra:Brute force multi-protocollo"
+        "nikto:nikto:Web vulnerability scanner"
+        "gobuster:gobuster:Directory/DNS bruteforcer"
+        "svmap:sipvicious:SIP scanner (sipvicious)"
+        "svwar:sipvicious:SIP war-dialer"
+        "svcrack:sipvicious:SIP password cracker"
+        "enum4linux:enum4linux:SMB enumeration"
+        "smbclient:smbclient:SMB client"
+        "snmpwalk:snmp:SNMP walker"
+        "mosquitto_sub:mosquitto-clients:MQTT subscriber"
+        "searchsploit:exploitdb:Exploit-DB search"
+        "arp-scan:arp-scan:ARP network scanner"
+        "curl:curl:HTTP client"
+        "atftp:atftp:TFTP client"
+        "nc:netcat-openbsd:Netcat"
+        "testssl.sh:testssl.sh:TLS/SSL scanner"
+        "sslscan:sslscan:SSL cipher scanner"
+        "dnsrecon:dnsrecon:DNS reconnaissance"
+        "ldapsearch:ldap-utils:LDAP query tool"
+        "ipmitool:ipmitool:IPMI management"
+        "ffuf:ffuf:Web fuzzer"
+        "wkhtmltopdf:wkhtmltopdf:HTML to PDF converter"
+        "weasyprint:weasyprint:HTML to PDF (Python)"
+        "python3:python3:Python 3 interpreter"
+        "tmux:tmux:Terminal multiplexer"
+        "ffmpeg:ffmpeg:Audio/video processing"
+        "avahi-browse:avahi-utils:mDNS/Bonjour browser"
+        "dig:dnsutils:DNS lookup"
+        "ssh-audit:ssh-audit:SSH audit tool"
+        "redis-cli:redis-tools:Redis client"
+        "sipsak:sipsak:SIP Swiss Army Knife"
+        "nuclei:nuclei:Vulnerability scanner"
+    )
+
+    local available=0 total=0 missing_tools=()
+
+    # Header tabella
+    printf "${BOLD}%-20s %-10s %-30s %-25s${NC}\n" "TOOL" "STATUS" "VERSIONE" "PACCHETTO APT"
+    printf '%0.s─' {1..90}; echo
+
+    for entry in "${TOOLS[@]}"; do
+        IFS=':' read -r tool pkg desc <<< "$entry"
+        ((total++)) || true
+        local status_str version_str=""
+
+        if command -v "$tool" &>/dev/null; then
+            ((available++)) || true
+            status_str="${GREEN}OK${NC}"
+            # Tenta di recuperare versione
+            version_str=$("$tool" --version 2>/dev/null | head -1 | grep -oP '[0-9]+\.[0-9]+[^\s]*' | head -1 || \
+                          "$tool" -V 2>/dev/null | head -1 | grep -oP '[0-9]+\.[0-9]+[^\s]*' | head -1 || \
+                          echo "n/d")
+            version_str="${version_str:0:28}"
+        else
+            status_str="${RED}MANCANTE${NC}"
+            version_str="—"
+            missing_tools+=("$tool:$pkg")
+        fi
+
+        printf "%-20s ${status_str} %-30s %-25s  # %s\n" \
+            "$tool" "$version_str" "$pkg" "$desc"
+    done
+
+    echo ""
+    printf '%0.s─' {1..90}; echo
+    echo -e "${BOLD}Risultato: ${available}/${total} tool disponibili${NC}"
+    echo ""
+
+    local missing_count=${#missing_tools[@]}
+    if [[ $missing_count -gt 0 ]]; then
+        warn "$missing_count tool mancanti:"
+        for mt in "${missing_tools[@]}"; do
+            IFS=':' read -r mt_cmd mt_pkg <<< "$mt"
+            echo "  - $mt_cmd (pacchetto: $mt_pkg)"
+        done
+        echo ""
+
+        if [[ $install_missing -eq 1 ]]; then
+            check_root
+            log "Installazione tool mancanti via apt..."
+            local apt_pkgs=()
+            for mt in "${missing_tools[@]}"; do
+                IFS=':' read -r mt_cmd mt_pkg <<< "$mt"
+                apt_pkgs+=("$mt_pkg")
+            done
+            if [[ $DRY_RUN -eq 1 ]]; then
+                echo -e "${CYAN}[DRY-RUN]${NC} apt-get install -y ${apt_pkgs[*]}"
+            else
+                apt-get update -qq 2>/dev/null || true
+                apt-get install -y "${apt_pkgs[@]}" 2>/dev/null && \
+                    ok "Installazione completata" || \
+                    warn "Alcune installazioni potrebbero essere fallite — verifica manualmente"
+            fi
+        else
+            echo -e "  Suggerimento: ${CYAN}exa-dune self-test --install-missing${NC}"
+            echo -e "           o:  ${CYAN}exa-dune install${NC}"
+        fi
+    else
+        ok "Tutti i tool sono disponibili!"
+    fi
+}
+
+# ============================================================
+#  SUBCOMMAND: diff
+# ============================================================
+usage_diff() {
+    echo "Uso: exa-dune diff <DIR-OLD> <DIR-NEW> [--pdf]"
+    echo ""
+    echo "  Confronto differenziale tra due assessment."
+    echo "  Calcola: finding nuovi (PEGGIORA), risolti (MIGLIORA), invariati (STABILE)."
+    echo "  Confronta anche le porte aperte (da nmap_fast.nmap)."
+    echo ""
+    echo "Opzioni:"
+    echo "  --pdf              Genera PDF del report differenziale"
+    echo "  --output DIR       Directory output per il report diff"
+    echo "  --dry-run"
+}
+
+cmd_diff() {
+    local dir_old="" dir_new="" do_pdf=0 diff_outdir=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --pdf)     do_pdf=1;            shift ;;
+            --output)  _req_arg "$1" "${2:-}"; diff_outdir="$2"; shift 2 ;;
+            --dry-run) DRY_RUN=1;           shift ;;
+            --help|-h) usage_diff; exit 0 ;;
+            -*)        err "Opzione sconosciuta: $1"; usage_diff; exit 1 ;;
+            *)
+                if   [[ -z "$dir_old" ]]; then dir_old="$1"
+                elif [[ -z "$dir_new" ]]; then dir_new="$1"
+                fi
+                shift ;;
+        esac
+    done
+    [[ -z "$dir_old" || -z "$dir_new" ]] && { err "Specificare DIR-OLD e DIR-NEW"; usage_diff; exit 1; }
+    if [[ $DRY_RUN -eq 0 ]]; then
+        [[ ! -d "$dir_old" ]] && { err "Directory OLD non trovata: $dir_old"; exit 1; }
+        [[ ! -d "$dir_new" ]] && { err "Directory NEW non trovata: $dir_new"; exit 1; }
+    fi
+
+    local ts; ts=$(date +%Y%m%d_%H%M%S)
+    diff_outdir="${diff_outdir:-/root/pentest/exa-dune-diff_${ts}}"
+    [[ $DRY_RUN -eq 0 ]] && mkdir -p "$diff_outdir"
+
+    log "Diff: OLD=$dir_old | NEW=$dir_new"
+
+    # ── Leggi findings dai due assessment ──────────────────────────────────
+    local old_findings=() new_findings=()
+
+    _read_findings_into() {
+        local dir="$1" target_arr="$2"
+        while IFS= read -r -d '' ffile; do
+            while IFS= read -r line; do
+                [[ -z "$line" ]] && continue
+                echo "$line" | grep -qP '^\s*[\|#=]|^Nmap|^Starting|^Host is' && continue
+                if [[ "$target_arr" == "old_findings" ]]; then
+                    old_findings+=("$line")
+                else
+                    new_findings+=("$line")
+                fi
+            done < "$ffile"
+        done < <(find "$dir" -name "findings.txt" -print0 2>/dev/null | sort -z)
+    }
+
+    if [[ $DRY_RUN -eq 0 ]]; then
+        _read_findings_into "$dir_old" "old_findings"
+        _read_findings_into "$dir_new" "new_findings"
+    else
+        old_findings=("[HIGH] Vulnerabilità esempio OLD" "[MEDIUM] Altra vulnerabilità OLD")
+        new_findings=("[HIGH] Vulnerabilità esempio OLD" "[CRITICAL] Nuova vulnerabilità CRITICAL")
+    fi
+
+    # ── Calcola differenze ─────────────────────────────────────────────────
+    local new_only=() resolved=() stable=()
+
+    # Finding nuovi (in new ma non in old)
+    for f in "${new_findings[@]+"${new_findings[@]}"}"; do
+        local found_in_old=0
+        for o in "${old_findings[@]+"${old_findings[@]}"}"; do
+            [[ "$f" == "$o" ]] && found_in_old=1 && break
+        done
+        [[ $found_in_old -eq 0 ]] && new_only+=("$f") || stable+=("$f")
+    done
+
+    # Finding risolti (in old ma non in new)
+    for o in "${old_findings[@]+"${old_findings[@]}"}"; do
+        local found_in_new=0
+        for f in "${new_findings[@]+"${new_findings[@]}"}"; do
+            [[ "$o" == "$f" ]] && found_in_new=1 && break
+        done
+        [[ $found_in_new -eq 0 ]] && resolved+=("$o")
+    done
+
+    # ── Confronta porte aperte ─────────────────────────────────────────────
+    local old_ports="" new_ports=""
+    local old_nmap; old_nmap=$(find "$dir_old" -maxdepth 2 -name "nmap_fast.nmap" 2>/dev/null | head -1 || true)
+    local new_nmap; new_nmap=$(find "$dir_new" -maxdepth 2 -name "nmap_fast.nmap" 2>/dev/null | head -1 || true)
+    [[ -n "$old_nmap" && -f "$old_nmap" ]] && old_ports=$(grep -E "^[0-9]+/tcp.*open" "$old_nmap" | awk '{print $1}' | sort | tr '\n' ' ' || true)
+    [[ -n "$new_nmap" && -f "$new_nmap" ]] && new_ports=$(grep -E "^[0-9]+/tcp.*open" "$new_nmap" | awk '{print $1}' | sort | tr '\n' ' ' || true)
+
+    # Calcola porte nuove e chiuse
+    local ports_opened="" ports_closed=""
+    for p in $new_ports; do
+        echo "$old_ports" | grep -qw "$p" || ports_opened="$ports_opened $p"
+    done
+    for p in $old_ports; do
+        echo "$new_ports" | grep -qw "$p" || ports_closed="$ports_closed $p"
+    done
+
+    # ── Stampa report differenziale ────────────────────────────────────────
+    section "REPORT DIFFERENZIALE EXA-DUNE"
+    echo ""
+    echo -e "${BOLD}OLD:${NC} $dir_old"
+    echo -e "${BOLD}NEW:${NC} $dir_new"
+    echo -e "${BOLD}Data:${NC} $(date '+%d/%m/%Y %H:%M')"
+    echo ""
+
+    # Sommario
+    echo -e "${BOLD}${CYAN}═══ SOMMARIO ═══${NC}"
+    local overall="STABILE"
+    [[ ${#new_only[@]} -gt 0 ]] && overall="${RED}PEGGIORA${NC}"
+    [[ ${#new_only[@]} -eq 0 && ${#resolved[@]} -gt 0 ]] && overall="${GREEN}MIGLIORA${NC}"
+    echo -e "  Valutazione complessiva: ${BOLD}${overall}${NC}"
+    echo -e "  Finding nuovi (PEGGIORA): ${RED}${#new_only[@]}${NC}"
+    echo -e "  Finding risolti (MIGLIORA): ${GREEN}${#resolved[@]}${NC}"
+    echo -e "  Finding invariati (STABILE): ${YELLOW}${#stable[@]}${NC}"
+    echo ""
+
+    # Finding nuovi
+    if [[ ${#new_only[@]} -gt 0 ]]; then
+        echo -e "${RED}${BOLD}▶ NUOVI FINDING (PEGGIORA) — ${#new_only[@]}${NC}"
+        for f in "${new_only[@]}"; do
+            echo -e "  ${RED}+${NC} $f"
+        done
+        echo ""
+    fi
+
+    # Finding risolti
+    if [[ ${#resolved[@]} -gt 0 ]]; then
+        echo -e "${GREEN}${BOLD}▶ FINDING RISOLTI (MIGLIORA) — ${#resolved[@]}${NC}"
+        for f in "${resolved[@]}"; do
+            echo -e "  ${GREEN}-${NC} $f"
+        done
+        echo ""
+    fi
+
+    # Finding invariati
+    if [[ ${#stable[@]} -gt 0 ]]; then
+        echo -e "${YELLOW}${BOLD}▶ FINDING INVARIATI (STABILE) — ${#stable[@]}${NC}"
+        for f in "${stable[@]}"; do
+            echo -e "  ${YELLOW}=${NC} $f"
+        done
+        echo ""
+    fi
+
+    # Porte
+    echo -e "${BOLD}${CYAN}═══ PORTE ═══${NC}"
+    if [[ -n "$ports_opened" ]]; then
+        echo -e "  ${RED}Porte nuove (aperte):${NC}  $ports_opened"
+    else
+        echo -e "  ${GREEN}Nessuna nuova porta aperta${NC}"
+    fi
+    if [[ -n "$ports_closed" ]]; then
+        echo -e "  ${GREEN}Porte chiuse (risolte):${NC} $ports_closed"
+    else
+        echo -e "  ${YELLOW}Nessuna porta chiusa${NC}"
+    fi
+    echo ""
+
+    # Salva report testo
+    local diff_report="$diff_outdir/diff_report_${ts}.txt"
+    if [[ $DRY_RUN -eq 0 ]]; then
+        {
+            echo "EXA-DUNE DIFF REPORT"
+            echo "OLD: $dir_old"
+            echo "NEW: $dir_new"
+            echo "Data: $(date)"
+            echo "---"
+            echo "NUOVI FINDING (${#new_only[@]}):"
+            for f in "${new_only[@]}"; do echo "  + $f"; done
+            echo "FINDING RISOLTI (${#resolved[@]}):"
+            for f in "${resolved[@]}"; do echo "  - $f"; done
+            echo "INVARIATI (${#stable[@]}):"
+            for f in "${stable[@]}"; do echo "  = $f"; done
+            echo "PORTE NUOVE: ${ports_opened:-nessuna}"
+            echo "PORTE CHIUSE: ${ports_closed:-nessuna}"
+        } > "$diff_report"
+        ok "Report diff salvato: $diff_report"
+    fi
+
+    # PDF del diff
+    if [[ $do_pdf -eq 1 ]]; then
+        local html_diff="$diff_outdir/diff_report_${ts}.html"
+        {
+            echo "<!DOCTYPE html><html lang='it'><head><meta charset='UTF-8'>"
+            echo "<style>body{font-family:Arial,sans-serif;background:#0d1117;color:#c9d1d9;padding:20px}"
+            echo "h1{color:#58a6ff}h2{color:#79c0ff}.new{color:#ff7b72}.resolved{color:#56d364}"
+            echo ".stable{color:#e3b341}.confidential{background:#b91c1c;color:#fff;padding:4px 12px}"
+            echo "table{width:100%;border-collapse:collapse}th{background:#161b22;color:#58a6ff;padding:6px}"
+            echo "td{padding:5px;border-bottom:1px solid #21262d}</style></head><body>"
+            echo "<h1>EXA-DUNE — Report Differenziale</h1>"
+            echo "<p class='confidential'>CONFIDENZIALE</p>"
+            echo "<p><strong>OLD:</strong> $(echo "$dir_old" | sed 's/</\&lt;/g')</p>"
+            echo "<p><strong>NEW:</strong> $(echo "$dir_new" | sed 's/</\&lt;/g')</p>"
+            echo "<p><strong>Data:</strong> $(date '+%d/%m/%Y %H:%M')</p>"
+            echo "<h2>Sommario</h2>"
+            echo "<table><tr><th>Categoria</th><th>Conteggio</th></tr>"
+            echo "<tr><td class='new'>Nuovi Finding (PEGGIORA)</td><td>${#new_only[@]}</td></tr>"
+            echo "<tr><td class='resolved'>Risolti (MIGLIORA)</td><td>${#resolved[@]}</td></tr>"
+            echo "<tr><td class='stable'>Invariati (STABILE)</td><td>${#stable[@]}</td></tr>"
+            echo "</table>"
+            if [[ ${#new_only[@]} -gt 0 ]]; then
+                echo "<h2 class='new'>Nuovi Finding</h2><ul>"
+                for f in "${new_only[@]}"; do echo "<li class='new'>$(echo "$f" | sed 's/</\&lt;/g')</li>"; done
+                echo "</ul>"
+            fi
+            if [[ ${#resolved[@]} -gt 0 ]]; then
+                echo "<h2 class='resolved'>Finding Risolti</h2><ul>"
+                for f in "${resolved[@]}"; do echo "<li class='resolved'>$(echo "$f" | sed 's/</\&lt;/g')</li>"; done
+                echo "</ul>"
+            fi
+            echo "<h2>Porte</h2>"
+            echo "<p><strong>Nuove porte aperte:</strong> ${ports_opened:-nessuna}</p>"
+            echo "<p><strong>Porte chiuse:</strong> ${ports_closed:-nessuna}</p>"
+            echo "</body></html>"
+        } > "$html_diff"
+        ok "HTML diff: $html_diff"
+
+        local pdf_diff="${html_diff%.html}.pdf"
+        local pdf_cmd
+        if pdf_cmd=$(_ensure_pdf_tool 2>/dev/null); then
+            if [[ "$pdf_cmd" == "wkhtmltopdf" ]]; then
+                wkhtmltopdf --quiet "$html_diff" "$pdf_diff" 2>/dev/null && ok "PDF diff: $pdf_diff" || warn "PDF non generato"
+            elif [[ "$pdf_cmd" == "weasyprint" ]]; then
+                weasyprint "$html_diff" "$pdf_diff" 2>/dev/null && ok "PDF diff: $pdf_diff" || warn "PDF non generato"
+            fi
+            if [[ -f "$pdf_diff" ]]; then
+                _init_reports_dir
+                local desk_name; desk_name="DIFF_REPORT_${ts}.pdf"
+                cp "$pdf_diff" "$EXA_REPORTS_DIR/$desk_name" 2>/dev/null && \
+                    ok "PDF diff copiato su Desktop: $EXA_REPORTS_DIR/$desk_name"
+            fi
+        else
+            warn "Nessun tool PDF disponibile — solo HTML salvato"
+        fi
+    fi
+
+    ok "Diff completato → $diff_outdir"
+}
+
+# ============================================================
 #  HELP
 # ============================================================
 cmd_help() {
@@ -8143,69 +9009,83 @@ cmd_help() {
         http)    banner; usage_http   ;;
         post)    banner; usage_post   ;;
         fw)      banner; usage_fw     ;;
-        auto)      banner; usage_auto     ;;
-        pipeline)  banner; usage_pipeline ;;
-        report)    banner; usage_report   ;;
-        install)   banner; usage_install  ;;
+        auto)          banner; usage_auto          ;;
+        pipeline)      banner; usage_pipeline      ;;
+        report)        banner; usage_report        ;;
+        install)       banner; usage_install       ;;
+        network-sweep) banner; usage_network_sweep ;;
+        self-test)     banner; usage_self_test     ;;
+        diff)          banner; usage_diff          ;;
         *)
             banner
             echo -e "${BOLD}Uso:${NC}  exa-dune <subcommand> <TARGET> [OPTIONS]"
             echo -e "      exa-dune help <subcommand>"
             echo ""
             echo -e "${BOLD}Subcommands:${NC}"
-            printf "  %-10s %s\n" "scan"    "Port scan + recon          (nmap, arp-scan, searchsploit)"
-            printf "  %-10s %s\n" "web"     "Web application audit      (nikto, gobuster, curl, nmap http NSE)"
-            printf "  %-10s %s\n" "sip"     "SIP/VoIP enumeration       (svmap, svwar, svcrack, nmap sip NSE)"
-            printf "  %-10s %s\n" "smb"     "SMB/NetBIOS audit          (enum4linux, smbclient, nmap smb NSE)"
-            printf "  %-10s %s\n" "creds"   "Credential brute force     (hydra multiprotocol)"
-            printf "  %-10s %s\n" "snmp"    "SNMP audit                 (snmpwalk, nmap snmp NSE)"
-            printf "  %-10s %s\n" "ftp"     "FTP audit                  (nmap, curl, hydra)"
-            printf "  %-10s %s\n" "ssh"     "SSH audit + brute force    (ssh-audit, hydra)"
-            printf "  %-10s %s\n" "telnet"  "Telnet banner + brute      (nc, hydra)"
-            printf "  %-10s %s\n" "mqtt"    "MQTT broker audit          (mosquitto_sub, nmap)"
-            printf "  %-10s %s\n" "modbus"  "Modbus/ICS audit           (nmap, raw probes)"
-            printf "  %-10s %s\n" "upnp"    "UPnP/SSDP audit            (nmap, curl SOAP)"
-            printf "  %-10s %s\n" "ssl"     "TLS/SSL full audit         (testssl.sh, sslscan, openssl, nmap)"
-            printf "  %-10s %s\n" "tftp"    "TFTP file enumeration      (atftp, nmap tftp-enum NSE)"
-            printf "  %-10s %s\n" "rtsp"    "RTSP stream audit + Digest brute  (nmap, python3, hydra)"
-            printf "  %-10s %s\n" "onvif"   "ONVIF/gSOAP IP camera audit (curl SOAP, WS-Security brute)"
-            printf "  %-10s %s\n" "js"      "JavaScript analysis        (endpoint/secret extraction)"
-            printf "  %-10s %s\n" "dns"     "DNS enumeration            (dig, dnsrecon, host, nmap)"
-            printf "  %-10s %s\n" "ipmi"    "IPMI/BMC audit             (nmap, ipmitool)"
-            printf "  %-10s %s\n" "coap"    "CoAP IoT protocol audit    (nmap, coap-client)"
-            printf "  %-10s %s\n" "mdns"    "mDNS/Bonjour service discovery  (avahi-browse, nmap dns-sd)"
-            printf "  %-10s %s\n" "wsd"     "WS-Discovery/SSDP devices  (UDP 3702 multicast, SSDP 1900)"
-            printf "  %-10s %s\n" "bacnet"  "BACnet/IP building automation  (nmap bacnet-info NSE, Who-Is)"
-            printf "  %-10s %s\n" "rtmp"    "RTMP stream probe          (ffprobe, rtmpdump — DVR/NVR)"
-            printf "  %-10s %s\n" "cam-cve" "Camera CVE scanner         (Hikvision/Dahua/Axis/Reolink CVEs)"
-            printf "  %-10s %s\n" "sip-fuzz" "SIP fuzzing + stress test  (sipsak, nmap sip-methods)"
-            printf "  %-10s %s\n" "enip"    "EtherNet/IP CIP PLC audit  (nmap enip-info NSE, ListIdentity)"
-            printf "  %-10s %s\n" "vnc"     "VNC audit                  (nmap vnc NSE, hydra)"
-            printf "  %-10s %s\n" "rdp"     "RDP audit + brute force    (nmap rdp NSE, hydra)"
-            printf "  %-10s %s\n" "ldap"    "LDAP enumeration           (ldapsearch, nmap ldap NSE)"
-            printf "  %-10s %s\n" "redis"   "Redis audit + RCE check    (redis-cli, nmap)"
-            printf "  %-10s %s\n" "http"    "HTTP exploitation embedded  (CGI paths, inject, auth bypass)"
-            printf "  %-10s %s\n" "post"    "Post-exploitation + reverse shell (shell/web/ftp/smb/snmp/revshell)"
-            printf "  %-10s %s\n" "fw"      "Firewall bypass + analysis  (ACK/FIN/frag/src-port/IPv6/UPnP/SIP-ALG)"
-            printf "  %-10s %s\n" "auto"     "Full orchestrated assessment (tmux, auto-profile)"
-            printf "  %-10s %s\n" "pipeline"  "Smart pipeline: scan→attack→post→PDF report"
-            printf "  %-10s %s\n" "report"    "Generate report from output dir"
-            printf "  %-10s %s\n" "install"   "Installa tutti i tool mancanti  (richiede root)"
-            printf "  %-10s %s\n" "wordlists" "Scarica wordlist aggiuntive da GitHub → /usr/share/exa-dune/"
+            printf "  %-15s %s\n" "scan"          "Port scan + recon          (nmap, arp-scan, searchsploit)"
+            printf "  %-15s %s\n" "web"           "Web application audit      (nikto, gobuster, curl, nmap http NSE)"
+            printf "  %-15s %s\n" "sip"           "SIP/VoIP enumeration       (svmap, svwar, svcrack, nmap sip NSE)"
+            printf "  %-15s %s\n" "smb"           "SMB/NetBIOS audit          (enum4linux, smbclient, nmap smb NSE)"
+            printf "  %-15s %s\n" "creds"         "Credential brute force     (hydra multiprotocol)"
+            printf "  %-15s %s\n" "snmp"          "SNMP audit                 (snmpwalk, nmap snmp NSE)"
+            printf "  %-15s %s\n" "ftp"           "FTP audit                  (nmap, curl, hydra)"
+            printf "  %-15s %s\n" "ssh"           "SSH audit + brute force    (ssh-audit, hydra)"
+            printf "  %-15s %s\n" "telnet"        "Telnet banner + brute      (nc, hydra)"
+            printf "  %-15s %s\n" "mqtt"          "MQTT broker audit          (mosquitto_sub, nmap)"
+            printf "  %-15s %s\n" "modbus"        "Modbus/ICS audit           (nmap, raw probes)"
+            printf "  %-15s %s\n" "upnp"          "UPnP/SSDP audit            (nmap, curl SOAP)"
+            printf "  %-15s %s\n" "ssl"           "TLS/SSL full audit         (testssl.sh, sslscan, openssl, nmap)"
+            printf "  %-15s %s\n" "tftp"          "TFTP file enumeration      (atftp, nmap tftp-enum NSE)"
+            printf "  %-15s %s\n" "rtsp"          "RTSP stream audit + Digest brute  (nmap, python3, hydra)"
+            printf "  %-15s %s\n" "onvif"         "ONVIF/gSOAP IP camera audit (curl SOAP, WS-Security brute)"
+            printf "  %-15s %s\n" "js"            "JavaScript analysis        (endpoint/secret extraction)"
+            printf "  %-15s %s\n" "dns"           "DNS enumeration            (dig, dnsrecon, host, nmap)"
+            printf "  %-15s %s\n" "ipmi"          "IPMI/BMC audit             (nmap, ipmitool)"
+            printf "  %-15s %s\n" "coap"          "CoAP IoT protocol audit    (nmap, coap-client)"
+            printf "  %-15s %s\n" "mdns"          "mDNS/Bonjour service discovery  (avahi-browse, nmap dns-sd)"
+            printf "  %-15s %s\n" "wsd"           "WS-Discovery/SSDP devices  (UDP 3702 multicast, SSDP 1900)"
+            printf "  %-15s %s\n" "bacnet"        "BACnet/IP building automation  (nmap bacnet-info NSE, Who-Is)"
+            printf "  %-15s %s\n" "rtmp"          "RTMP stream probe          (ffprobe, rtmpdump — DVR/NVR)"
+            printf "  %-15s %s\n" "cam-cve"       "CVE scanner cam + VoIP     (Hikvision/Dahua/Axis/AudioCodes/Commend)"
+            printf "  %-15s %s\n" "sip-fuzz"      "SIP fuzzing + stress test  (sipsak, nmap sip-methods)"
+            printf "  %-15s %s\n" "enip"          "EtherNet/IP CIP PLC audit  (nmap enip-info NSE, ListIdentity)"
+            printf "  %-15s %s\n" "vnc"           "VNC audit                  (nmap vnc NSE, hydra)"
+            printf "  %-15s %s\n" "rdp"           "RDP audit + brute force    (nmap rdp NSE, hydra)"
+            printf "  %-15s %s\n" "ldap"          "LDAP enumeration           (ldapsearch, nmap ldap NSE)"
+            printf "  %-15s %s\n" "redis"         "Redis audit + RCE check    (redis-cli, nmap)"
+            printf "  %-15s %s\n" "http"          "HTTP exploitation embedded  (CGI paths, inject, auth bypass)"
+            printf "  %-15s %s\n" "post"          "Post-exploitation + reverse shell"
+            printf "  %-15s %s\n" "fw"            "Firewall bypass + analysis  (ACK/FIN/frag/src-port/IPv6/UPnP)"
+            printf "  %-15s %s\n" "auto"          "Full orchestrated assessment (tmux, auto-profile)"
+            printf "  %-15s %s\n" "pipeline"      "Smart pipeline: scan→attack→post→PDF report"
+            printf "  %-15s %s\n" "report"        "Generate HTML/PDF report da output dir"
+            printf "  %-15s %s\n" "network-sweep" "Sweep rete: arp-scan + fingerprint + tabella host"
+            printf "  %-15s %s\n" "self-test"     "Verifica disponibilità tool + installa mancanti"
+            printf "  %-15s %s\n" "diff"          "Confronto differenziale tra due assessment"
+            printf "  %-15s %s\n" "install"       "Installa tutti i tool mancanti  (richiede root)"
+            printf "  %-15s %s\n" "wordlists"     "Scarica wordlist aggiuntive da GitHub"
             echo ""
             echo -e "${BOLD}Esempi:${NC}"
-            echo "  exa-dune scan 10.0.0.1 --stealth"
-            echo "  exa-dune web 10.0.0.1 --port 8080 --scheme http"
-            echo "  exa-dune sip 10.0.0.5 --range 100-500"
-            echo "  exa-dune creds 10.0.0.1 ssh --userlist /path/to/users.txt"
-            echo "  exa-dune snmp 10.0.0.1 --communities /path/to/communities.txt"
-            echo "  exa-dune auto 10.0.0.1 --profile router --stealth"
-            echo "  exa-dune auto 10.0.0.1 --profile generic --dry-run"
-            echo "  exa-dune report /root/pentest/exa-dune-10-0-0-1_20260320_120000/"
+            echo "  exa-dune scan 192.168.1.1 --stealth"
+            echo "  exa-dune web 192.168.1.1 --port 8080 --scheme http"
+            echo "  exa-dune sip 192.168.1.5 --range 100-500"
+            echo "  exa-dune auto 192.168.1.1 --profile voip-gateway"
+            echo "  exa-dune auto 192.168.1.10 --profile ip-camera"
+            echo "  exa-dune auto 192.168.1.1 --profile iot-adapter"
+            echo "  exa-dune network-sweep 192.168.1.0/24 --auto"
+            echo "  exa-dune network-sweep 192.168.1.0/24 --dry-run"
+            echo "  exa-dune cam-cve 192.168.1.1 --vendor audiocodes"
+            echo "  exa-dune cam-cve 192.168.1.1 --vendor commend"
+            echo "  exa-dune report /root/pentest/exa-dune-192-168-1-1_20260322/ --pdf"
+            echo "  exa-dune diff /root/pentest/old/ /root/pentest/new/ --pdf"
+            echo "  exa-dune self-test"
+            echo "  exa-dune self-test --install-missing"
             echo ""
             echo -e "${BOLD}Flag globali (validi per tutti i subcommand):${NC}"
             echo "  --output DIR       Directory output (default: auto-generata)"
             echo "  --dry-run          Mostra comandi senza eseguirli"
+            echo "  --adaptive         Rate limiting adattivo (riduce velocità se rileva RST/timeout)"
+            echo "  --json             Output JSON aggiuntivo (findings.json + summary.json)"
             ;;
     esac
 }
@@ -8585,6 +9465,17 @@ PYEOF
 # ============================================================
 [[ $# -eq 0 ]] && { cmd_help; exit 0; }
 
+# Pre-processing flag globali prima del subcommand
+_pre_args=()
+for _arg in "$@"; do
+    case "$_arg" in
+        --adaptive) ADAPTIVE=1 ;;
+        --json)     JSON_OUTPUT=1 ;;
+        *)          _pre_args+=("$_arg") ;;
+    esac
+done
+set -- "${_pre_args[@]+"${_pre_args[@]}"}"
+
 subcommand="$1"; shift
 
 case "$subcommand" in
@@ -8622,11 +9513,14 @@ case "$subcommand" in
     http)    cmd_http    "$@" ;;
     post)    cmd_post    "$@" ;;
     fw)      cmd_fw      "$@" ;;
-    auto)     cmd_auto     "$@" ;;
-    pipeline) cmd_pipeline "${@}" ;;
-    report)  cmd_report  "$@" ;;
-    install) cmd_install "$@" ;;
-    wordlists) _download_wordlists ;;
+    auto)           cmd_auto          "$@" ;;
+    pipeline)       cmd_pipeline      "${@}" ;;
+    report)         cmd_report        "$@" ;;
+    install)        cmd_install       "$@" ;;
+    network-sweep)  cmd_network_sweep "$@" ;;
+    self-test)      cmd_self_test     "$@" ;;
+    diff)           cmd_diff          "$@" ;;
+    wordlists)      _download_wordlists ;;
     help|-h|--help) cmd_help "$@" ;;
     version|--version) echo "exa-dune $VERSION"; exit 0 ;;
     *) err "Subcommand sconosciuto: $subcommand"; cmd_help; exit 1 ;;
