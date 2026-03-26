@@ -40,7 +40,7 @@
 
 set -euo pipefail
 
-VERSION="2.7.0"
+VERSION="2.8.0"
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 
 # ── Colori ──────────────────────────────────────────────────
@@ -13554,18 +13554,23 @@ PYEOF
 usage_update() {
     echo "Uso: exa-dune update [OPTIONS]"
     echo ""
-    echo "  Aggiorna exa-dune all'ultima versione dal repository git."
-    echo "  Se il repo git non è trovato, scarica direttamente da GitHub."
+    echo "  Aggiorna exa-dune all'ultima versione."
+    echo "  Se è presente un repo git locale esegue 'git pull' (rileva remote/branch automaticamente)."
+    echo "  Altrimenti scarica direttamente da GitHub (https://raw.githubusercontent.com/Sal1699/exa-dune/main/exa-dune)."
+    echo "  Verifica che il file scaricato sia un bash script valido prima di installarlo."
     echo ""
     echo "Opzioni:"
+    echo "  --force, -f    Reinstalla anche se la versione è già aggiornata"
     echo "  --dry-run      Mostra cosa verrebbe fatto senza eseguire"
 }
 
 cmd_update() {
+    local force=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --dry-run) DRY_RUN=1; shift ;;
-            --help|-h) usage_update; exit 0 ;;
+            --dry-run)   DRY_RUN=1; shift ;;
+            --force|-f)  force=1;   shift ;;
+            --help|-h)   usage_update; exit 0 ;;
             *) err "Opzione sconosciuta: $1"; usage_update; exit 1 ;;
         esac
     done
@@ -13576,7 +13581,11 @@ cmd_update() {
     local version_before="$VERSION"
     log "Versione corrente: $version_before"
 
-    # Cerca la directory del repo git partendo da SCRIPT_PATH
+    local RAW_URL="https://raw.githubusercontent.com/Sal1699/exa-dune/main/exa-dune"
+    local INSTALL_PATH="/usr/local/bin/exa-dune"
+    local TMP_FILE="/tmp/exa-dune-update-$$"
+
+    # ── Cerca un repo git locale ──────────────────────────────────────────
     local script_dir; script_dir=$(dirname "$SCRIPT_PATH")
     local repo_dir=""
     local search_dir="$script_dir"
@@ -13591,71 +13600,105 @@ cmd_update() {
 
     if [[ -n "$repo_dir" ]]; then
         log "Repository git trovato: $repo_dir"
+
         if [[ "$DRY_RUN" -eq 1 ]]; then
-            echo -e "${CYAN}[DRY-RUN]${NC} git -C $repo_dir pull origin main"
-            echo -e "${CYAN}[DRY-RUN]${NC} cp <script> /usr/local/bin/exa-dune && chmod +x /usr/local/bin/exa-dune"
+            echo -e "${CYAN}[DRY-RUN]${NC} git -C $repo_dir fetch && git pull"
+            echo -e "${CYAN}[DRY-RUN]${NC} cp $repo_dir/exa-dune $INSTALL_PATH && chmod +x $INSTALL_PATH"
+            return 0
+        fi
+
+        # Determina remote e branch correnti (non hardcodare origin/main)
+        local git_remote git_branch
+        git_remote=$(git -C "$repo_dir" remote 2>/dev/null | head -1)
+        git_branch=$(git -C "$repo_dir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+        [[ -z "$git_remote" ]] && git_remote="origin"
+        log "Remote: $git_remote  Branch: $git_branch"
+
+        # Fetch + check se ci sono aggiornamenti
+        git -C "$repo_dir" fetch "$git_remote" "$git_branch" 2>&1 | while IFS= read -r l; do log "$l"; done || true
+
+        local local_hash remote_hash
+        local_hash=$(git -C "$repo_dir" rev-parse HEAD 2>/dev/null || echo "")
+        remote_hash=$(git -C "$repo_dir" rev-parse "${git_remote}/${git_branch}" 2>/dev/null || echo "")
+
+        if [[ "$local_hash" == "$remote_hash" && $force -eq 0 ]]; then
+            ok "exa-dune è già all'ultima versione ($version_before) — usa --force per reinstallare"
             return 0
         fi
 
         local git_output
-        git_output=$(git -C "$repo_dir" pull origin main 2>&1) || {
+        git_output=$(git -C "$repo_dir" pull "$git_remote" "$git_branch" 2>&1) || {
             err "git pull fallito: $git_output"
-            exit 1
+            warn "Tentativo fallback con download diretto..."
+            # Fallback a download diretto
+            git_remote=""
+            repo_dir=""
         }
-        log "$git_output"
+        [[ -n "$repo_dir" ]] && log "$git_output"
+    fi
 
-        if echo "$git_output" | grep -q "Already up to date"; then
-            ok "exa-dune è già all'ultima versione ($version_before)"
-            return 0
-        fi
+    # ── Download diretto da GitHub (usato se no repo o pull fallito) ──────
+    if [[ -z "$repo_dir" ]]; then
+        log "Download diretto da GitHub: $RAW_URL"
 
-        # Trova il file exa-dune nel repo
-        local updated_script=""
-        if [[ -f "$repo_dir/exa-dune" ]]; then
-            updated_script="$repo_dir/exa-dune"
-        else
-            updated_script=$(find "$repo_dir" -maxdepth 2 -name "exa-dune" -not -path "*/.git/*" 2>/dev/null | head -1)
-        fi
-
-        if [[ -z "$updated_script" ]]; then
-            err "File exa-dune non trovato nel repo dopo il pull"
-            exit 1
-        fi
-
-        cp "$updated_script" /usr/local/bin/exa-dune
-        chmod +x /usr/local/bin/exa-dune
-
-        local version_after
-        version_after=$(grep -m1 '^VERSION=' "$updated_script" | cut -d'"' -f2 || echo "sconosciuta")
-        ok "Aggiornamento completato: $version_before → $version_after"
-        ok "Script installato in: /usr/local/bin/exa-dune"
-
-        # Aggiorna script ausiliari
-        if [[ -d "$repo_dir/scripts" ]]; then
-            log "Aggiornamento script ausiliari..."
-            _install_scripts
-        fi
-    else
-        warn "Repository git non trovato. Download diretto da GitHub..."
-        local url="https://raw.githubusercontent.com/Sal1699/exa-dune/main/exa-dune"
         if [[ "$DRY_RUN" -eq 1 ]]; then
-            echo -e "${CYAN}[DRY-RUN]${NC} curl -fsSL $url -o /usr/local/bin/exa-dune"
-            echo -e "${CYAN}[DRY-RUN]${NC} chmod +x /usr/local/bin/exa-dune"
+            echo -e "${CYAN}[DRY-RUN]${NC} curl -fsSL $RAW_URL -o $INSTALL_PATH && chmod +x $INSTALL_PATH"
             return 0
         fi
 
-        curl -fsSL "$url" -o /tmp/exa-dune-update || {
-            err "Download fallito da: $url"
+        curl -fsSL --retry 3 --retry-delay 2 "$RAW_URL" -o "$TMP_FILE" || {
+            err "Download fallito da: $RAW_URL"
+            rm -f "$TMP_FILE"
             exit 1
         }
 
+        # Verifica che il file scaricato sia uno script bash valido
+        if ! head -1 "$TMP_FILE" | grep -q "^#!.*bash"; then
+            err "File scaricato non valido (non è uno script bash) — aggiornamento annullato"
+            rm -f "$TMP_FILE"
+            exit 1
+        fi
+
         local version_after
-        version_after=$(grep -m1 '^VERSION=' /tmp/exa-dune-update | cut -d'"' -f2 || echo "sconosciuta")
-        cp /tmp/exa-dune-update /usr/local/bin/exa-dune
-        chmod +x /usr/local/bin/exa-dune
-        rm -f /tmp/exa-dune-update
-        ok "Aggiornamento completato via download diretto: $version_before → $version_after"
-        ok "Script installato in: /usr/local/bin/exa-dune"
+        version_after=$(grep -m1 '^VERSION=' "$TMP_FILE" | cut -d'"' -f2 || echo "sconosciuta")
+
+        if [[ "$version_after" == "$version_before" && $force -eq 0 ]]; then
+            ok "exa-dune è già all'ultima versione ($version_before) — usa --force per reinstallare"
+            rm -f "$TMP_FILE"
+            return 0
+        fi
+
+        cp "$TMP_FILE" "$INSTALL_PATH"
+        chmod +x "$INSTALL_PATH"
+        rm -f "$TMP_FILE"
+        ok "Aggiornamento completato: $version_before → $version_after"
+        ok "Script installato in: $INSTALL_PATH"
+        return 0
+    fi
+
+    # ── Copia da repo git aggiornato ──────────────────────────────────────
+    local updated_script=""
+    if [[ -f "$repo_dir/exa-dune" ]]; then
+        updated_script="$repo_dir/exa-dune"
+    else
+        updated_script=$(find "$repo_dir" -maxdepth 2 -name "exa-dune" -not -path "*/.git/*" 2>/dev/null | head -1)
+    fi
+
+    if [[ -z "$updated_script" ]]; then
+        err "File exa-dune non trovato nel repo dopo il pull"
+        exit 1
+    fi
+
+    local version_after
+    version_after=$(grep -m1 '^VERSION=' "$updated_script" | cut -d'"' -f2 || echo "sconosciuta")
+    cp "$updated_script" "$INSTALL_PATH"
+    chmod +x "$INSTALL_PATH"
+    ok "Aggiornamento completato: $version_before → $version_after"
+    ok "Script installato in: $INSTALL_PATH"
+
+    if [[ -d "$repo_dir/scripts" ]]; then
+        log "Aggiornamento script ausiliari..."
+        _install_scripts
     fi
 }
 
