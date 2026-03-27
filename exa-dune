@@ -7283,6 +7283,12 @@ usage_fw() {
     echo "  ftp-alg      FTP ALG PORT command pinhole"
     echo "  http-tunnel  HTTP CONNECT proxy tunnel probe"
     echo "  proto-confuse Protocol confusion (SSH on 443, SIP on 80)"
+    echo "  idle         Idle/Zombie scan via IP ID sequence spoofing"
+    echo "  sctp         SCTP INIT scan → bypassa firewall TCP/UDP-only"
+    echo "  ipopts       IP options: LSRR/SSRR source routing + Record Route"
+    echo "  websocket    WebSocket Upgrade bypass → evasione DPI L7"
+    echo "  quic         QUIC/UDP-443 probe → HTTP/3 tunnel bypass"
+    echo "  gre          GRE (proto 47) passthrough → tunnel IP grezzo"
     echo ""
     echo "Opzioni:"
     echo "  --ports LIST       Porte TCP da testare (default: 22,23,80,443,445,"
@@ -7355,12 +7361,14 @@ cmd_fw() {
     local do_decoy=0 do_ttl=0 do_datalen=0 do_slowscan=0
     local do_icmp=0 do_ftp_alg=0 do_http_tunnel=0 do_proto_confuse=0
     local do_knock=0 do_fullscan=0 do_iot_ports=0 do_snmp_recon=0
+    local do_idle=0 do_sctp=0 do_ipopts=0 do_websocket=0 do_quic=0 do_gre=0
     if [[ "$tech_str" == "all" ]]; then
         do_ack=1; do_alt=1; do_srcport=1; do_frag=1; do_badsum=1
         do_ipv6=1; do_upnp=1; do_sip_alg=1
         do_decoy=1; do_ttl=1; do_datalen=1; do_slowscan=1
         do_icmp=1; do_ftp_alg=1; do_http_tunnel=1; do_proto_confuse=1
         do_knock=1; do_fullscan=1; do_iot_ports=1; do_snmp_recon=1
+        do_idle=1; do_sctp=1; do_ipopts=1; do_websocket=1; do_quic=1; do_gre=1
     else
         IFS=',' read -ra techs <<< "$tech_str"
         for t in "${techs[@]}"; do
@@ -7385,6 +7393,12 @@ cmd_fw() {
                 fullscan)      do_fullscan=1 ;;
                 iot-ports)     do_iot_ports=1 ;;
                 snmp-recon)    do_snmp_recon=1 ;;
+                idle)          do_idle=1 ;;
+                sctp)          do_sctp=1 ;;
+                ipopts)        do_ipopts=1 ;;
+                websocket)     do_websocket=1 ;;
+                quic)          do_quic=1 ;;
+                gre)           do_gre=1 ;;
                 *) warn "Tecnica sconosciuta: $t — ignorata" ;;
             esac
         done
@@ -8263,7 +8277,242 @@ cmd_fw() {
         fi
     fi
 
-    # ── 22. Matrix + Summary bypass ──────────────────────────
+    # ── 21. Idle/Zombie Scan ──────────────────────────────────────
+    if [[ $do_idle -eq 1 ]]; then
+        section "Idle/Zombie Scan (IP ID sequence spoofing)"
+        local _target_net; _target_net=$(echo "$target" | grep -oP '^\d+\.\d+\.\d+\.' || true)
+        if [[ -n "$_target_net" ]]; then
+            log "Ricerca zombie via IP ID sequence nella rete ${_target_net}0/24..."
+            run_cmd "nmap_ipidseq" \
+                "nmap -p 80,443,8080 --script ipidseq \
+                 -oN \"$OUTDIR/fw_ipidseq.nmap\" \
+                 ${_target_net}0/24 2>&1"
+            local _zombie=""
+            if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/fw_ipidseq.nmap" ]]; then
+                _zombie=$(grep -B2 "Incremental!" "$OUTDIR/fw_ipidseq.nmap" 2>/dev/null | \
+                    grep "Nmap scan report" | grep -oP '\d+\.\d+\.\d+\.\d+' | \
+                    grep -v "^${target}$" | head -1 || true)
+            fi
+            if [[ -n "$_zombie" ]]; then
+                log "Zombie trovato: $_zombie — esecuzione idle scan..."
+                run_cmd "nmap_idle" \
+                    "nmap -sI ${_zombie} -p $ports_str \
+                     -oG \"$OUTDIR/fw_idle.gnmap\" \
+                     -oN \"$OUTDIR/fw_idle.nmap\" \
+                     $target 2>&1"
+                if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/fw_idle.gnmap" ]]; then
+                    local idle_open; idle_open=$(_fw_open "$OUTDIR/fw_idle.gnmap")
+                    while IFS= read -r _p; do
+                        [[ -z "$_p" ]] && continue
+                        if ! _fw_in_list "$_p" "$baseline_open"; then
+                            found HIGH "Idle scan — porta $_p aperta (nascosta al SYN diretto)"
+                            _fw_found "$_p" "idle/zombie scan (zombie: $_zombie)"
+                        fi
+                    done <<< "$idle_open" || true
+                fi
+            else
+                warn "Nessun zombie adatto trovato nella /24 — idle scan saltato"
+            fi
+        else
+            warn "Target non IPv4 — idle scan saltato"
+        fi
+    fi
+
+    # ── 22. SCTP bypass ──────────────────────────────────────────
+    if [[ $do_sctp -eq 1 ]]; then
+        section "SCTP INIT Scan (bypass firewall TCP/UDP-only)"
+        run_cmd "nmap_sctp" \
+            "nmap -sY -p $ports_str $NMAP_TIMING \
+             -oG \"$OUTDIR/fw_sctp.gnmap\" \
+             -oN \"$OUTDIR/fw_sctp.nmap\" \
+             $target 2>&1"
+        if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/fw_sctp.gnmap" ]]; then
+            local sctp_open; sctp_open=$(_fw_open "$OUTDIR/fw_sctp.gnmap")
+            if [[ -n "$sctp_open" ]]; then
+                found MEDIUM "SCTP — porte che rispondono all'INIT: $(echo "$sctp_open" | tr '\n' ' ')"
+                while IFS= read -r _p; do
+                    [[ -z "$_p" ]] && continue
+                    _fw_found "$_p" "SCTP INIT scan"
+                done <<< "$sctp_open" || true
+            else
+                log "SCTP: nessuna porta risponde — firewall blocca o servizi assenti"
+            fi
+        fi
+        # SCTP COOKIE-ECHO scan (stealth)
+        run_cmd "nmap_sctp_ce" \
+            "nmap -sZ -p $ports_str $NMAP_TIMING \
+             -oN \"$OUTDIR/fw_sctp_ce.nmap\" \
+             $target 2>&1"
+        if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/fw_sctp_ce.nmap" ]]; then
+            if grep -qE "open|open\|filtered" "$OUTDIR/fw_sctp_ce.nmap" 2>/dev/null; then
+                found LOW "SCTP COOKIE-ECHO — porte rilevate (stealth SCTP)"
+            fi
+        fi
+    fi
+
+    # ── 23. IP Options (source routing + record route) ────────────
+    if [[ $do_ipopts -eq 1 ]]; then
+        section "IP Options — Source Routing & Record Route"
+        # Record Route: raccoglie hop di rete (topologia interna)
+        run_cmd "nmap_ipopts_rr" \
+            "nmap --ip-options R -p 80,443,22 $NMAP_TIMING \
+             -oN \"$OUTDIR/fw_ipopts_rr.nmap\" \
+             $target 2>&1"
+        if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/fw_ipopts_rr.nmap" ]]; then
+            if grep -qE "RR:|Route:" "$OUTDIR/fw_ipopts_rr.nmap" 2>/dev/null; then
+                local _rr_hops; _rr_hops=$(grep -E "RR:|Route:" "$OUTDIR/fw_ipopts_rr.nmap" | head -3)
+                found LOW "IP Record Route — topologia rete rilevata: $_rr_hops"
+            fi
+        fi
+        # Loose Source Routing verso se stesso (loop: alcuni FW non filtrano)
+        run_cmd "nmap_ipopts_lsrr" \
+            "nmap --ip-options \"L $target\" -p $ports_str $NMAP_TIMING \
+             -oG \"$OUTDIR/fw_ipopts_lsrr.gnmap\" \
+             -oN \"$OUTDIR/fw_ipopts_lsrr.nmap\" \
+             $target 2>&1"
+        if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/fw_ipopts_lsrr.gnmap" ]]; then
+            local lsrr_open; lsrr_open=$(_fw_open "$OUTDIR/fw_ipopts_lsrr.gnmap")
+            while IFS= read -r _p; do
+                [[ -z "$_p" ]] && continue
+                if ! _fw_in_list "$_p" "$baseline_open"; then
+                    found HIGH "IP LSRR — porta $_p raggiungibile via source routing (FW bypass)"
+                    _fw_found "$_p" "IP source routing LSRR"
+                fi
+            done <<< "$lsrr_open" || true
+        fi
+        # Strict Source Routing (SSRR) — più restrittivo, molti FW lo droppano
+        run_cmd "nmap_ipopts_ssrr" \
+            "nmap --ip-options \"S $target\" -p 80,443,22 $NMAP_TIMING \
+             -oN \"$OUTDIR/fw_ipopts_ssrr.nmap\" \
+             $target 2>&1"
+        if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/fw_ipopts_ssrr.nmap" ]]; then
+            if grep -qE "[0-9]+/open" "$OUTDIR/fw_ipopts_ssrr.nmap" 2>/dev/null; then
+                found MEDIUM "IP SSRR — porte aperte con strict source routing (FW permissivo)"
+                _fw_found "ssrr" "IP strict source routing (SSRR)"
+            fi
+        fi
+    fi
+
+    # ── 24. WebSocket Upgrade Bypass ─────────────────────────────
+    if [[ $do_websocket -eq 1 ]]; then
+        section "WebSocket Upgrade Bypass (L7 DPI evasion)"
+        local _ws_ports=(80 443 8080 8443 8888 9000 4443)
+        for _wp in "${_ws_ports[@]}"; do
+            if ! check_port "$target" "$_wp"; then continue; fi
+            local _ws_proto="http"; [[ "$_wp" == 443 || "$_wp" == 8443 || "$_wp" == 4443 ]] && _ws_proto="https"
+            local _ws_code
+            _ws_code=$(timeout 6 curl -sk \
+                -H "Upgrade: websocket" \
+                -H "Connection: Upgrade" \
+                -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
+                -H "Sec-WebSocket-Version: 13" \
+                -o /dev/null -w "%{http_code}" \
+                "${_ws_proto}://${target}:${_wp}/" 2>/dev/null || echo "000")
+            case "$_ws_code" in
+                101)
+                    found HIGH "WebSocket — porta $_wp: Upgrade accettato (101 Switching Protocols)"
+                    _fw_found "$_wp" "WebSocket Upgrade (101)"
+                    ;;
+                200|204|301|302)
+                    log "WebSocket :$_wp → HTTP $_ws_code (no WS ma porta risponde)"
+                    ;;
+                000)
+                    log "WebSocket :$_wp → timeout" ;;
+                *)
+                    log "WebSocket :$_wp → HTTP $_ws_code" ;;
+            esac
+            # Testa anche path /ws /websocket /socket.io
+            for _wsp in /ws /websocket /socket.io; do
+                local _wsc2
+                _wsc2=$(timeout 4 curl -sk \
+                    -H "Upgrade: websocket" \
+                    -H "Connection: Upgrade" \
+                    -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
+                    -H "Sec-WebSocket-Version: 13" \
+                    -o /dev/null -w "%{http_code}" \
+                    "${_ws_proto}://${target}:${_wp}${_wsp}" 2>/dev/null || echo "000")
+                [[ "$_wsc2" == "101" ]] && {
+                    found HIGH "WebSocket — ${_wp}${_wsp}: endpoint WS attivo"
+                    _fw_found "${_wp}${_wsp}" "WebSocket Upgrade path ${_wsp}"
+                }
+            done
+        done
+    fi
+
+    # ── 25. QUIC / UDP-443 probe ──────────────────────────────────
+    if [[ $do_quic -eq 1 ]]; then
+        section "QUIC/UDP-443 (HTTP/3 tunnel bypass)"
+        # nmap UDP scan su porte QUIC comuni
+        run_cmd "nmap_quic" \
+            "nmap -sU -p 443,80,8443,4443 $NMAP_TIMING \
+             -oG \"$OUTDIR/fw_quic.gnmap\" \
+             -oN \"$OUTDIR/fw_quic.nmap\" \
+             $target 2>&1"
+        if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/fw_quic.gnmap" ]]; then
+            local _quic_open; _quic_open=$(grep -oP '[0-9]+/open(?!/tcp)' \
+                "$OUTDIR/fw_quic.gnmap" 2>/dev/null | cut -d/ -f1 || true)
+            if [[ -n "$_quic_open" ]]; then
+                found MEDIUM "QUIC — UDP aperto su: $(echo "$_quic_open" | tr '\n' ' ') — possibile HTTP/3"
+                _fw_found "udp/$(echo "$_quic_open" | head -1)" "QUIC/UDP probe"
+            fi
+        fi
+        # Probe raw UDP su 443: invia ClientHello QUIC-like e vedi se risponde
+        local _quic_resp
+        _quic_resp=$(printf '\xc0\x00\x00\x00\x01\x08\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00' | \
+            timeout 3 nc -u -w 3 "$target" 443 2>/dev/null | head -c 4 | xxd 2>/dev/null || true)
+        if [[ -n "$_quic_resp" ]]; then
+            found MEDIUM "QUIC — UDP/443 risponde al probe: possibile QUIC/HTTP3 attivo"
+            _fw_found "443/udp" "QUIC raw probe response"
+        fi
+        # Verifica alternativa: alt-svc header HTTP/1.1 che annuncia h3
+        if check_port "$target" 443; then
+            local _altsvc
+            _altsvc=$(timeout 5 curl -sk -I "https://${target}/" 2>/dev/null | \
+                grep -i "alt-svc" || true)
+            if echo "$_altsvc" | grep -qi "h3"; then
+                found MEDIUM "QUIC — Server annuncia HTTP/3 via Alt-Svc header: $_altsvc"
+                _fw_found "443/h3" "Alt-Svc h3 announcement"
+            fi
+        fi
+    fi
+
+    # ── 26. GRE Passthrough (proto 47) ───────────────────────────
+    if [[ $do_gre -eq 1 ]]; then
+        section "GRE Passthrough (IP proto 47)"
+        # nmap -sO: IP protocol scan — verifica se proto 47 (GRE) passa
+        run_cmd "nmap_gre" \
+            "nmap -sO -p 47,50,51 $NMAP_TIMING \
+             -oN \"$OUTDIR/fw_gre.nmap\" \
+             $target 2>&1"
+        if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/fw_gre.nmap" ]]; then
+            if grep -qE "^47.*open|gre.*open" "$OUTDIR/fw_gre.nmap" 2>/dev/null; then
+                found HIGH "GRE (proto 47) — aperto: tunneling GRE possibile attraverso il firewall"
+                _fw_found "proto47/GRE" "GRE passthrough"
+            elif grep -qE "^47.*open\|filtered" "$OUTDIR/fw_gre.nmap" 2>/dev/null; then
+                found MEDIUM "GRE (proto 47) — open|filtered: firewall non blocca esplicitamente GRE"
+                _fw_found "proto47/GRE" "GRE open|filtered"
+            else
+                log "GRE (proto 47) — filtrato o non risponde"
+            fi
+            # Verifica anche ESP (proto 50) e AH (proto 51) — IPsec
+            if grep -qE "^50.*open|^51.*open" "$OUTDIR/fw_gre.nmap" 2>/dev/null; then
+                found MEDIUM "IPsec — proto ESP/AH aperto: VPN IPsec potenzialmente attraversabile"
+                _fw_found "proto50-51/IPsec" "ESP/AH passthrough"
+            fi
+        fi
+        # Test aggiuntivo: GRE via hping3 se disponibile
+        if command -v hping3 &>/dev/null; then
+            log "hping3 GRE keepalive verso $target..."
+            local _hping_out
+            _hping_out=$(timeout 5 hping3 --proto 47 -c 2 -q "$target" 2>&1 || true)
+            if echo "$_hping_out" | grep -qi "icmp-type=0\|ttl=\|rtt"; then
+                found HIGH "GRE hping3 — risposta ricevuta: proto 47 non bloccato"
+                _fw_found "proto47/GRE" "GRE hping3 response"
+            fi
+        fi
+    fi
+
+    # ── 27. Matrix + Summary bypass ──────────────────────────
     section "Bypass Matrix & Summary"
     if [[ $DRY_RUN -eq 0 ]]; then
         # Costruisci matrice porta × tecnica
@@ -8378,6 +8627,44 @@ cmd_fw() {
                     *"full port scan"*)
                         echo -e "  ${CYAN}→${NC} Porta non-standard $p_trim: il device usa porte fuori dal range comune"
                         echo -e "  ${CYAN}→${NC} Prova: nmap -sV -p $p_trim -A $target per fingerprint completo"
+                        suggested=$((suggested+1))
+                        ;;
+                    *"idle/zombie"*)
+                        echo -e "  ${CYAN}→${NC} Porta $p_trim visibile solo via zombie scan: filtraggio basato su IP sorgente"
+                        echo -e "  ${CYAN}→${NC} Usa IP spoofing o relay da host fidato per accedere al servizio"
+                        suggested=$((suggested+1))
+                        ;;
+                    *"SCTP"*)
+                        echo -e "  ${CYAN}→${NC} Porta $p_trim aperta via SCTP: il firewall non filtra proto SCTP"
+                        echo -e "  ${CYAN}→${NC} Testa tunneling dati via SCTP con tools come netcat-sctp o scapy"
+                        suggested=$((suggested+1))
+                        ;;
+                    *"source routing"*|*"LSRR"*|*"SSRR"*)
+                        echo -e "  ${CYAN}→${NC} Porta $p_trim bypass via IP source routing: il FW non valida le opzioni IP"
+                        echo -e "  ${CYAN}→${NC} Usa nmap --ip-options 'L <target>' per enumerazione completa"
+                        suggested=$((suggested+1))
+                        ;;
+                    *"WebSocket"*)
+                        echo -e "  ${CYAN}→${NC} WebSocket attivo su $p_trim: possibile evasione DPI tramite WS frames"
+                        echo -e "  ${CYAN}→${NC} Usa wscat o burpsuite per interagire col servizio WebSocket"
+                        echo -e "  ${CYAN}→${NC} Considera tunneling dati arbitrari via WS (bypass application firewall)"
+                        suggested=$((suggested+1))
+                        ;;
+                    *"QUIC"*|*"h3"*|*"UDP-443"*)
+                        echo -e "  ${CYAN}→${NC} QUIC/HTTP3 attivo: il traffico UDP/443 potrebbe bypassare ispezione TCP"
+                        echo -e "  ${CYAN}→${NC} Usa curl --http3 o quiche per interagire via HTTP/3"
+                        echo -e "  ${CYAN}→${NC} Considera tunnel dati via QUIC per eludere DPI su TCP"
+                        suggested=$((suggested+1))
+                        ;;
+                    *"GRE"*|*"proto47"*)
+                        echo -e "  ${CYAN}→${NC} GRE passthrough confermato: crea tunnel GRE per aggirare il firewall"
+                        echo -e "  ${CYAN}→${NC} ip tunnel add gre1 mode gre remote $target local <attacker_ip>"
+                        echo -e "  ${CYAN}→${NC} Usabile per raggiungere subnet interne non accessibili direttamente"
+                        suggested=$((suggested+1))
+                        ;;
+                    *"ESP/AH"*|*"IPsec"*)
+                        echo -e "  ${CYAN}→${NC} IPsec ESP/AH passthrough: VPN IKE possibile su UDP/500 e UDP/4500"
+                        echo -e "  ${CYAN}→${NC} Prova: ike-scan $target per enumeration VPN"
                         suggested=$((suggested+1))
                         ;;
                 esac
