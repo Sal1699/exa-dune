@@ -963,8 +963,15 @@ run_cmd() {
         echo -e "${CYAN}[DRY-RUN]${NC} [$name] $cmd"
         return
     fi
+    local _max_t=""
     if [[ "${TIMEOUT:-0}" -gt 0 ]]; then
-        timeout "${TIMEOUT}m" bash -c "$cmd" || true
+        _max_t="${TIMEOUT}m"
+    elif [[ "$cmd" == *hydra* ]]; then
+        # Hydra senza timeout globale: max ${HYDRA_TIMEOUT:-5} minuti per singola sessione
+        _max_t="${HYDRA_TIMEOUT:-5}m"
+    fi
+    if [[ -n "$_max_t" ]]; then
+        timeout "$_max_t" bash -c "$cmd" || true
     else
         bash -c "$cmd" || true
     fi
@@ -2208,7 +2215,7 @@ cmd_smb() {
             local ul; ul=$(_wl_users)
             local pl; pl=$(_wl_pass)
             run_cmd "hydra_smb" \
-                "hydra -L $ul -P $pl -t $threads -f \
+                "hydra -L $ul -P $pl -t $threads -f -w 4 -W 2 \
                  -o \"$OUTDIR\"/hydra_smb.txt $target smb 2>&1 | tee -a \"$OUTDIR\"/smb_audit.log"
             if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/hydra_smb.txt" ]]; then
                 grep -i "login:" "$OUTDIR/hydra_smb.txt" 2>/dev/null \
@@ -2283,7 +2290,7 @@ cmd_creds() {
         local svc="$1" p="$2"
         local out="$OUTDIR/hydra_${svc}_${p}.txt"
         run_cmd "hydra_${svc}_${p}" \
-            "hydra -L $ul -P $pl -s $p -t $threads -f \
+            "hydra -L $ul -P $pl -s $p -t $threads -f -w 4 -W 2 \
              -o $out $target $svc 2>&1 | tee -a $OUTDIR/creds.log"
         if [[ $DRY_RUN -eq 0 && -f "$out" ]]; then
             grep -i "login:" "$out" 2>/dev/null \
@@ -2652,7 +2659,7 @@ cmd_ftp() {
         if require_tool hydra; then
             local ul; ul=$(_wl_users); local pl; pl=$(_wl_pass)
             run_cmd "hydra_ftp" \
-                "hydra -L $ul -P $pl -s $port -t $threads -f \
+                "hydra -L $ul -P $pl -s $port -t $threads -f -w 4 -W 2 \
                  -o \"$OUTDIR\"/hydra_ftp.txt $target ftp 2>&1"
             if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/hydra_ftp.txt" ]]; then
                 grep -i "login:" "$OUTDIR/hydra_ftp.txt" 2>/dev/null \
@@ -2787,7 +2794,7 @@ cmd_ssh() {
         if require_tool hydra; then
             local ul; ul=$(_wl_users); local pl; pl=$(_wl_pass)
             run_cmd "hydra_ssh" \
-                "hydra -L $ul -P $pl -s $port -t $threads -f \
+                "hydra -L $ul -P $pl -s $port -t $threads -f -w 4 -W 2 \
                  -o \"$OUTDIR\"/hydra_ssh.txt $target ssh 2>&1"
             if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/hydra_ssh.txt" ]]; then
                 grep -i "login:" "$OUTDIR/hydra_ssh.txt" 2>/dev/null \
@@ -2969,7 +2976,7 @@ cmd_telnet() {
             for p in "${ports[@]}"; do
                 check_port "$target" "$p" || { warn "Porta $p chiusa — skip"; continue; }
                 run_cmd "hydra_telnet_$p" \
-                    "hydra -L $ul -P $pl -t $threads -f \
+                    "hydra -L $ul -P $pl -t $threads -f -w 4 -W 2 \
                      -o \"$OUTDIR\"/hydra_telnet_${p}.txt $target telnet -s $p 2>&1"
                 if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/hydra_telnet_${p}.txt" ]]; then
                     grep -i "login:" "$OUTDIR/hydra_telnet_${p}.txt" 2>/dev/null \
@@ -3827,7 +3834,7 @@ s.close()
         check_port "$target" "$p" || continue
         if require_tool hydra; then
             run_cmd "hydra_rtsp_$p" \
-                "hydra -L $ul -P $pl -s $p -t 4 -f \
+                "hydra -L $ul -P $pl -s $p -t 4 -f -w 4 -W 2 \
                  -o \"$OUTDIR\"/hydra_rtsp_${p}.txt $target rtsp 2>&1"
             if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/hydra_rtsp_${p}.txt" ]]; then
                 grep -i "login:" "$OUTDIR/hydra_rtsp_${p}.txt" 2>/dev/null | \
@@ -5371,7 +5378,7 @@ cmd_vnc() {
         if require_tool hydra; then
             local pl; pl=$(_wl_pass)
             run_cmd "hydra_vnc" \
-                "hydra -P $pl -s $port -t $threads -f \
+                "hydra -P $pl -s $port -t $threads -f -w 4 -W 2 \
                  -o \"$OUTDIR\"/hydra_vnc.txt $target vnc 2>&1"
             if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/hydra_vnc.txt" ]]; then
                 grep -i "password:" "$OUTDIR/hydra_vnc.txt" 2>/dev/null | \
@@ -5519,7 +5526,7 @@ cmd_rdp() {
         if require_tool hydra; then
             local ul; ul=$(_wl_users); local pl; pl=$(_wl_pass)
             run_cmd "hydra_rdp" \
-                "hydra -L $ul -P $pl -s $port -t $threads -f \
+                "hydra -L $ul -P $pl -s $port -t $threads -f -w 4 -W 2 \
                  -o \"$OUTDIR\"/hydra_rdp.txt $target rdp 2>&1"
             if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/hydra_rdp.txt" ]]; then
                 grep -i "login:" "$OUTDIR/hydra_rdp.txt" 2>/dev/null | \
@@ -9810,7 +9817,7 @@ except: pass
             local _pl; _pl=$(_wl_pass)
             local _mqtt_out="$OUTDIR_BASE/creds/hydra_mqtt_1883.txt"
             mkdir -p "$OUTDIR_BASE/creds"
-            hydra -L "$_ul" -P "$_pl" -s 1883 -t 4 -f \
+            hydra -L "$_ul" -P "$_pl" -s 1883 -t 4 -f -w 4 -W 2 \
                 -o "$_mqtt_out" "$target" mqtt 2>&1 | tee -a "$OUTDIR_BASE/creds/creds.log" || true
             grep -i "login:" "$_mqtt_out" 2>/dev/null | while IFS= read -r _line; do
                 found HIGH "MQTT:1883 — $_line"
@@ -9833,7 +9840,7 @@ except: pass
             local _pl; _pl=$(_wl_pass)
             local _ldap_out="$OUTDIR_BASE/creds/hydra_ldap_389.txt"
             mkdir -p "$OUTDIR_BASE/creds"
-            hydra -L "$_ul" -P "$_pl" -s 389 -t 4 -f \
+            hydra -L "$_ul" -P "$_pl" -s 389 -t 4 -f -w 4 -W 2 \
                 -o "$_ldap_out" "$target" ldap2 2>&1 | tee -a "$OUTDIR_BASE/creds/creds.log" || true
             grep -i "login:" "$_ldap_out" 2>/dev/null | while IFS= read -r _line; do
                 found HIGH "LDAP:389 — $_line"
@@ -10564,7 +10571,7 @@ except: pass
             local _ul; _ul=$(_wl_users)
             local _pl; _pl=$(_wl_pass)
             local _hydra_rtsp_out="$OUTDIR_BASE/rtsp/hydra_rtsp.txt"
-            hydra -L "$_ul" -P "$_pl" -s "$_rhyd" -t 4 -f \
+            hydra -L "$_ul" -P "$_pl" -s "$_rhyd" -t 4 -f -w 4 -W 2 \
                 -m "/" -o "$_hydra_rtsp_out" "$target" rtsp 2>&1 | \
                 tee -a "$OUTDIR_BASE/rtsp/rtsp.log" || true
             grep -i "login:" "$_hydra_rtsp_out" 2>/dev/null | while IFS= read -r _hline; do
@@ -15220,7 +15227,7 @@ cmd_amqp() {
                     local _ul; _ul=$(_wl_users)
                     local _pl; _pl=$(_wl_pass)
                     run_cmd "hydra_amqp" \
-                        "hydra -L \"$_ul\" -P \"$_pl\" -s 15672 -t 4 -f \
+                        "hydra -L \"$_ul\" -P \"$_pl\" -s 15672 -t 4 -f -w 4 -W 2 \
                          -o \"$OUTDIR/hydra_amqp_mgmt.txt\" $target http-get /api/overview 2>&1"
                     grep -i "login:" "$OUTDIR/hydra_amqp_mgmt.txt" 2>/dev/null | \
                         while IFS= read -r _l; do found HIGH "RabbitMQ:15672 brute-force — $_l"; done || true
