@@ -14495,7 +14495,7 @@ usage_poison() {
 }
 
 cmd_poison() {
-    local iface="" duration=60 wordlist="" do_crack=1
+    local iface="" duration=60 wordlist="" do_crack=1 _poison_target="local_poison"
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --iface)    _req_arg "$1" "${2:-}"; iface="$2";    shift 2 ;;
@@ -14506,12 +14506,9 @@ cmd_poison() {
             --dry-run)  DRY_RUN=1; shift ;;
             --help|-h)  usage_poison; exit 0 ;;
             -*)         err "Opzione sconosciuta: $1"; usage_poison; exit 1 ;;
-            *)          err "Argomento inaspettato: $1"; usage_poison; exit 1 ;;
+            *)          _poison_target="$1"; shift ;;   # TARGET opzionale
         esac
     done
-
-    # Usa target "local" per outdir
-    local _poison_target="local_poison"
     setup_outdir "$_poison_target" "poison"
     log "Interfaccia: ${iface:-auto} | Durata: ${duration}s | Output: $OUTDIR"
 
@@ -18005,15 +18002,14 @@ cmd_completion() {
     local shell="${1:-bash}"
     local all_cmds="scan web sip smb creds snmp ftp ssh telnet mqtt modbus upnp ssl tftp rtsp onvif js dns ipmi coap mdns wsd bacnet rtmp cam-cve sip-fuzz enip vnc rdp ldap redis http post fw auto pipeline report network-sweep self-test diff install wordlists update resume schedule firmware voip-enum config-audit history nuclei mitm poison pivot vpn printer amqp log4shell sqli ssrf xxe opcua dnp3 ble jwt msf config completion dhcp rtp dcom plugins help version"
     if [[ "$shell" == "zsh" ]]; then
-        cat <<ZSHEOF
-#compdef exa-dune
-_exa_dune() {
-  local -a subcmds
-  subcmds=(${all_cmds// / })
-  _arguments '1:subcommand:($subcmds)' '*:: :->args'
-}
-_exa_dune "\$@"
-ZSHEOF
+        local _zsh_cmds="$all_cmds"
+        printf '%s\n' "#compdef exa-dune" \
+            "_exa_dune() {" \
+            "  local -a subcmds" \
+            "  subcmds=(${_zsh_cmds})" \
+            "  _arguments '1:subcommand:(\$subcmds)' '*:: :->args'" \
+            "}" \
+            '_exa_dune "$@"'
     else
         # bash completion
         cat <<BASHEOF
@@ -18305,11 +18301,17 @@ cmd_dcom() {
 _load_plugins() {
     local plugin_dir="${HOME}/.exa-dune/plugins"
     [[ ! -d "$plugin_dir" ]] && return 0
+    local _found_any=0
     for plugin in "$plugin_dir"/*.sh; do
-        [[ -f "$plugin" ]] && source "$plugin" && \
-            log "Plugin caricato: $(basename "$plugin")" || \
+        [[ -f "$plugin" ]] || continue   # salta glob letterale se nessun file
+        _found_any=1
+        if source "$plugin" 2>/dev/null; then
+            log "Plugin caricato: $(basename "$plugin")"
+        else
             warn "Plugin fallito: $(basename "$plugin")"
+        fi
     done
+    return 0
 }
 
 cmd_plugins() {
