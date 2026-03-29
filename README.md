@@ -2,7 +2,7 @@
 
 > Multi-protocol penetration testing framework for IoT and VoIP environments.
 
-![Version](https://img.shields.io/badge/version-2.5.0-blue)
+![Version](https://img.shields.io/badge/version-3.1.1-blue)
 ![Platform](https://img.shields.io/badge/platform-Kali%20Linux-purple)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Shell](https://img.shields.io/badge/shell-bash-yellow)
@@ -17,7 +17,7 @@
 
 ```
 ╔══════════════════════════════════════════════╗
-║    EXA-DUNE v2.5.0                           ║
+║    EXA-DUNE v3.1.1                           ║
 ║    Generic Network Assessment Tool           ║
 ╚══════════════════════════════════════════════╝
 ```
@@ -317,7 +317,7 @@ exa-dune self-test --install-missing
 
 ```
 exa-dune-repo/
-├── exa-dune                    # Main script (~11.700 lines)
+├── exa-dune                    # Main script (~18.600 lines)
 ├── scripts/
 │   ├── python/                 # 10 Python attack scripts
 │   ├── js/                     # 2 Node.js scripts
@@ -327,6 +327,33 @@ exa-dune-repo/
 ```
 
 Output is saved to `/root/pentest/exa-dune-<target>_<timestamp>/` with subdirectories per module, a session log, `findings.txt`, `creds.json`, and `session.json`.
+
+---
+
+## Changelog
+
+### v3.1.1 — 2026-03-29
+
+**Bug fixes & improvements from live testing against Reolink IP cameras:**
+
+| # | Area | Fix |
+|---|---|---|
+| 1 | `cam-cve` | Fixed unbound variable `$last_hop` → `$_last_hop` crash in traceroute check |
+| 2 | `cam-cve` | False positive elimination: `_cam_check` now validates HTTP 200 response body, filtering auth-error pages |
+| 3 | `cam-cve` | Hikvision CVE-2014-4880 pattern updated to match actual response (`statusValue`, `userCheckResult`) |
+| 4 | `cam-cve` | Axis CVE-2018-10660 pattern updated (`<root>`, `AuthAnonymous`) |
+| 5 | `cam-cve` | GENERIC-RTSP credential leak pattern tightened (`rtsp://`, `"password"`, `"credential"`, `rtspUrl`) |
+| 6 | `cam-cve` | ONVIF URL fixed: was building `http://target:80:8000`, now correctly `http://target:8000` |
+| 7 | `cam-cve` | RTMP false positives: now requires `codec_type` in ffprobe metadata before reporting stream |
+| 8 | `cam-cve` | AudioCodes/Commend credential checks: baseline unauthenticated request comparison added |
+| 9 | `cam-cve` | Vendor auto-detection: added HTML body fallback when HTTP headers lack vendor name |
+| 10 | `cam-cve` | Reolink RTSP credential pattern tightened (mirrors GENERIC-RTSP fix) |
+| 11 | `auto` | `prescan_context` now includes `http-title` values from nmap output for better vendor profiling |
+| 12 | `rtsp` | RTSP nmap results: 401-only paths logged as INFO instead of MEDIUM false positives |
+| 13 | `ssl` | SSL nmap results: filter out `disabled`/`not vulnerable` lines and cert MD5 fingerprints |
+| 14 | `rtsp` | RTSP Digest brute force: per-request CSeq increment + nonce refresh every 50 attempts |
+| 15 | `rtsp` | RTSP wordlist: replaced 828-entry `users-cirt.txt` with 16-entry `users-rtsp-cameras.txt` (avoids timeout) |
+| 16 | `wordlists` | Added `users-rtsp-cameras.txt`: 16 camera-specific usernames for focused RTSP brute force |
 
 ---
 
