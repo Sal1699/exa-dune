@@ -45,7 +45,7 @@
 
 set -euo pipefail
 
-VERSION="3.1.0"
+VERSION="3.1.1"
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 
 # ── Colori ──────────────────────────────────────────────────
@@ -125,26 +125,31 @@ _json_append_finding() {
     local json_file="$dir/findings.json"
     local escaped_msg; escaped_msg=$(_json_escape "$msg")
     local escaped_target; escaped_target=$(_json_escape "$target_val")
-    # Inizializza array JSON se non esiste
-    if [[ ! -f "$json_file" ]]; then
-        echo '{"findings":[' > "$json_file"
-        echo "  {\"severity\":\"${sev}\",\"message\":\"${escaped_msg}\",\"timestamp\":\"${ts}\",\"target\":\"${escaped_target}\"}" >> "$json_file"
-    else
-        # Rimuove la chiusura dell'array e aggiunge nuovo finding
-        # Usiamo un file temporaneo
-        local tmp; tmp=$(mktemp)
-        # Rimuovi ultima riga (chiusura array]} se presente)
-        if grep -q '^\]}' "$json_file" 2>/dev/null; then
-            head -n -1 "$json_file" > "$tmp"
-            echo "  ,{\"severity\":\"${sev}\",\"message\":\"${escaped_msg}\",\"timestamp\":\"${ts}\",\"target\":\"${escaped_target}\"}" >> "$tmp"
+    local lock_file="${json_file}.lock"
+    # flock garantisce atomicità in esecuzione parallela (cmd_auto/tmux)
+    (
+        flock -x 200
+        if [[ ! -f "$json_file" ]]; then
+            # Prima scrittura: crea file JSON valido in un'unica operazione atomica
+            printf '{"findings":[\n  {"severity":"%s","message":"%s","timestamp":"%s","target":"%s"}\n]}\n' \
+                "$sev" "$escaped_msg" "$ts" "$escaped_target" > "$json_file"
         else
-            cp "$json_file" "$tmp"
-            echo "  ,{\"severity\":\"${sev}\",\"message\":\"${escaped_msg}\",\"timestamp\":\"${ts}\",\"target\":\"${escaped_target}\"}" >> "$tmp"
+            # Append: rimuovi la chiusura ]}, aggiungi nuovo entry, richiudi
+            local tmp; tmp=$(mktemp "${json_file}.tmp.XXXXXX")
+            # Cleanup automatico del tmp se la subshell esce in modo anomalo
+            trap "rm -f \"$tmp\"" EXIT
+            if grep -q '^\]}' "$json_file" 2>/dev/null; then
+                head -n -1 "$json_file" > "$tmp"
+            else
+                # File senza chiusura (es. scrittura interrotta): copia as-is
+                cp "$json_file" "$tmp"
+            fi
+            printf '  ,{"severity":"%s","message":"%s","timestamp":"%s","target":"%s"}\n' \
+                "$sev" "$escaped_msg" "$ts" "$escaped_target" >> "$tmp"
+            printf ']}\n' >> "$tmp"
+            mv "$tmp" "$json_file"
         fi
-        mv "$tmp" "$json_file"
-    fi
-    # Chiudi sempre il file con ]} — verrà aggiornato ad ogni chiamata
-    echo ']}' >> "$json_file"
+    ) 200>"$lock_file" 2>/dev/null || true
 }
 
 _json_write_summary() {
@@ -185,19 +190,27 @@ except:
 " 2>/dev/null || echo "[]")
     fi
 
-    local escaped_target; escaped_target=$(_json_escape "$target_val")
-    local escaped_module; escaped_module=$(_json_escape "$module")
-
-    cat > "$dir/summary.json" << EOF
-{
-  "target": "${escaped_target}",
-  "module": "${escaped_module}",
-  "timestamp": "${ts}",
-  "exa_dune_version": "${VERSION}",
-  "findings": ${findings_json},
-  "ports_open": ${ports_json}
+    # Usa Python per costruire il JSON finale: evita command injection da
+    # $(…) o backtick nel testo dei finding quando espanso in un heredoc bash.
+    export EXA_SUM_TARGET="$target_val" EXA_SUM_MODULE="$module" \
+           EXA_SUM_TS="$ts" EXA_SUM_VER="$VERSION" \
+           EXA_SUM_FINDINGS="$findings_json" EXA_SUM_PORTS="$ports_json" \
+           EXA_SUM_OUT="$dir/summary.json"
+    python3 - <<'PYEOF' 2>/dev/null || true
+import json, os
+d = {
+    "target":             os.environ["EXA_SUM_TARGET"],
+    "module":             os.environ["EXA_SUM_MODULE"],
+    "timestamp":          os.environ["EXA_SUM_TS"],
+    "exa_dune_version":   os.environ["EXA_SUM_VER"],
+    "findings":           json.loads(os.environ.get("EXA_SUM_FINDINGS", "[]")),
+    "ports_open":         json.loads(os.environ.get("EXA_SUM_PORTS",   "[]")),
 }
-EOF
+with open(os.environ["EXA_SUM_OUT"], "w") as fh:
+    json.dump(d, fh, indent=2)
+PYEOF
+    unset EXA_SUM_TARGET EXA_SUM_MODULE EXA_SUM_TS EXA_SUM_VER \
+          EXA_SUM_FINDINGS EXA_SUM_PORTS EXA_SUM_OUT
     ok "Summary JSON: $dir/summary.json"
 }
 section(){ echo -e "\n${BOLD}${CYAN}━━ $* ━━${NC}"; [[ -n "$_log_file" ]] && echo "━━ $* ━━" >> "$_log_file" || true; }
@@ -251,10 +264,9 @@ _wl_users() {
     for f in \
         "${CUSTOM_USERS:-}" \
         /usr/share/seclists/Usernames/top-usernames-shortlist.txt \
-        /usr/share/seclists/Usernames/Names/names.txt \
+        /usr/share/seclists/Usernames/cirt-default-usernames.txt \
         /usr/share/wordlists/metasploit/unix_users.txt \
         "$EXA_WL_DIR/users-top.txt" \
-        "$EXA_WL_DIR/users-names.txt" \
         "$EXA_WL_DIR/users-cirt.txt"; do
         [[ -f "$f" && -s "$f" ]] && { echo "$f"; return; }
     done
@@ -447,6 +459,101 @@ private
 EMBEDDED_PASS
     fi
     echo "$_FALLBACK_PASS"
+}
+
+_wl_rtsp_users() {
+    # Lista utenti mirata per brute force RTSP/ONVIF su IP camera
+    # IMPORTANTE: NON usare users-cirt.txt (828 utenti) — per RTSP camera
+    # bastano i 15 username comuni. La lista CIRT renderebbe il brute force
+    # impraticabile (828 × 1049 = 868k tentativi su connessioni lente).
+    for f in \
+        "${CUSTOM_USERS:-}" \
+        /usr/share/seclists/Usernames/top-usernames-shortlist.txt \
+        "$EXA_WL_DIR/users-rtsp-cameras.txt"; do
+        [[ -f "$f" && -s "$f" ]] && { echo "$f"; return; }
+    done
+    if [[ -z "$_FALLBACK_RTSP_USERS" ]]; then
+        _FALLBACK_RTSP_USERS=$(mktemp)
+        cat > "$_FALLBACK_RTSP_USERS" << 'EMBEDDED_RTSP_USERS'
+admin
+root
+user
+guest
+operator
+viewer
+service
+supervisor
+camera
+default
+anonymous
+live
+stream
+monitor
+tech
+EMBEDDED_RTSP_USERS
+    fi
+    echo "$_FALLBACK_RTSP_USERS"
+}
+
+_wl_rtsp_pass() {
+    # Lista password mirata per brute force RTSP/ONVIF su IP camera
+    # Include default vendor noti (Reolink, Hikvision, Dahua, Axis, ecc.)
+    for f in \
+        "${CUSTOM_PASS:-}" \
+        /usr/share/seclists/Passwords/Common-Credentials/best1050.txt \
+        "$EXA_WL_DIR/passwords-best1050.txt"; do
+        [[ -f "$f" && -s "$f" ]] && { echo "$f"; return; }
+    done
+    if [[ -z "$_FALLBACK_RTSP_PASS" ]]; then
+        _FALLBACK_RTSP_PASS=$(mktemp)
+        cat > "$_FALLBACK_RTSP_PASS" << 'EMBEDDED_RTSP_PASS'
+admin
+admin123
+admin1234
+Admin1234
+12345
+123456
+1234
+password
+pass
+root
+toor
+guest
+default
+0000
+00000000
+camera
+ipcam
+ip1234
+reolink
+reolink123
+hikvision
+dahua
+axis
+foscam
+vivotek
+ubnt
+user
+12qwasyx
+7ujMko0admin
+xmhdipc
+tlJwpbo6
+changeme
+support
+service
+supervisor
+operator
+P@ssword
+P@ssw0rd
+passw0rd
+1q2w3e4r
+qwerty
+abc123
+111111
+123123
+EMBEDDED_RTSP_PASS
+    fi
+    echo "$_FALLBACK_RTSP_PASS"
 }
 
 _wl_web() {
@@ -1985,13 +2092,14 @@ cmd_scan() {
             # Estrai porte trovate da masscan per passarle a nmap
             if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/masscan.json" ]]; then
                 local _mscan_ports
-                _mscan_ports=$(python3 -c "
-import json,sys
+                _mscan_ports=$(EXA_MASSCAN_OUT="$OUTDIR/masscan.json" python3 -c "
+import json,os,sys
 try:
-    data=json.load(open('$OUTDIR/masscan.json'))
+    data=json.load(open(os.environ['EXA_MASSCAN_OUT']))
     ports=sorted(set(str(h['ports'][0]['port']) for h in data if h.get('ports')))
     print(','.join(ports))
-except: pass
+except Exception as e:
+    print('[WARN] masscan JSON parse error: '+str(e), file=sys.stderr)
 " 2>/dev/null || \
                     grep -oP '"port"\s*:\s*\K[0-9]+' "$OUTDIR/masscan.json" 2>/dev/null | \
                     sort -un | tr '\n' ',' | sed 's/,$//' || true)
@@ -2470,7 +2578,8 @@ cmd_sip() {
     else
         warn "svmap non trovato — uso probe OPTIONS manuale"
         if [[ $DRY_RUN -eq 0 ]]; then
-            local attacker_ip; attacker_ip=$(hostname -I | awk '{print $1}')
+            local attacker_ip; attacker_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+            [[ -z "$attacker_ip" ]] && attacker_ip="127.0.0.1"
             local probe
             probe=$(printf 'OPTIONS sip:ping@%s SIP/2.0\r\nVia: SIP/2.0/UDP %s:5060;branch=z9hG4bKpk1\r\nFrom: <sip:test@%s>;tag=1\r\nTo: <sip:ping@%s>\r\nCall-ID: 1@%s\r\nCSeq: 1 OPTIONS\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n' \
                 "$target" "$attacker_ip" "$attacker_ip" "$target" "$attacker_ip")
@@ -2522,7 +2631,8 @@ cmd_sip() {
 
     section "SIP Method Probes (INVITE, REGISTER, OPTIONS, INFO, SUBSCRIBE)"
     if [[ $DRY_RUN -eq 0 ]]; then
-        local attacker_ip; attacker_ip=$(hostname -I | awk '{print $1}')
+        local attacker_ip; attacker_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+        [[ -z "$attacker_ip" ]] && attacker_ip="127.0.0.1"
         for method in INVITE REGISTER OPTIONS INFO SUBSCRIBE NOTIFY; do
             local probe; probe=$(printf '%s sip:%s SIP/2.0\r\nVia: SIP/2.0/UDP %s:5060;branch=z9hG4bKpk\r\nFrom: <sip:kit@%s>;tag=1\r\nTo: <sip:%s>\r\nCall-ID: probe@%s\r\nCSeq: 1 %s\r\nMax-Forwards: 10\r\nContent-Length: 0\r\n\r\n' \
                 "$method" "$target" "$attacker_ip" "$attacker_ip" "$target" "$attacker_ip" "$method")
@@ -2543,7 +2653,8 @@ cmd_sip() {
     section "SIP over TCP test"
     if [[ $DRY_RUN -eq 0 ]]; then
         check_port "$target" "$port" && {
-            local attacker_ip; attacker_ip=$(hostname -I | awk '{print $1}')
+            local attacker_ip; attacker_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+            [[ -z "$attacker_ip" ]] && attacker_ip="127.0.0.1"
             local tcp_probe; tcp_probe=$(printf 'OPTIONS sip:%s SIP/2.0\r\nVia: SIP/2.0/TCP %s:5060;branch=z9hG4bKtcp\r\nFrom: <sip:test@%s>;tag=1\r\nTo: <sip:%s>\r\nCall-ID: tcp@%s\r\nCSeq: 1 OPTIONS\r\nMax-Forwards: 10\r\nContent-Length: 0\r\n\r\n' \
                 "$target" "$attacker_ip" "$attacker_ip" "$target" "$attacker_ip")
             local tcp_resp
@@ -2570,7 +2681,8 @@ cmd_sip() {
 
     section "SIP Toll Fraud Probe (INVITE verso PSTN esterno)"
     if [[ $DRY_RUN -eq 0 ]]; then
-        local attacker_ip; attacker_ip=$(hostname -I | awk '{print $1}')
+        local attacker_ip; attacker_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+        [[ -z "$attacker_ip" ]] && attacker_ip="127.0.0.1"
         # Prova INVITE verso numero esterno (non reale — solo test se il gateway accetta)
         local toll_dest="sip:00390000000@${target}"
         local toll_invite
@@ -2826,8 +2938,8 @@ cmd_smb() {
             local ul; ul=$(_wl_users)
             local pl; pl=$(_wl_pass)
             run_cmd "hydra_smb" \
-                "hydra -L $ul -P $pl -t $threads -f -w 4 -W 2 \
-                 -o \"$OUTDIR\"/hydra_smb.txt $target smb 2>&1 | tee -a \"$OUTDIR\"/smb_audit.log"
+                "hydra -L \"$ul\" -P \"$pl\" -t $threads -f -w 4 -W 2 \
+                 -o \"$OUTDIR/hydra_smb.txt\" $target smb 2>&1 | tee -a \"$OUTDIR/smb_audit.log\""
             if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/hydra_smb.txt" ]]; then
                 grep -i "login:" "$OUTDIR/hydra_smb.txt" 2>/dev/null \
                     | while IFS= read -r line; do
@@ -2923,8 +3035,8 @@ cmd_creds() {
         local svc="$1" p="$2"
         local out="$OUTDIR/hydra_${svc}_${p}.txt"
         run_cmd "hydra_${svc}_${p}" \
-            "hydra -L $ul -P $pl -s $p -t $threads -f -w 4 -W 2 \
-             -o $out $target $svc 2>&1 | tee -a $OUTDIR/creds.log"
+            "hydra -L \"$ul\" -P \"$pl\" -s $p -t $threads -f -w 4 -W 2 \
+             -o \"$out\" $target $svc 2>&1 | tee -a \"$OUTDIR/creds.log\""
         if [[ $DRY_RUN -eq 0 && -f "$out" ]]; then
             grep -i "login:" "$out" 2>/dev/null \
                 | while IFS= read -r line; do
@@ -3358,8 +3470,8 @@ cmd_ftp() {
         if require_tool hydra; then
             local ul; ul=$(_wl_users); local pl; pl=$(_wl_pass)
             run_cmd "hydra_ftp" \
-                "hydra -L $ul -P $pl -s $port -t $threads -f -w 4 -W 2 \
-                 -o \"$OUTDIR\"/hydra_ftp.txt $target ftp 2>&1"
+                "hydra -L \"$ul\" -P \"$pl\" -s $port -t $threads -f -w 4 -W 2 \
+                 -o \"$OUTDIR/hydra_ftp.txt\" $target ftp 2>&1"
             if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/hydra_ftp.txt" ]]; then
                 grep -i "login:" "$OUTDIR/hydra_ftp.txt" 2>/dev/null \
                     | while IFS= read -r line; do
@@ -3493,8 +3605,8 @@ cmd_ssh() {
         if require_tool hydra; then
             local ul; ul=$(_wl_users); local pl; pl=$(_wl_pass)
             run_cmd "hydra_ssh" \
-                "hydra -L $ul -P $pl -s $port -t $threads -f -w 4 -W 2 \
-                 -o \"$OUTDIR\"/hydra_ssh.txt $target ssh 2>&1"
+                "hydra -L \"$ul\" -P \"$pl\" -s $port -t $threads -f -w 4 -W 2 \
+                 -o \"$OUTDIR/hydra_ssh.txt\" $target ssh 2>&1"
             if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/hydra_ssh.txt" ]]; then
                 grep -i "login:" "$OUTDIR/hydra_ssh.txt" 2>/dev/null \
                     | while IFS= read -r line; do
@@ -3675,8 +3787,8 @@ cmd_telnet() {
             for p in "${ports[@]}"; do
                 check_port "$target" "$p" || { warn "Porta $p chiusa — skip"; continue; }
                 run_cmd "hydra_telnet_$p" \
-                    "hydra -L $ul -P $pl -t $threads -f -w 4 -W 2 \
-                     -o \"$OUTDIR\"/hydra_telnet_${p}.txt $target telnet -s $p 2>&1"
+                    "hydra -L \"$ul\" -P \"$pl\" -t $threads -f -w 4 -W 2 \
+                     -o \"$OUTDIR/hydra_telnet_${p}.txt\" $target telnet -s $p 2>&1"
                 if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/hydra_telnet_${p}.txt" ]]; then
                     grep -i "login:" "$OUTDIR/hydra_telnet_${p}.txt" 2>/dev/null \
                         | while IFS= read -r line; do
@@ -4167,8 +4279,15 @@ cmd_ssl() {
          --script ssl-cert,ssl-enum-ciphers,ssl-heartbleed,ssl-poodle,ssl-ccs-injection,ssl-dh-params,ssl-known-key \
          -oN \"$OUTDIR\"/ssl_nmap.txt $target 2>&1"
     if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/ssl_nmap.txt" ]]; then
-        grep -iE "SSLv2|SSLv3|TLSv1\.0 |VULNERABLE|heartbleed|POODLE|NULL|EXPORT|RC4|DES|MD5" \
-            "$OUTDIR/ssl_nmap.txt" 2>/dev/null | while IFS= read -r line; do
+        # Esclude:
+        #  - righe commento nmap (# Nmap ...) che contengono nomi di script (es "ssl-heartbleed")
+        #  - righe "... disabled" — SSLv2/SSLv3/TLSv1 disabilitati = configurazione SICURA
+        #  - righe "| MD5:" — fingerprint certificato, non cipher MD5
+        grep -iE "SSLv2|SSLv3|TLSv1\.0 |VULNERABLE|heartbleed|POODLE|NULL cipher|EXPORT|RC4|MD5 cipher|DES cipher" \
+            "$OUTDIR/ssl_nmap.txt" 2>/dev/null \
+            | grep -v "^#" \
+            | grep -iv "disabled\|not vulnerable\|^| MD5:" \
+            | while IFS= read -r line; do
             found HIGH "SSL:$port — $line"
         done || true
         grep -i "least strength: [^A]" "$OUTDIR/ssl_nmap.txt" 2>/dev/null && \
@@ -4349,8 +4468,13 @@ cmd_rtsp() {
         "nmap -p $port,8554 --script rtsp-url-brute,rtsp-methods \
          -oN \"$OUTDIR\"/nmap_rtsp.txt $target 2>&1"
     if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/nmap_rtsp.txt" ]]; then
-        grep -iE "RTSP/|url:|stream|200 OK" "$OUTDIR/nmap_rtsp.txt" 2>/dev/null | \
+        # Filtra solo righe che indicano accesso effettivo (200 OK) — non path con 401
+        # Le URL nella sezione "other responses: 401:" non sono vulnerabilità
+        grep -iE "200 OK|RTSP/1\.[01] 200|Authentication not required" "$OUTDIR/nmap_rtsp.txt" 2>/dev/null | \
             while IFS= read -r line; do found MEDIUM "RTSP:$port — $line"; done || true
+        # Logga il numero di path 401 come info (enumerazione)
+        local _n401; _n401=$(grep -c 'rtsp://' "$OUTDIR/nmap_rtsp.txt" 2>/dev/null || echo 0)
+        [[ "$_n401" -gt 0 ]] && log "  RTSP path enumerati da nmap (richiedono auth): $_n401"
     fi
 
     section "RTSP Path Enumeration"
@@ -4366,7 +4490,7 @@ cmd_rtsp() {
         rtsp_paths=("/" "/stream" "/live" "/live.sdp" "/video" "/h264" "/mjpeg"
                     "/h264Preview_01_main" "/Streaming/Channels/1")
     fi
-    local ul; ul=$(_wl_users); local pl; pl=$(_wl_pass)
+    local ul; ul=$(_wl_rtsp_users); local pl; pl=$(_wl_rtsp_pass)
     local open_streams=()
 
     # Cattura uno snapshot RTSP tramite ffmpeg o vlc
@@ -4390,9 +4514,18 @@ cmd_rtsp() {
         fi
     }
 
+    # Flag: brute force Digest Auth già eseguito (una sola volta per target:port)
+    local _rtsp_digest_done=0
+
     # Brute force Digest Auth RTSP via Python3 (nativo, senza hydra)
     _rtsp_digest_brute() {
         local rtsp_url="$1" rtsp_port="$2"
+        # Se già trovate credenziali o brute force già eseguito, salta
+        if [[ $_rtsp_digest_done -eq 1 ]]; then
+            log "  Brute force Digest già completato — salto $rtsp_url"
+            return
+        fi
+        _rtsp_digest_done=1
         log "  RTSP Digest Auth brute force: $rtsp_url"
         local py_script
         py_script=$(mktemp)
@@ -4438,25 +4571,54 @@ print(f'[*] Realm: {realm} | Nonce: {nonce}', file=sys.stderr)
 users = open(ul_file).read().splitlines()
 passs = open(pl_file).read().splitlines()
 found = False
+cseq = 2
+attempt = 0
+ha2 = hashlib.md5(f'DESCRIBE:{rtsp_url}'.encode()).hexdigest()  # costante per stessa URL+metodo
+
+def refresh_challenge():
+    """Rinnova nonce — necessario ogni ~50 tentativi o se il server risponde con nuovo nonce."""
+    global nonce, realm, cseq
+    r = rtsp_request(f'DESCRIBE {rtsp_url} RTSP/1.0\r\nCSeq: {cseq}\r\n\r\n'.encode())
+    cseq += 1
+    for line in r.split('\r\n'):
+        if 'realm=' in line:
+            try: realm = line.split('realm="')[1].split('"')[0]
+            except: pass
+        if 'nonce=' in line:
+            try: nonce = line.split('nonce="')[1].split('"')[0]
+            except: pass
+
 for user in users:
     if not user: continue
     for pwd in passs:
         if not pwd: continue
+        # Rinnova nonce ogni 50 tentativi per evitare scadenza
+        if attempt > 0 and attempt % 50 == 0:
+            refresh_challenge()
+        attempt += 1
         ha1 = hashlib.md5(f'{user}:{realm}:{pwd}'.encode()).hexdigest()
-        ha2  = hashlib.md5(f'DESCRIBE:{rtsp_url}'.encode()).hexdigest()
-        # Ottieni nonce fresco ogni 50 tentativi per evitare scadenza
         resp = hashlib.md5(f'{ha1}:{nonce}:{ha2}'.encode()).hexdigest()
         auth = (f'Digest username="{user}", realm="{realm}", '
                 f'nonce="{nonce}", uri="{rtsp_url}", response="{resp}"')
         r2 = rtsp_request(
-            f'DESCRIBE {rtsp_url} RTSP/1.0\r\nCSeq: 2\r\nAuthorization: {auth}\r\n\r\n'.encode()
+            f'DESCRIBE {rtsp_url} RTSP/1.0\r\nCSeq: {cseq}\r\nAuthorization: {auth}\r\n\r\n'.encode()
         )
+        cseq += 1
         if '200 OK' in r2:
             print(f'[FOUND] {user}:{pwd}')
             with open(out_file, 'a') as f:
                 f.write(f'{user}:{pwd}\n')
             found = True
             break
+        # Se il server ha emesso un nuovo nonce nella risposta 401, aggiornalo subito
+        elif '401' in r2:
+            for line in r2.split('\r\n'):
+                if 'nonce=' in line:
+                    try:
+                        new_nonce = line.split('nonce="')[1].split('"')[0]
+                        if new_nonce != nonce:
+                            nonce = new_nonce
+                    except: pass
     if found:
         break
 if not found:
@@ -4533,8 +4695,8 @@ s.close()
         check_port "$target" "$p" || continue
         if require_tool hydra; then
             run_cmd "hydra_rtsp_$p" \
-                "hydra -L $ul -P $pl -s $p -t 4 -f -w 4 -W 2 \
-                 -o \"$OUTDIR\"/hydra_rtsp_${p}.txt $target rtsp 2>&1"
+                "hydra -L \"$ul\" -P \"$pl\" -s $p -t 4 -f -w 4 -W 2 \
+                 -o \"$OUTDIR/hydra_rtsp_${p}.txt\" $target rtsp 2>&1"
             if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/hydra_rtsp_${p}.txt" ]]; then
                 grep -i "login:" "$OUTDIR/hydra_rtsp_${p}.txt" 2>/dev/null | \
                     while IFS= read -r line; do found HIGH "RTSP:$p — $line"; done || true
@@ -5489,8 +5651,9 @@ WL
             local meta
             meta=$(timeout ${CMD_TIMEOUT:-8} ffprobe -v quiet -print_format json \
                 -show_streams "$rtmp_url" 2>/dev/null || true)
-            if [[ -n "$meta" && "$meta" != *'"streams": []'* ]]; then
-                echo "[FOUND] $rtmp_url" 
+            # Verifica che ci siano stream reali (codec_type presente) — {} vuoto = errore I/O
+            if echo "$meta" | grep -q '"codec_type"'; then
+                echo "[FOUND] $rtmp_url"
                 echo "$meta" >> "$ffprobe_out"
                 found "HIGH" "RTMP" "Stream RTMP accessibile senza auth: $rtmp_url"
                 _found_rtmp=1
@@ -5577,6 +5740,18 @@ cmd_camcve() {
             echo "$headers" | grep -qi "uniview\|univideo" && vendor="uniview"
             echo "$headers" | grep -qi "audiocodes\|mp20\|mediant\|audiocos" && vendor="audiocodes"
             echo "$headers" | grep -qi "commend\|et962\|commander" && vendor="commend"
+            # Se headers non bastano, controlla il body della homepage (es. Reolink mette brand solo nel <title>)
+            if [[ "$vendor" == "auto" ]]; then
+                local body_snip; body_snip=$(curl $curl_opts -m 6 "$base_url/" 2>/dev/null | head -c 4096 || true)
+                echo "$body_snip" >> "$detect_out"
+                echo "$body_snip" | grep -qi "hikvision\|DVR\|IPC.*hik" && vendor="hikvision"
+                echo "$body_snip" | grep -qi "dahua" && vendor="dahua"
+                echo "$body_snip" | grep -qi "axis\|vapix" && vendor="axis"
+                echo "$body_snip" | grep -qi "reolink" && vendor="reolink"
+                echo "$body_snip" | grep -qi "uniview\|univideo" && vendor="uniview"
+                echo "$body_snip" | grep -qi "audiocodes\|mp20\|mediant" && vendor="audiocodes"
+                echo "$body_snip" | grep -qi "commend\|et962" && vendor="commend"
+            fi
             # Prova anche SNMP sysDescr per VoIP device
             if [[ "$vendor" == "auto" ]] && command -v snmpwalk &>/dev/null; then
                 local snmp_desc; snmp_desc=$(snmpwalk -v2c -c public "$target" 1.3.6.1.2.1.1.1.0 2>/dev/null | head -1 || true)
@@ -5609,12 +5784,17 @@ cmd_camcve() {
                 log "  $cve: non vulnerabile"
             fi
         else
-            local code; code=$(curl $curl_opts -o /dev/null -w "%{http_code}" "$url" 2>/dev/null || echo 000)
-            if [[ "$code" == "200" ]]; then
-                found "$severity" "CAM-CVE" "$cve POSSIBLMENTE VULNERABILE ($code): $desc"
-                echo "[WARN] $cve $code $desc" | tee -a "$cve_out"
+            # Scarica body + codice in unica richiesta per evitare false positives
+            local _raw _body _code
+            _raw=$(curl $curl_opts -w "\n##HTTP_CODE##%{http_code}" "$url" 2>/dev/null || echo -e "\n##HTTP_CODE##000")
+            _code=$(echo "$_raw" | grep -oP '(?<=##HTTP_CODE##)\d+$' || echo 000)
+            _body=$(echo "$_raw" | sed '/##HTTP_CODE##/d')
+            if [[ "$_code" == "200" ]] && ! echo "$_body" | grep -qi \
+                "login first\|please login\|unauthorized\|password wrong\|access denied\|not authorized\|forbidden\|401\|authentication required"; then
+                found "$severity" "CAM-CVE" "$cve POSSIBILMENTE VULNERABILE ($_code): $desc"
+                echo "[WARN] $cve $_code $desc" | tee -a "$cve_out"
             else
-                echo "[SAFE] $cve HTTP $code $desc" >> "$cve_out"
+                echo "[SAFE] $cve HTTP $_code $desc" >> "$cve_out"
             fi
         fi
     }
@@ -5629,7 +5809,7 @@ cmd_camcve() {
                 "$base_url/onvif-http/snapshot?auth=YWRtaW46MTEM" "JFIF\|Content-Type.*image" "HIGH"
             # CVE-2014-4880: Default credentials page exposure
             _cam_check "CVE-2014-4880" "Hikvision default credentials login page" \
-                "$base_url/ISAPI/Security/userCheck" "statusValue\|200\|OK" "MEDIUM"
+                "$base_url/ISAPI/Security/userCheck" "statusValue\|userCheckResult\|<statusString>" "MEDIUM"
             # Information disclosure: device info without auth
             _cam_check "INFO-DISC" "Hikvision device info unauthenticated" \
                 "$base_url/ISAPI/System/deviceInfo" "deviceName\|firmwareVersion" "HIGH"
@@ -5650,7 +5830,7 @@ cmd_camcve() {
             # CVE-2018-10660: Axis root shell via parameter injection
             _cam_check "CVE-2018-10660" "Axis unauthenticated root shell via VAPIX" \
                 "$base_url/axis-cgi/admin/param.cgi?action=update&root.Users.Admin.AuthAnonymous=yes" \
-                "200\|OK" "CRITICAL"
+                "OK\|<root>\|AuthAnonymous" "CRITICAL"
             # VAPIX unauthenticated access
             _cam_check "CVE-2016-6201" "Axis VAPIX auth bypass — snapshot" \
                 "$base_url/axis-cgi/jpg/image.cgi" "JFIF\|Content-Type.*image" "HIGH"
@@ -5661,7 +5841,7 @@ cmd_camcve() {
         reolink)
             # Reolink RTSP credential in URL (firmware artifact)
             _cam_check "INFO-DISC-RTSP" "Reolink RTSP credential in URL pattern" \
-                "$base_url/cgi-bin/api.cgi?cmd=GetRtspUrl" "password\|rtsp\|credential" "HIGH"
+                "$base_url/cgi-bin/api.cgi?cmd=GetRtspUrl" "rtsp://\|\"password\"\|\"credential\"\|rtspUrl" "HIGH"
             # Reolink API without token
             _cam_check "INFO-DISC-API" "Reolink API device info no-auth" \
                 "$base_url/cgi-bin/api.cgi?cmd=GetDevInfo&channel=0&rs=xxxx&user=admin&password=" \
@@ -5701,13 +5881,23 @@ cmd_camcve() {
                 echo -e "${CYAN}[DRY-RUN]${NC} snmpwalk -v2c -c public $target 1.3.6.1.4.1.5003 (AudioCodes SIP OID)"
             fi
             # Default creds brute force indicativo (solo check rapido)
+            # Baseline senza credenziali per evitare falsi positivi su form-based auth
+            local _ac_noauth_code; _ac_noauth_code=$(curl $curl_opts -o /dev/null -w "%{http_code}" \
+                "$base_url/Forms/login_security_1.htm" 2>/dev/null || echo 000)
             for cred_pair in "admin:admin" "Admin:Admin" "root:1234" "user:user"; do
                 local ac_user; ac_user="${cred_pair%%:*}"
                 local ac_pass; ac_pass="${cred_pair##*:}"
                 if [[ $DRY_RUN -eq 0 ]]; then
-                    local ac_code; ac_code=$(curl $curl_opts -o /dev/null -w "%{http_code}" \
+                    local ac_body ac_code
+                    ac_body=$(curl $curl_opts -u "${ac_user}:${ac_pass}" \
+                        "$base_url/Forms/login_security_1.htm" 2>/dev/null || true)
+                    ac_code=$(curl $curl_opts -o /dev/null -w "%{http_code}" \
                         -u "${ac_user}:${ac_pass}" "$base_url/Forms/login_security_1.htm" 2>/dev/null || echo 000)
-                    if [[ "$ac_code" == "200" ]]; then
+                    # Autentica solo se: codice cambia da non-auth OPPURE body indica accesso (no login form)
+                    if { [[ "$ac_code" == "200" && "$_ac_noauth_code" != "200" ]] || \
+                         { [[ "$ac_code" == "200" ]] && echo "$ac_body" | grep -qi \
+                           "logout\|management\|dashboard\|system status\|configuration" && \
+                           ! echo "$ac_body" | grep -qi "LoginForm\|login_security\|<input.*password"; }; }; then
                         found CRITICAL "AudioCodes credenziali default trovate: ${ac_user}:${ac_pass} (HTTP $ac_code)"
                         echo "[DEFAULT-CRED] $ac_user:$ac_pass" >> "$cve_out"
                     fi
@@ -5719,13 +5909,22 @@ cmd_camcve() {
         commend)
             # ── Commend ET962-BF5xx ──────────────────────────────────────────
             # Default credentials check
+            # Baseline senza credenziali — evita false positive su form-based auth (200 sempre)
+            local _ce_noauth_code; _ce_noauth_code=$(curl $curl_opts -o /dev/null -w "%{http_code}" \
+                "$base_url/" 2>/dev/null || echo 000)
             for cred_pair in "admin:admin" "Admin:Admin" "user:user" "root:root"; do
                 local ce_user; ce_user="${cred_pair%%:*}"
                 local ce_pass; ce_pass="${cred_pair##*:}"
                 if [[ $DRY_RUN -eq 0 ]]; then
-                    local ce_code; ce_code=$(curl $curl_opts -o /dev/null -w "%{http_code}" \
+                    local ce_body ce_code
+                    ce_body=$(curl $curl_opts -u "${ce_user}:${ce_pass}" "$base_url/" 2>/dev/null || true)
+                    ce_code=$(curl $curl_opts -o /dev/null -w "%{http_code}" \
                         -u "${ce_user}:${ce_pass}" "$base_url/" 2>/dev/null || echo 000)
-                    if [[ "$ce_code" == "200" ]]; then
+                    # Credenziali valide: codice Basic Auth cambia (401→200) O body indica pannello admin
+                    if { [[ "$ce_code" == "200" && "$_ce_noauth_code" == "401" ]] || \
+                         { [[ "$ce_code" == "200" ]] && echo "$ce_body" | grep -qi \
+                           "logout\|dashboard\|configuration\|system\|status" && \
+                           ! echo "$ce_body" | grep -qi "login\|password\|unauthorized"; }; }; then
                         found CRITICAL "Commend ET962 credenziali default: ${ce_user}:${ce_pass} (HTTP $ce_code)"
                         echo "[DEFAULT-CRED] $ce_user:$ce_pass" >> "$cve_out"
                     fi
@@ -5772,13 +5971,13 @@ cmd_camcve() {
             _cam_check "GENERIC-CONFIG" "Config backup unauthenticated" \
                 "$base_url/cgi-bin/config.cgi" "admin\|password\|ssid" "HIGH"
             _cam_check "GENERIC-RTSP" "RTSP credential in web response" \
-                "$base_url/cgi-bin/hi3510/param.cgi?cmd=getrtspurl" "rtsp\|password" "HIGH"
+                "$base_url/cgi-bin/hi3510/param.cgi?cmd=getrtspurl" "rtsp://\|\"password\"\|\"credential\"\|\"passwd\"" "HIGH"
             _cam_check "GENERIC-EXEC" "Exec CGI endpoint" \
                 "$base_url/cgi-bin/exec.cgi" "" "MEDIUM"
             _cam_check "GENERIC-DEBUG" "Debug endpoint exposed" \
                 "$base_url/cgi-bin/debug.cgi" "" "MEDIUM"
             _cam_check "ONVIF-INFO" "ONVIF device info unauthenticated" \
-                "$base_url:8000" "onvif\|soap\|device" "MEDIUM"
+                "${scheme}://${target}:8000" "onvif\|soap\|device" "MEDIUM"
             ;;
     esac
 
@@ -6077,8 +6276,8 @@ cmd_vnc() {
         if require_tool hydra; then
             local pl; pl=$(_wl_pass)
             run_cmd "hydra_vnc" \
-                "hydra -P $pl -s $port -t $threads -f -w 4 -W 2 \
-                 -o \"$OUTDIR\"/hydra_vnc.txt $target vnc 2>&1"
+                "hydra -P \"$pl\" -s $port -t $threads -f -w 4 -W 2 \
+                 -o \"$OUTDIR/hydra_vnc.txt\" $target vnc 2>&1"
             if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/hydra_vnc.txt" ]]; then
                 grep -i "password:" "$OUTDIR/hydra_vnc.txt" 2>/dev/null | \
                     while IFS= read -r line; do found HIGH "VNC:$port — $line"; done || true
@@ -6225,8 +6424,8 @@ cmd_rdp() {
         if require_tool hydra; then
             local ul; ul=$(_wl_users); local pl; pl=$(_wl_pass)
             run_cmd "hydra_rdp" \
-                "hydra -L $ul -P $pl -s $port -t $threads -f -w 4 -W 2 \
-                 -o \"$OUTDIR\"/hydra_rdp.txt $target rdp 2>&1"
+                "hydra -L \"$ul\" -P \"$pl\" -s $port -t $threads -f -w 4 -W 2 \
+                 -o \"$OUTDIR/hydra_rdp.txt\" $target rdp 2>&1"
             if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/hydra_rdp.txt" ]]; then
                 grep -i "login:" "$OUTDIR/hydra_rdp.txt" 2>/dev/null | \
                     while IFS= read -r line; do
@@ -9501,7 +9700,7 @@ cmd_auto() {
             log "  Hop count: $_hops | Ultimo hop: ${_last_hop:-(timeout)}"
             # Se l'ultimo hop non è il target → probabilmente c'è un FW/NAT davanti
             [[ -n "$_last_hop" && "$_last_hop" != "$target" ]] && \
-                warn "  Ultimo hop ($last_hop) ≠ target — possibile firewall/NAT intermedio"
+                warn "  Ultimo hop ($_last_hop) ≠ target — possibile firewall/NAT intermedio"
         else
             warn "  traceroute non trovato — saltato (apt install traceroute)"
         fi
@@ -9886,6 +10085,10 @@ cmd_auto() {
                 | tr '[:upper:]' '[:lower:]' || true)"
         # MAC vendor OUI (già noto da pre-scan)
         [[ -n "$mac_vendor" ]] && prescan_context+=" $(echo "$mac_vendor" | tr '[:upper:]' '[:lower:]')"
+        # http-title da nmap — rileva vendor da titolo pagina (es. "Reolink", "Hikvision" non presenti negli header)
+        prescan_context+=" $(grep -oiP '(?<=http-title: )\S+' \
+            "$scan_dir/nmap_fast.nmap" "$scan_dir/nmap_full.nmap" 2>/dev/null \
+            | tr '[:upper:]' '[:lower:]' | tr '\n' ' ' || true)"
     fi
 
     # Mappa contesto → vendor (usato per cam-cve e moduli specializzati)
@@ -10294,7 +10497,7 @@ cmd_auto() {
         done
         _http_nse_ports="${_http_nse_ports#,}"
         if [[ -n "$_http_nse_ports" ]]; then
-            log "  NSE HTTP ($http_nse_ports)"
+            log "  NSE HTTP ($_http_nse_ports)"
             nmap -p "$_http_nse_ports" \
                 --script http-auth-finder,http-auth,http-default-accounts,\
 http-methods,http-headers,http-robots.txt,http-server-header \
@@ -10608,10 +10811,10 @@ smb-system-info,smb2-security-mode \
             local _creds_file="$OUTDIR_BASE/.exa_creds.json"
             if [[ -s "$_creds_file" ]]; then
                 echo "── CREDENZIALI TROVATE ───────────────────────────────────"
-                python3 -c "
-import json, sys
+                EXA_CREDS_FILE="$_creds_file" python3 -c "
+import json, sys, os
 try:
-    data = json.load(open('$_creds_file'))
+    data = json.load(open(os.environ['EXA_CREDS_FILE']))
     for svc, creds in data.items():
         for c in creds:
             print(f'  {svc}: {c.get(\"user\",\"?\")}:{c.get(\"pass\",\"?\")}')
@@ -12351,10 +12554,10 @@ print('OK' if sig=='${_jparts[2]}' else 'NO')
 
         # Raccogli tutte le credenziali trovate finora (da cred store + SNMP community)
         local _all_creds=()
-        local _cs_dump; _cs_dump=$(python3 -c "
-import json,sys
+        local _cs_dump; _cs_dump=$(EXA_CRED_STORE_PATH="${CRED_STORE}" python3 -c "
+import json,sys,os
 try:
-    data=json.load(open('${CRED_STORE}'))
+    data=json.load(open(os.environ['EXA_CRED_STORE_PATH']))
     for e in data:
         u=e.get('username',''); p=e.get('password','')
         if u: print(f'{u}:{p}')
@@ -15247,8 +15450,8 @@ cmd_onvif() {
     setup_outdir "$target" "onvif"
     log "Target: $target | Porta ONVIF: $port | Output: $OUTDIR"
 
-    local ul; ul=$(_wl_users)
-    local pl; pl=$(_wl_pass)
+    local ul; ul=$(_wl_rtsp_users)
+    local pl; pl=$(_wl_rtsp_pass)
 
     # Envelope SOAP generico per probe anonimo
     local soap_getinfo='<?xml version="1.0" encoding="UTF-8"?>
@@ -15589,17 +15792,22 @@ _session_init() {
     [[ "$DRY_RUN" -eq 1 ]] && return
 
     local ts; ts=$(date -u +%Y-%m-%dT%H:%M:%S)
-    local modules_json; modules_json=$(printf '"%s",' "${modules_all[@]}" | sed 's/,$//')
-    python3 -c "
-import json
-d={
-    'target': '$target',
-    'modules_done': [],
-    'modules_pending': [$(printf '"%s",' "${modules_all[@]}" | sed 's/,$//')],
-    'timestamp': '$ts'
+    # Costruisce la lista moduli come JSON array tramite printf+Python (no interpolazione)
+    local modules_json_arr; modules_json_arr=$(printf '"%s",' "${modules_all[@]}" | sed 's/,$//')
+    export EXA_SES_TARGET="$target" EXA_SES_TS="$ts" \
+           EXA_SES_MODULES="[$modules_json_arr]" EXA_SES_OUT="$outdir/session.json"
+    python3 - <<'PYEOF' > /dev/null 2>&1 || true
+import json, os
+d = {
+    "target":          os.environ["EXA_SES_TARGET"],
+    "modules_done":    [],
+    "modules_pending": json.loads(os.environ["EXA_SES_MODULES"]),
+    "timestamp":       os.environ["EXA_SES_TS"],
 }
-print(json.dumps(d, indent=2))
-" > "$outdir/session.json" 2>/dev/null || true
+with open(os.environ["EXA_SES_OUT"], "w") as fh:
+    json.dump(d, fh, indent=2)
+PYEOF
+    unset EXA_SES_TARGET EXA_SES_TS EXA_SES_MODULES EXA_SES_OUT
 }
 
 _session_mark_done() {
@@ -16328,10 +16536,10 @@ cmd_config_audit() {
             json)
                 if tool_ok python3; then
                     local json_creds
-                    json_creds=$(python3 -c "
-import json, sys
+                    json_creds=$(EXA_CF_PATH="$cf" python3 -c "
+import json, sys, os
 try:
-    d = json.load(open('$cf'))
+    d = json.load(open(os.environ['EXA_CF_PATH']))
 except: sys.exit(0)
 def walk(obj, path=''):
     if isinstance(obj, dict):
