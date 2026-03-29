@@ -45,7 +45,7 @@
 
 set -euo pipefail
 
-VERSION="3.3.0"
+VERSION="3.4.0"
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 
 # ── Colori ──────────────────────────────────────────────────
@@ -9693,21 +9693,50 @@ cmd_auto() {
     [[ -n "${CUSTOM_USERS:-}" ]]   && common_flags="$common_flags --userlist $CUSTOM_USERS"
     [[ -n "${CUSTOM_PASS:-}" ]]    && common_flags="$common_flags --passlist $CUSTOM_PASS"
 
+    # Timeout per-modulo: moduli veloci ottengono meno tempo, lenti di più
+    _mod_timeout_for() {
+        # Se l'utente ha impostato --timeout, usa quello per tutti
+        [[ "${TIMEOUT:-0}" -gt 0 ]] && echo "$TIMEOUT" && return
+        local _lbl="$1"
+        case "$_lbl" in
+            DNS*|TFTP*|mDNS*|WSD*|ICMP*|ARP*) echo 5  ;;   # ricognizione passiva
+            SNMP*|LDAP*|IPMI*|CoAP*|BACnet*|EtherNet*|Modbus*|DNP3*|OPC*) echo 10 ;;
+            SSL*|FTP*|Telnet*|VNC*|RDP*) echo 15 ;;
+            SSH*|SIP*|ONVIF*|RTMP*|UPnP*|MQTT*|SMB*) echo 20 ;;
+            Nuclei*|RTSP*|"CVE Scanner"*) echo 30 ;;
+            Web*|Brute*|"JS analysis"*) echo 45 ;;
+            *) echo 60 ;;
+        esac
+    }
+
+    # Tracking fasi: accumulatore per durata per-fase
+    declare -A _phase_start_ts _phase_end_ts 2>/dev/null || true
+    _phase_start_ts[1]=$(date +%s)
+
     # Helper: esegue un modulo con output visibile in tempo reale
     _run_mod() {
         local label="$1"; shift
         # Checkpoint: salta se già completato in una sessione precedente
         if _ckpt_skip "mod:$label"; then
-            echo -e "  ${CYAN}↷${NC} [${_phase_num}/4] $label ${CYAN}(skip)${NC}"
+            echo -e "  ${CYAN}↷${NC} [${_phase_num}/4 | #$(( _mod_done+1 ))/$_TOTAL_MODS] $label ${CYAN}(skip — già completato)${NC}"
             return 0
         fi
         (( _mod_done++ )) || true
         (( _DONE_MODS++ )) || true
         local _ts0; _ts0=$(date +%s)
-        local _mod_t=$(( TIMEOUT > 0 ? TIMEOUT : 60 ))
+        local _mod_t; _mod_t=$(_mod_timeout_for "$label")
         local _mod_timeout_s=$(( _mod_t * 60 ))
-        echo -e "\n  ${BOLD}${CYAN}[Fase ${_phase_num}/4 | #${_mod_done}]${NC} ${BOLD}▶ ${label}${NC} ${CYAN}(max ${_mod_t}m)${NC}"
-        [[ $_TOTAL_MODS -gt 0 ]] && _progress_bar "$_DONE_MODS" "$_TOTAL_MODS" "$label"
+        # Header modulo con progress bar integrata
+        echo -e ""
+        if [[ $_TOTAL_MODS -gt 0 ]]; then
+            local _pct=$(( _DONE_MODS * 100 / _TOTAL_MODS ))
+            local _filled=$(( _DONE_MODS * 20 / _TOTAL_MODS ))
+            local _bar=""; local _i
+            for (( _i=0; _i<_filled; _i++ )); do _bar+="█"; done
+            for (( _i=_filled; _i<20; _i++ )); do _bar+="░"; done
+            echo -e "  ${CYAN}[${_bar}] ${_pct}%${NC}  Fase ${_phase_num}/4 | modulo ${_DONE_MODS}/${_TOTAL_MODS}"
+        fi
+        echo -e "  ${BOLD}${CYAN}▶ ${label}${NC} ${CYAN}(timeout: ${_mod_t}m)${NC}"
         if [[ $DRY_RUN -eq 0 ]]; then
             # shellcheck disable=SC2086
             if timeout "$_mod_timeout_s" exa-dune "$@" $common_flags --output "$OUTDIR_BASE"; then
@@ -10149,6 +10178,37 @@ cmd_auto() {
             return 0
         fi
     fi
+
+    # ── Durata Fase 1 ────────────────────────────────────────
+    _phase_start_ts[2]=$(date +%s)
+    local _f1_dur=$(( _phase_start_ts[2] - _phase_start_ts[1] ))
+    log "Fase 1 completata in $((  _f1_dur/60 ))m $(( _f1_dur%60 ))s | porte TCP: $(echo "$open_tcp" | wc -w | tr -d ' ')"
+
+    # ── Pre-calcolo _TOTAL_MODS basato su porte aperte ───────
+    # Stima il numero di moduli che verranno eseguiti, per la progress bar
+    _TOTAL_MODS=0
+    _port_open 80    && (( _TOTAL_MODS++ )) || true
+    _port_open 8000  && (( _TOTAL_MODS++ )) || true
+    _port_open 8080  && (( _TOTAL_MODS++ )) || true
+    _port_open 443   && (( _TOTAL_MODS++ )) || true
+    _port_open 8443  && (( _TOTAL_MODS++ )) || true
+    { _port_open 443 || _port_open 8443; } && (( _TOTAL_MODS++ )) || true
+    _port_open 22    && (( _TOTAL_MODS++ )) || true
+    _port_open 23    && (( _TOTAL_MODS++ )) || true
+    _port_open 21    && (( _TOTAL_MODS++ )) || true
+    { _port_open 554 || _port_open 8554; } && (( _TOTAL_MODS++ )) || true
+    { _port_open 554 && _port_open 80; }   && (( _TOTAL_MODS++ )) || true  # ONVIF
+    { _port_open 161 || _port_open 162; }  && (( _TOTAL_MODS++ )) || true
+    _port_open 69    && (( _TOTAL_MODS++ )) || true
+    _port_open 1883  && (( _TOTAL_MODS++ )) || true
+    _port_open 445   && (( _TOTAL_MODS++ )) || true
+    _port_open 1900  && (( _TOTAL_MODS++ )) || true
+    _port_open 502   && (( _TOTAL_MODS++ )) || true
+    _port_open 5060  && (( _TOTAL_MODS++ )) || true
+    # Raddoppia la stima per la Fase 3 (attacchi ~ stesso numero di moduli enum)
+    _TOTAL_MODS=$(( _TOTAL_MODS * 2 ))
+    [[ $_TOTAL_MODS -eq 0 ]] && _TOTAL_MODS=20   # fallback se porte non ancora note
+    log "Stima moduli totali (Fase 2+3): $_TOTAL_MODS"
 
     # ─────────────────────────────────────────────────────────
     # FASE 2 — ENUMERAZIONE
@@ -10975,6 +11035,24 @@ except: pass
         echo -e "${CYAN}[DRY-RUN]${NC} device_profile.txt → vendor/porte/servizi/findings/credenziali"
     fi
 
+    # ── Deduplicazione findings + durata Fase 2 ──────────────
+    _phase_start_ts[3]=$(date +%s)
+    local _f2_dur=$(( _phase_start_ts[3] - _phase_start_ts[2] ))
+    log "Fase 2 completata in $((  _f2_dur/60 ))m $(( _f2_dur%60 ))s"
+    if [[ $DRY_RUN -eq 0 ]]; then
+        # Deduplica tutti i findings.txt dell'intera sessione
+        local _fdup_count=0
+        while IFS= read -r -d '' _ff; do
+            if [[ -s "$_ff" ]]; then
+                local _before; _before=$(wc -l < "$_ff" 2>/dev/null || echo 0)
+                sort -u "$_ff" -o "$_ff" 2>/dev/null || true
+                local _after; _after=$(wc -l < "$_ff" 2>/dev/null || echo 0)
+                (( _fdup_count += (_before - _after) )) || true
+            fi
+        done < <(find "$OUTDIR_BASE" -name "findings.txt" -print0 2>/dev/null)
+        [[ $_fdup_count -gt 0 ]] && log "  Deduplicazione: rimossi $_fdup_count finding duplicati"
+    fi
+
     # ─────────────────────────────────────────────────────────
     # FASE 3 — ATTACCHI
     # ─────────────────────────────────────────────────────────
@@ -11086,15 +11164,20 @@ except: pass
 
     local ran_attack=0
 
-    # ── Quick default check web (prima del brute-force completo) ──
-    if [[ $DRY_RUN -eq 0 ]]; then
-        _svc_found 80   "http.*80\|HTTP.*80\|web.*80"  && _quick_default_web http  80
-        _svc_found 443  "https\|ssl.*443\|HTTP.*443"   && _quick_default_web https 443
-        _svc_found 8080 "http.*8080"                   && _quick_default_web http  8080
-        _svc_found 8443 "https.*8443\|ssl.*8443"       && _quick_default_web https 8443
-    fi
+    # ── Helper: verifica se sono già presenti credenziali valide per un servizio ──
+    _creds_known_for() {
+        # _creds_known_for <proto> [port]
+        # Ritorna 0 (skip brute force) se creds.json o hydra_*.txt hanno già creds valide
+        local _proto="$1" _port="${2:-}"
+        [[ -s "${CRED_STORE:-}" ]] && \
+            grep -qi "\"service\".*\"$_proto\"" "${CRED_STORE}" 2>/dev/null && return 0
+        find "$OUTDIR_BASE" -name "hydra_${_proto}*.txt" -name "hydra_*${_port}*.txt" \
+            -exec grep -lqi "login:" {} \; 2>/dev/null | grep -q . && return 0
+        return 1
+    }
 
-    # ── Rate limiting detection ───────────────────────────────────
+    # ── Rate limiting detection (PRIMA di qualsiasi brute force) ─
+    # Eseguito una volta all'inizio della Fase 3 su tutte le porte HTTP attive
     # Rileva HTTP 429/503 o backoff progressivo prima del brute-force
     _ratelimit_check() {
         local _sc="$1" _po="$2"
@@ -11125,25 +11208,36 @@ except: pass
         return 1
     }
 
-    # ── Brute-force web ───────────────────────────────────────────
+    # ── Quick default check + rate limit (PRIMA del brute-force) ─
     if [[ $DRY_RUN -eq 0 ]]; then
+        _svc_found 80   "http.*80\|HTTP.*80\|web.*80"  && ! _creds_known_for http  80  && _quick_default_web http  80
+        _svc_found 443  "https\|ssl.*443\|HTTP.*443"   && ! _creds_known_for https 443 && _quick_default_web https 443
+        _svc_found 8080 "http.*8080"                   && ! _creds_known_for http  8080 && _quick_default_web http  8080
+        _svc_found 8443 "https.*8443\|ssl.*8443"       && ! _creds_known_for https 8443 && _quick_default_web https 8443
+        # Rate limit check per tutte le porte HTTP attive
         _svc_found 80   "http.*80\|HTTP.*80\|web.*80"  && _ratelimit_check http  80
         _svc_found 443  "https\|ssl.*443\|HTTP.*443"   && _ratelimit_check https 443
         _svc_found 8080 "http.*8080"                   && _ratelimit_check http  8080
         _svc_found 8443 "https.*8443\|ssl.*8443"       && _ratelimit_check https 8443
     fi
-    _svc_found 80   "http.*80\|HTTP.*80\|web.*80"    && _atk "Brute HTTP  :80"   creds "$target" http  --port 80
-    _svc_found 443  "https\|ssl.*443\|HTTP.*443"     && _atk "Brute HTTPS :443"  creds "$target" https --port 443
-    _svc_found 8080 "http.*8080"                     && _atk "Brute HTTP  :8080" creds "$target" http  --port 8080
-    _svc_found 8443 "https.*8443\|ssl.*8443"         && _atk "Brute HTTPS :8443" creds "$target" https --port 8443
 
-    # ── Brute-force servizi di accesso remoto ─────────────────────
-    _svc_found 22   "ssh\|SSH"                       && _atk "Brute SSH"         creds "$target" ssh
-    _svc_found 23   "telnet\|Telnet"                 && _atk "Brute Telnet"      creds "$target" telnet
-    _svc_found 21   "ftp\|FTP"                       && _atk "Brute FTP"         creds "$target" ftp
-    _svc_found 445  "smb\|SMB\|samba"               && _atk "Brute SMB"         creds "$target" smb
-    _svc_found 3389 "rdp\|RDP"                       && _atk "Brute RDP"         creds "$target" rdp
-    _svc_found 5900 "vnc\|VNC"                       && _atk "Brute VNC"         creds "$target" vnc
+    # ── Brute-force web (salta se creds già note dalla Fase 2) ────
+    _svc_found 80   "http.*80\|HTTP.*80\|web.*80"  && ! _creds_known_for http  80  && \
+        _atk "Brute HTTP  :80"   creds "$target" http  --port 80
+    _svc_found 443  "https\|ssl.*443\|HTTP.*443"   && ! _creds_known_for https 443 && \
+        _atk "Brute HTTPS :443"  creds "$target" https --port 443
+    _svc_found 8080 "http.*8080"                   && ! _creds_known_for http  8080 && \
+        _atk "Brute HTTP  :8080" creds "$target" http  --port 8080
+    _svc_found 8443 "https.*8443\|ssl.*8443"       && ! _creds_known_for https 8443 && \
+        _atk "Brute HTTPS :8443" creds "$target" https --port 8443
+
+    # ── Brute-force servizi di accesso remoto (skip se creds già note) ──
+    _svc_found 22   "ssh\|SSH"      && ! _creds_known_for ssh    22   && _atk "Brute SSH"    creds "$target" ssh
+    _svc_found 23   "telnet\|Telnet" && ! _creds_known_for telnet 23  && _atk "Brute Telnet" creds "$target" telnet
+    _svc_found 21   "ftp\|FTP"      && ! _creds_known_for ftp    21   && _atk "Brute FTP"    creds "$target" ftp
+    _svc_found 445  "smb\|SMB\|samba" && ! _creds_known_for smb  445  && _atk "Brute SMB"    creds "$target" smb
+    _svc_found 3389 "rdp\|RDP"      && ! _creds_known_for rdp    3389 && _atk "Brute RDP"    creds "$target" rdp
+    _svc_found 5900 "vnc\|VNC"      && ! _creds_known_for vnc    5900 && _atk "Brute VNC"    creds "$target" vnc
 
     # ── Brute-force MQTT (hydra diretto — non in cmd_creds) ───────
     if _svc_found 1883 "mqtt\|MQTT"; then
@@ -12916,6 +13010,16 @@ except: pass
         printf "  %-30s %s\n" "Default creds web:" "$(wc -l < "$OUTDIR_BASE/quick_defaults_web.txt") coppie"
     echo ""
 
+    # ── Deduplicazione post-Fase 3 + durata ──────────────────
+    _phase_start_ts[4]=$(date +%s)
+    local _f3_dur=$(( _phase_start_ts[4] - _phase_start_ts[3] ))
+    log "Fase 3 completata in $((  _f3_dur/60 ))m $(( _f3_dur%60 ))s | moduli eseguiti: $_mod_done"
+    if [[ $DRY_RUN -eq 0 ]]; then
+        while IFS= read -r -d '' _ff; do
+            [[ -s "$_ff" ]] && sort -u "$_ff" -o "$_ff" 2>/dev/null || true
+        done < <(find "$OUTDIR_BASE" -name "findings.txt" -print0 2>/dev/null)
+    fi
+
     # ─────────────────────────────────────────────────────────
     # FASE 4 — REPORT PDF
     # ─────────────────────────────────────────────────────────
@@ -13040,7 +13144,20 @@ except: pass
     printf "  %-20s %s\n" "Target:"          "$target"
     [[ -n "${_PROFILE:-}" ]] && \
         printf "  %-20s %s\n" "Profilo:"     "$_PROFILE"
-    printf "  %-20s %s\n" "Durata:"          "$_dur_fmt"
+    printf "  %-20s %s\n" "Durata totale:"   "$_dur_fmt"
+    # Dettaglio durata per fase
+    if [[ -n "${_phase_start_ts[2]:-}" ]]; then
+        local _f1d=$(( ${_phase_start_ts[2]} - ${_phase_start_ts[1]} ))
+        printf "  %-20s %dm%ds\n" "  Fase 1 (scan):" "$(( _f1d/60 ))" "$(( _f1d%60 ))"
+    fi
+    if [[ -n "${_phase_start_ts[3]:-}" ]]; then
+        local _f2d=$(( ${_phase_start_ts[3]} - ${_phase_start_ts[2]} ))
+        printf "  %-20s %dm%ds\n" "  Fase 2 (enum):" "$(( _f2d/60 ))" "$(( _f2d%60 ))"
+    fi
+    if [[ -n "${_phase_start_ts[4]:-}" ]]; then
+        local _f3d=$(( ${_phase_start_ts[4]} - ${_phase_start_ts[3]} ))
+        printf "  %-20s %dm%ds\n" "  Fase 3 (attacchi):" "$(( _f3d/60 ))" "$(( _f3d%60 ))"
+    fi
     printf "  %-20s %s\n" "Output dir:"      "$OUTDIR_BASE"
     # Mostra symlink latest se disponibile
     local _latest_link; _latest_link=$(dirname "$OUTDIR_BASE")/latest

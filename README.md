@@ -2,7 +2,7 @@
 
 > Multi-protocol penetration testing framework for IoT and VoIP environments.
 
-![Version](https://img.shields.io/badge/version-3.3.0-blue)
+![Version](https://img.shields.io/badge/version-3.4.0-blue)
 ![Platform](https://img.shields.io/badge/platform-Kali%20Linux-purple)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Shell](https://img.shields.io/badge/shell-bash-yellow)
@@ -17,7 +17,7 @@
 
 ```
 ╔══════════════════════════════════════════════╗
-║    EXA-DUNE v3.3.0                           ║
+║    EXA-DUNE v3.4.0                           ║
 ║    Generic Network Assessment Tool           ║
 ╚══════════════════════════════════════════════╝
 ```
@@ -339,6 +339,29 @@ Output is saved to `/root/pentest/exa-dune-<target>_<timestamp>/` with subdirect
 ---
 
 ## Changelog
+
+### v3.4.0 — 2026-03-29
+
+**`auto` command — major improvements:**
+
+| # | Problema | Soluzione |
+|---|---|---|
+| 1 | Progress bar **sempre disabilitata** | Pre-calcolo `_TOTAL_MODS` dalle porte aperte prima di Fase 2; barra `[████░░░] 35%` visibile a ogni modulo |
+| 2 | **Timeout identico** per tutti i moduli (60m) | `_mod_timeout_for()`: DNS/TFTP→5m, SNMP→10m, SSL/FTP→15m, SIP/SSH→20m, RTSP/CVE→30m, Web/Brute→45m |
+| 3 | Rate-limit check **dopo** l'inizio del brute force | Spostato **prima** dei quick defaults, in testa alla Fase 3 |
+| 4 | Brute-force lanciato **anche se creds già note** | `_creds_known_for()`: salta hydra per ogni servizio che ha già creds valide in `creds.json` |
+| 5 | Findings **duplicati** in `findings.txt` | `sort -u` applicato a ogni `findings.txt` al termine di Fase 2 e Fase 3 |
+| 6 | Nessun feedback su **durata per fase** | Ogni fase logga la propria durata; banner finale mostra la tabella Fase1/2/3 |
+
+**Esempio output banner finale:**
+```
+  Durata totale:       4m35s
+    Fase 1 (scan):     1m52s
+    Fase 2 (enum):     1m43s
+    Fase 3 (attacchi): 1m00s
+```
+
+---
 
 ### v3.3.0 — 2026-03-29
 
