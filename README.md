@@ -2,7 +2,7 @@
 
 > Multi-protocol penetration testing framework for IoT and VoIP environments.
 
-![Version](https://img.shields.io/badge/version-3.4.0-blue)
+![Version](https://img.shields.io/badge/version-3.5.0-blue)
 ![Platform](https://img.shields.io/badge/platform-Kali%20Linux-purple)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Shell](https://img.shields.io/badge/shell-bash-yellow)
@@ -17,7 +17,7 @@
 
 ```
 ╔══════════════════════════════════════════════╗
-║    EXA-DUNE v3.4.0                           ║
+║    EXA-DUNE v3.5.0                           ║
 ║    Generic Network Assessment Tool           ║
 ╚══════════════════════════════════════════════╝
 ```
@@ -339,6 +339,18 @@ Output is saved to `/root/pentest/exa-dune-<target>_<timestamp>/` with subdirect
 ---
 
 ## Changelog
+
+### v3.5.0 — 2026-03-29
+
+**Bug fix critici `auto` command:**
+
+| # | Bug | Fix |
+|---|---|---|
+| 1 | `--passlist`/`--userlist` passati a **tutti** i subcommand → crash 30+ moduli con "Opzione sconosciuta" | Split `common_flags` / `_cred_flags`: le flag credenziali ora vengono passate **solo** ai moduli che le accettano (`_accepts_cred_flags()`) |
+| 2 | Vendor creds auto-caricate finivano in `common_flags` → stesso crash | Moved vendor creds da `common_flags` a `_cred_flags` |
+| 3 | **EternalBlue false positive** su porta 445 chiusa: `grep -qiE "VULNERABLE\|MS17-010"` matchava il pattern `MS17-010` nell'output nmap anche senza vulnerabilità | Pattern ridotto a `grep -qiE "VULNERABLE"` — richiede esplicitamente la parola VULNERABLE nell'output |
+
+---
 
 ### v3.4.0 — 2026-03-29
 

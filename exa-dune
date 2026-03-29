@@ -45,7 +45,7 @@
 
 set -euo pipefail
 
-VERSION="3.4.0"
+VERSION="3.5.0"
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 
 # ── Colori ──────────────────────────────────────────────────
@@ -2921,7 +2921,7 @@ cmd_smb() {
          nmap -p 445 --script safe \
          -oN \"$OUTDIR\"/nmap_smbghost.txt $target 2>&1"
     if [[ $DRY_RUN -eq 0 ]]; then
-        grep -qiE "VULNERABLE|MS17-010" "$OUTDIR/nmap_ms17010.txt" 2>/dev/null && \
+        grep -qiE "VULNERABLE" "$OUTDIR/nmap_ms17010.txt" 2>/dev/null && \
             found CRITICAL "SMB:445 — EternalBlue MS17-010 VULNERABILE"
         grep -qiE "VULNERABLE|CVE-2020-0796" "$OUTDIR/nmap_smbghost.txt" 2>/dev/null && \
             found CRITICAL "SMB:445 — SMBGhost CVE-2020-0796 VULNERABILE"
@@ -9684,14 +9684,25 @@ cmd_auto() {
     _ckpt_done() { [[ -n "$_ckpt_file" ]] && echo "$1" >> "$_ckpt_file" 2>/dev/null || true; }
     _ckpt_skip() { [[ -n "$_ckpt_file" ]] && grep -qxF "$1" "$_ckpt_file" 2>/dev/null; }
 
-    # Flag comuni per tutti i sotto-moduli
-    # NOTA: --timeout NON viene passato ai sotto-moduli perché la maggior parte non lo accetta;
-    # il timeout è già gestito dal wrapper `timeout $s exa-dune ...` dentro _run_mod.
+    # Flag comuni: SOLO flag accettati da TUTTI i subcommand (dry-run, stealth, output)
+    # --userlist e --passlist NON vanno qui: molti subcommand non li accettano.
     local common_flags=""
-    [[ $DRY_RUN -eq 1 ]]           && common_flags="--dry-run"
-    [[ $STEALTH -eq 1 ]]           && common_flags="$common_flags --stealth"
-    [[ -n "${CUSTOM_USERS:-}" ]]   && common_flags="$common_flags --userlist $CUSTOM_USERS"
-    [[ -n "${CUSTOM_PASS:-}" ]]    && common_flags="$common_flags --passlist $CUSTOM_PASS"
+    [[ $DRY_RUN -eq 1 ]] && common_flags="--dry-run"
+    [[ $STEALTH -eq 1 ]] && common_flags="$common_flags --stealth"
+
+    # Flag credenziali: passati SOLO ai subcommand che li accettano (creds, ssh, ftp, ecc.)
+    local _cred_flags=""
+    [[ -n "${CUSTOM_USERS:-}" ]] && _cred_flags="--userlist $CUSTOM_USERS"
+    [[ -n "${CUSTOM_PASS:-}" ]]  && _cred_flags="$_cred_flags --passlist $CUSTOM_PASS"
+
+    # Subcommand che accettano --userlist / --passlist
+    _accepts_cred_flags() {
+        case "$1" in
+            creds|ssh|ftp|telnet|smb|rdp|vnc|sip|snmp|ldap|ipmi|mqtt|coap|onvif|rtsp|voip-enum)
+                return 0 ;;
+        esac
+        return 1
+    }
 
     # Timeout per-modulo: moduli veloci ottengono meno tempo, lenti di più
     _mod_timeout_for() {
@@ -9737,9 +9748,13 @@ cmd_auto() {
             echo -e "  ${CYAN}[${_bar}] ${_pct}%${NC}  Fase ${_phase_num}/4 | modulo ${_DONE_MODS}/${_TOTAL_MODS}"
         fi
         echo -e "  ${BOLD}${CYAN}▶ ${label}${NC} ${CYAN}(timeout: ${_mod_t}m)${NC}"
+        # Costruisci flag completi: cred_flags solo per moduli che li accettano
+        local _subcmd="$1"
+        local _full_flags="$common_flags"
+        _accepts_cred_flags "$_subcmd" && _full_flags="$_full_flags ${_cred_flags:-}"
         if [[ $DRY_RUN -eq 0 ]]; then
             # shellcheck disable=SC2086
-            if timeout "$_mod_timeout_s" exa-dune "$@" $common_flags --output "$OUTDIR_BASE"; then
+            if timeout "$_mod_timeout_s" exa-dune "$@" $_full_flags --output "$OUTDIR_BASE"; then
                 local _el=$(( $(date +%s) - _ts0 ))
                 ok "  ✔ $label completato (${_el}s)"
             else
@@ -9752,7 +9767,7 @@ cmd_auto() {
             fi
             _ckpt_done "mod:$label"
         else
-            echo -e "${CYAN}[DRY-RUN]${NC} timeout ${_mod_timeout_s}s exa-dune $* $common_flags --output $OUTDIR_BASE"
+            echo -e "${CYAN}[DRY-RUN]${NC} timeout ${_mod_timeout_s}s exa-dune $* $_full_flags --output $OUTDIR_BASE"
         fi
     }
 
@@ -10287,7 +10302,7 @@ cmd_auto() {
         done
         if [[ -s "$_vendor_creds_tmp" ]]; then
             CUSTOM_PASS="$_vendor_creds_tmp"
-            common_flags="$common_flags --passlist $CUSTOM_PASS"
+            _cred_flags="$_cred_flags --passlist $CUSTOM_PASS"
             log "Default creds per $detected_vendor caricate in wordlist ($(wc -l < "$_vendor_creds_tmp") password)"
         else
             rm -f "$_vendor_creds_tmp"
