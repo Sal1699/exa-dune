@@ -2,7 +2,7 @@
 
 > Multi-protocol penetration testing framework for IoT and VoIP environments.
 
-![Version](https://img.shields.io/badge/version-3.1.1-blue)
+![Version](https://img.shields.io/badge/version-3.2.0-blue)
 ![Platform](https://img.shields.io/badge/platform-Kali%20Linux-purple)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Shell](https://img.shields.io/badge/shell-bash-yellow)
@@ -17,7 +17,7 @@
 
 ```
 ╔══════════════════════════════════════════════╗
-║    EXA-DUNE v3.1.1                           ║
+║    EXA-DUNE v3.2.0                           ║
 ║    Generic Network Assessment Tool           ║
 ╚══════════════════════════════════════════════╝
 ```
@@ -246,8 +246,16 @@ All credentials are stored in `creds.json` within the session directory and incl
 | `--stealth` | Low-noise mode (nmap -T2, reduced rate) |
 | `--adaptive` | Auto-reduce rate on TCP resets detected |
 | `--timeout N` | Per-module timeout in minutes |
-| `--output DIR` | Override output directory |
+| `--output DIR` | Override output directory (disables per-target structure + symlink) |
 | `--json` | Write findings.json + summary.json per module |
+
+**Config file** (`~/.exa-dune/config`):
+
+```ini
+DEFAULT_OUTPUT_DIR=/root/pentest   # base dir per i dati grezzi
+REPORTS_DIR=/root/pentest/reports  # cartella PDF (default: ~/Desktop/EXA-DUNE-Reports)
+KEEP_RUNS=5                        # run da conservare per target (0 = nessun limite)
+```
 
 ---
 
@@ -331,6 +339,29 @@ Output is saved to `/root/pentest/exa-dune-<target>_<timestamp>/` with subdirect
 ---
 
 ## Changelog
+
+### v3.2.0 — 2026-03-29
+
+**Output directory management refactoring:**
+
+| # | Feature | Descrizione |
+|---|---|---|
+| 1 | Per-target directory structure | Output organizzato in `<base>/<target>/<timestamp>/` invece di cartelle piatte con timestamp nel nome |
+| 2 | Symlink `latest` | Ogni target ha un symlink `latest` → run più recente, per accesso rapido a `resume`, `diff` e script |
+| 3 | Retention policy (`KEEP_RUNS`) | Solo le ultime N run per target vengono conservate (default: 5). `KEEP_RUNS=0` disabilita la pulizia |
+| 4 | `REPORTS_DIR` configurabile | La cartella per i PDF non è più hardcoded su Desktop; configurabile in `~/.exa-dune/config` (utile su server headless) |
+| 5 | Config keys aggiuntive | `DEFAULT_OUTPUT_DIR`, `REPORTS_DIR`, `KEEP_RUNS` ora documentati nel template generato da `exa-dune config --create` |
+
+**Struttura risultante:**
+```
+/root/pentest/
+└── 192.168.1.34/
+    ├── 20260329_143000/   ← run 1
+    ├── 20260329_160000/   ← run 2 (run precedenti oltre KEEP_RUNS vengono rimosse)
+    └── latest -> 20260329_160000
+```
+
+---
 
 ### v3.1.1 — 2026-03-29
 

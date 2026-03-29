@@ -45,7 +45,7 @@
 
 set -euo pipefail
 
-VERSION="3.1.1"
+VERSION="3.2.0"
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 
 # ── Colori ──────────────────────────────────────────────────
@@ -1065,14 +1065,33 @@ setup_outdir() {
     # Imposta globali: OUTDIR, OUTDIR_BASE, _log_file
     local target="$1" sub="${2:-}"
     local ts; ts=$(date +%Y%m%d_%H%M%S)
-    OUTDIR_BASE="${OUTDIR_BASE:-/root/pentest/exa-dune-${target//./-}_${ts}}"
+
+    if [[ -z "$OUTDIR_BASE" ]]; then
+        # Struttura per-target: <base>/<target>/<timestamp>
+        local _base_root="${EXA_OUTPUT_DIR:-/root/pentest}"
+        local _target_dir="${_base_root}/${target}"
+        OUTDIR_BASE="${_target_dir}/${ts}"
+        _EXA_TARGET_DIR="$_target_dir"   # usato per symlink e retention
+    else
+        _EXA_TARGET_DIR=""               # --output manuale: non tocchiamo struttura
+    fi
+
     if [[ -n "$sub" ]]; then
         OUTDIR="${OUTDIR_BASE}/${sub}"
     else
         OUTDIR="${OUTDIR_BASE}"
     fi
+
     if [[ "$DRY_RUN" -eq 0 ]]; then
         mkdir -p "$OUTDIR" "$OUTDIR_BASE" || { err "Impossibile creare directory output: $OUTDIR_BASE (permessi insufficienti?)"; exit 1; }
+
+        # Symlink latest → timestamp corrente
+        if [[ -n "${_EXA_TARGET_DIR:-}" ]]; then
+            ln -sfn "$ts" "${_EXA_TARGET_DIR}/latest" 2>/dev/null || true
+            # Retention: rimuovi run vecchie oltre KEEP_RUNS
+            _apply_retention "$_EXA_TARGET_DIR"
+        fi
+
         # Log sempre nella root di sessione, non nella subdir del modulo
         _log_file="$OUTDIR_BASE/exa-dune.log"
         [[ -n "$sub" ]] && echo "--- Modulo: $sub START $(date) ---" >> "$_log_file" || true
@@ -1171,19 +1190,20 @@ _ensure_media_tools() {
 # ── Download wordlists aggiuntive da GitHub ───────────────────────────────────
 EXA_WL_DIR="/usr/share/exa-dune/wordlists"
 EXA_REPORTS_DIR="$(xdg-user-dir DESKTOP 2>/dev/null || echo "$HOME/Desktop")/EXA-DUNE-Reports"
+KEEP_RUNS=5
 EXA_SCRIPTS_DIR="/usr/share/exa-dune/scripts"
 
 _init_reports_dir() {
-    # Crea la cartella Desktop per i report se non esiste
+    # Rivaluta EXA_REPORTS_DIR in base a config (può essere stata sovrascritta da _load_config)
     if [[ ! -d "$EXA_REPORTS_DIR" ]]; then
         mkdir -p "$EXA_REPORTS_DIR" 2>/dev/null && \
-            ok "Cartella report Desktop creata: $EXA_REPORTS_DIR" || \
+            ok "Cartella report creata: $EXA_REPORTS_DIR" || \
             warn "Impossibile creare $EXA_REPORTS_DIR"
     fi
-    # Crea anche README nella cartella
+    # Crea README nella cartella
     local readme="$EXA_REPORTS_DIR/README.txt"
     if [[ ! -f "$readme" ]]; then
-        cat > "$readme" <<'RDME'
+        cat > "$readme" <<RDME
 EXA-DUNE Reports
 ================
 Questa cartella contiene tutti i report PDF generati da exa-dune.
@@ -1193,8 +1213,31 @@ Per generare un report:
   exa-dune report <output-dir> --pdf
   exa-dune pipeline <target> --auto
 
-I file originali sono in: /root/pentest/exa-dune-<target>_<timestamp>/
+I dati grezzi sono in: ${EXA_OUTPUT_DIR:-/root/pentest}/<target>/<timestamp>/
+Ogni target ha un symlink 'latest' → run più recente.
 RDME
+    fi
+}
+
+_apply_retention() {
+    # _apply_retention <target_dir>
+    # Mantiene solo le ultime KEEP_RUNS run nella cartella per-target.
+    local tdir="$1"
+    local keep="${KEEP_RUNS:-5}"
+    [[ "$keep" -le 0 ]] && return 0
+    # Elenco dir timestamp ordinate dalla più vecchia alla più recente
+    local dirs
+    mapfile -t dirs < <(
+        find "$tdir" -maxdepth 1 -mindepth 1 -type d -name '[0-9]*_[0-9]*' \
+        | sort
+    )
+    local total="${#dirs[@]}"
+    if (( total > keep )); then
+        local to_delete=$(( total - keep ))
+        for (( i=0; i<to_delete; i++ )); do
+            rm -rf "${dirs[$i]}" 2>/dev/null && \
+                log "Retention: rimossa run vecchia ${dirs[$i]}" || true
+        done
     fi
 }
 
@@ -1318,6 +1361,8 @@ _load_config() {
             STEALTH)             [[ "$val" == "1" || "$val" == "true" ]] && STEALTH=1 ;;
             ADAPTIVE)            [[ "$val" == "1" || "$val" == "true" ]] && ADAPTIVE=1 ;;
             THREADS)             export THREADS="$val" ;;
+            REPORTS_DIR)         EXA_REPORTS_DIR="$val" ;;
+            KEEP_RUNS)           [[ "$val" =~ ^[0-9]+$ ]] && KEEP_RUNS="$val" ;;
         esac
     done < "$cfg"
 }
@@ -1334,8 +1379,17 @@ cmd_config() {
 # TELEGRAM_TOKEN=your_bot_token_here
 # TELEGRAM_CHAT_ID=your_chat_id_here
 
-# Default output directory (default: auto-generated in current dir)
-# DEFAULT_OUTPUT_DIR=/root/pentest/reports
+# Base directory per i dati grezzi dei target (default: /root/pentest)
+# Struttura creata: <DEFAULT_OUTPUT_DIR>/<target>/<timestamp>/
+# Un symlink 'latest' punta sempre all'ultima run.
+# DEFAULT_OUTPUT_DIR=/root/pentest
+
+# Cartella in cui salvare i report PDF (default: ~/Desktop/EXA-DUNE-Reports)
+# Su sistemi headless/server impostare un path alternativo.
+# REPORTS_DIR=/root/pentest/reports
+
+# Numero massimo di run da conservare per ogni target (default: 5, 0 = nessun limite)
+KEEP_RUNS=5
 
 # Default wordlist path
 # DEFAULT_WORDLIST=/usr/share/wordlists/rockyou.txt
