@@ -2,7 +2,7 @@
 
 > Multi-protocol penetration testing framework for IoT and VoIP environments.
 
-![Version](https://img.shields.io/badge/version-3.2.0-blue)
+![Version](https://img.shields.io/badge/version-3.3.0-blue)
 ![Platform](https://img.shields.io/badge/platform-Kali%20Linux-purple)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Shell](https://img.shields.io/badge/shell-bash-yellow)
@@ -17,7 +17,7 @@
 
 ```
 ╔══════════════════════════════════════════════╗
-║    EXA-DUNE v3.2.0                           ║
+║    EXA-DUNE v3.3.0                           ║
 ║    Generic Network Assessment Tool           ║
 ╚══════════════════════════════════════════════╝
 ```
@@ -339,6 +339,28 @@ Output is saved to `/root/pentest/exa-dune-<target>_<timestamp>/` with subdirect
 ---
 
 ## Changelog
+
+### v3.3.0 — 2026-03-29
+
+**`auto` command enhancements + RTSP false positive reduction:**
+
+| # | Area | Fix / Feature |
+|---|---|---|
+| 1 | `auto` | Fix regressione v3.2.0: `cmd_auto` ora chiama `setup_outdir()` per struttura per-target + symlink |
+| 2 | `auto` | Aggiunto `--profile ip-camera \| voip-gateway \| iot-adapter`: salta i moduli non pertinenti |
+| 3 | `auto` | Banner finale mostra il profilo attivo, il symlink `latest` e l'elenco CRITICAL/HIGH immediato |
+| 4 | `rtsp` | Rimosso `[FOUND:HIGH]` per ogni path che risponde a OPTIONS (comportamento RTSP normale) |
+| 5 | `rtsp` | Introdotta deduplicazione: un solo `[FOUND:MEDIUM]` per porta con Digest Auth (non 30+) |
+| 6 | `rtsp` | Aggiunto riepilogo finale nel modulo: N path scoperti / N CRITICAL / N MEDIUM |
+
+**Esempio profili:**
+```bash
+exa-dune auto 192.168.1.20 --profile ip-camera     # solo RTSP/ONVIF/web/cam-cve
+exa-dune auto 192.168.1.10 --profile voip-gateway   # solo SIP/web/SSH/snmp
+exa-dune auto 192.168.1.30 --profile iot-adapter    # tutto tranne RDP/VNC/LDAP
+```
+
+---
 
 ### v3.2.0 — 2026-03-29
 

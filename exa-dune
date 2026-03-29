@@ -45,7 +45,7 @@
 
 set -euo pipefail
 
-VERSION="3.2.0"
+VERSION="3.3.0"
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 
 # ── Colori ──────────────────────────────────────────────────
@@ -4706,7 +4706,8 @@ print(s.recv(2048).decode(errors='replace'))
 s.close()
 " 2>/dev/null | head -5 || true)
                 if echo "$resp" | grep -qiE "RTSP/1\.|200 OK|Public:"; then
-                    found HIGH "RTSP:$p — server risponde: $url"
+                    # OPTIONS 200 = path scoperto, non è una vulnerabilità da solo
+                    log "  RTSP path trovato: $url"
                     echo "$url" >> "$OUTDIR/rtsp_streams.txt"
                     open_streams+=("$url:$p")
                     # Test accesso anonimo DESCRIBE
@@ -4726,6 +4727,11 @@ s.close()
                         found CRITICAL "RTSP:$p — stream accessibile SENZA autenticazione: $url"
                         _rtsp_snapshot "$url"
                     elif echo "$describe" | grep -qi "401.*Digest\|Digest.*401\|WWW-Authenticate.*Digest"; then
+                        # Auth richiesta: segnala MEDIUM (solo al primo path per porta, evita duplicati)
+                        if ! grep -qxF "rtsp_digest_reported_$p" "$OUTDIR/.rtsp_flags" 2>/dev/null; then
+                            found MEDIUM "RTSP:$p — Digest Auth richiesta (brute force avviato su $url)"
+                            echo "rtsp_digest_reported_$p" >> "$OUTDIR/.rtsp_flags" 2>/dev/null || true
+                        fi
                         log "  Digest Auth richiesta su $url — avvio brute force"
                         _rtsp_digest_brute "$url" "$p"
                         # Se trovata credenziale, prova snapshot
@@ -4762,6 +4768,17 @@ s.close()
     if [[ -f "$rtsp_fp_script" ]]; then
         section "RTSP Vendor Fingerprint (rtsp_fingerprint.py)"
         run_cmd "rtsp_fp_py" "python3 \"$rtsp_fp_script\" $target --port $port 2>&1 | tee \"$OUTDIR\"/rtsp_fingerprint.txt"
+    fi
+
+    # Riepilogo path scoperti
+    if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/rtsp_streams.txt" ]]; then
+        local _n_paths; _n_paths=$(grep -c . "$OUTDIR/rtsp_streams.txt" 2>/dev/null || echo 0)
+        local _n_noauth; _n_noauth=$(grep -c "SENZA autenticazione" "$OUTDIR_BASE/findings.txt" 2>/dev/null || echo 0)
+        local _n_digest; _n_digest=$(grep -c "rtsp_digest_reported" "$OUTDIR/.rtsp_flags" 2>/dev/null || echo 0)
+        log "  RTSP riepilogo: $_n_paths path scoperti, $_n_noauth senza auth (CRITICAL), $_n_digest porte con Digest (MEDIUM)"
+        if [[ "$_n_paths" -gt 0 ]]; then
+            found INFO "RTSP:${port} — ${_n_paths} path scoperti (vedi ${OUTDIR}/rtsp_streams.txt)"
+        fi
     fi
 
     ok "RTSP audit completato → $OUTDIR"
@@ -9579,19 +9596,46 @@ usage_auto() {
     echo "Opzioni:"
     echo "  --stealth"
     echo "  --timeout N        Timeout minuti per modulo"
+    echo "  --profile NOME     Profilo dispositivo: ip-camera | voip-gateway | iot-adapter"
     echo "  --userlist FILE"
     echo "  --passlist FILE"
     echo "  --output DIR"
     echo "  --dry-run"
     echo "  --resume DIR       Riprende da un output dir esistente (salta le operazioni già completate)"
+    echo ""
+    echo "Profili:"
+    echo "  ip-camera    — abilita RTSP/ONVIF/cam-cve, salta SMB/Modbus/BACnet/EtherNet/IP/IPMI"
+    echo "  voip-gateway — abilita SIP/SIP-fuzz/voip-enum, salta RTSP/ONVIF/Modbus/BACnet"
+    echo "  iot-adapter  — assessment generico IoT (tutti i moduli industriali attivi)"
+}
+
+# _auto_profile_skip <profile> <module>  → ritorna 0 se il modulo va saltato
+_auto_profile_skip() {
+    local profile="$1" mod="$2"
+    case "$profile" in
+        ip-camera)
+            case "$mod" in
+                smb|ftp|telnet|modbus|bacnet|enip|coap|ipmi|rdp|vnc|ldap|sip|voip-enum|sip-fuzz) return 0 ;;
+            esac ;;
+        voip-gateway)
+            case "$mod" in
+                rtsp|onvif|cam-cve|modbus|bacnet|enip|coap|ipmi|rdp|vnc|ldap) return 0 ;;
+            esac ;;
+        iot-adapter)
+            case "$mod" in
+                rdp|vnc|ldap) return 0 ;;
+            esac ;;
+    esac
+    return 1
 }
 
 cmd_auto() {
-    local target="" _RESUME=0
+    local target="" _RESUME=0 _PROFILE=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --stealth)   STEALTH=1;                                              shift ;;
             --timeout)   _req_arg "$1" "${2:-}"; TIMEOUT="$2";                  shift 2 ;;
+            --profile)   _req_arg "$1" "${2:-}"; _PROFILE="$2";                 shift 2 ;;
             --userlist)  _req_arg "$1" "${2:-}"; CUSTOM_USERS="$2";             shift 2 ;;
             --passlist)  _req_arg "$1" "${2:-}"; CUSTOM_PASS="$2";              shift 2 ;;
             --output)    _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2";              shift 2 ;;
@@ -9603,16 +9647,29 @@ cmd_auto() {
         esac
     done
     [[ -z "$target" ]] && { err "TARGET mancante"; usage_auto; exit 1; }
+    # Validazione profilo
+    if [[ -n "$_PROFILE" ]]; then
+        case "$_PROFILE" in
+            ip-camera|voip-gateway|iot-adapter) ;;
+            *) err "Profilo sconosciuto: $_PROFILE (validi: ip-camera, voip-gateway, iot-adapter)"; exit 1 ;;
+        esac
+        log "Profilo attivo: $_PROFILE"
+    fi
+
     validate_target "$target"
     check_root
     apply_stealth
 
-    local base_ts; base_ts=$(date +%Y%m%d_%H%M%S)
     local _auto_start_ts; _auto_start_ts=$(date +%s)
-    OUTDIR_BASE="${OUTDIR_BASE:-/root/pentest/exa-dune-${target//./-}_${base_ts}}"
-    [[ $DRY_RUN -eq 0 ]] && mkdir -p "$OUTDIR_BASE"
+
+    # Usa la struttura per-target con symlink latest e retention
+    setup_outdir "$target"
+    # cmd_auto usa master.log invece di exa-dune.log
+    if [[ $DRY_RUN -eq 0 ]]; then
+        mv "$_log_file" "${OUTDIR_BASE}/master.log" 2>/dev/null || true
+        _log_file="${OUTDIR_BASE}/master.log"
+    fi
     OUTDIR="$OUTDIR_BASE"
-    [[ $DRY_RUN -eq 0 ]] && _log_file="$OUTDIR_BASE/master.log" || _log_file=""
 
     # ── Checkpoint + progress ─────────────────────────────────────
     local _ckpt_file="" _mod_done=0 _phase_num=0
@@ -10225,10 +10282,13 @@ cmd_auto() {
     fi
 
     # SIP/VoIP
-    { _port_open 5060 || _port_open 5061; } && _run_mod "SIP/VoIP" sip "$target" && ran_enum=1
+    { _port_open 5060 || _port_open 5061; } && \
+        ! _auto_profile_skip "${_PROFILE:-}" "sip" && \
+        _run_mod "SIP/VoIP" sip "$target" && ran_enum=1
 
     # ── SIP over WebSocket (SIP/WS e SIP/WSS) ─────────────────
-    if { _port_open 80 || _port_open 443 || _port_open 8080 || _port_open 8443; }; then
+    if { _port_open 80 || _port_open 443 || _port_open 8080 || _port_open 8443; } && \
+       ! _auto_profile_skip "${_PROFILE:-}" "sip"; then
         log "  ▶ [Fase 2/4] SIP over WebSocket probe"
         if [[ $DRY_RUN -eq 0 ]]; then
             local _sipws_dir="$OUTDIR_BASE/sip_websocket"
@@ -10261,14 +10321,17 @@ cmd_auto() {
     # SSH
     _port_open 22   && _run_mod "SSH     :22"   ssh    "$target" && ran_enum=1
     # Telnet
-    _port_open 23   && _run_mod "Telnet  :23"   telnet "$target" && ran_enum=1
+    _port_open 23   && ! _auto_profile_skip "${_PROFILE:-}" "telnet" && \
+        _run_mod "Telnet  :23"   telnet "$target" && ran_enum=1
     # FTP
-    _port_open 21   && _run_mod "FTP     :21"   ftp    "$target" && ran_enum=1
+    _port_open 21   && ! _auto_profile_skip "${_PROFILE:-}" "ftp" && \
+        _run_mod "FTP     :21"   ftp    "$target" && ran_enum=1
     # RTSP
-    { _port_open 554 || _port_open 8554; } && _run_mod "RTSP" rtsp "$target" && ran_enum=1
+    { _port_open 554 || _port_open 8554; } && ! _auto_profile_skip "${_PROFILE:-}" "rtsp" && \
+        _run_mod "RTSP" rtsp "$target" && ran_enum=1
     # ONVIF — RTSP + web presenti oppure vendor camera rilevato
-    if { { _port_open 554 || _port_open 8554; } && { _port_open 80 || _port_open 443; }; } || \
-       [[ $is_camera -eq 1 ]]; then
+    if { { { _port_open 554 || _port_open 8554; } && { _port_open 80 || _port_open 443; }; } || \
+         [[ $is_camera -eq 1 ]]; } && ! _auto_profile_skip "${_PROFILE:-}" "onvif"; then
         _run_mod "ONVIF" onvif "$target" && ran_enum=1
     fi
     # SNMP — da porta oppure se quick probe ha già risposto
@@ -10279,19 +10342,25 @@ cmd_auto() {
     # MQTT
     _port_open 1883 && _run_mod "MQTT  :1883"   mqtt   "$target" && ran_enum=1
     # SMB/NetBIOS
-    _port_open 445  && _run_mod "SMB/NetBIOS"   smb    "$target" && ran_enum=1
+    _port_open 445  && ! _auto_profile_skip "${_PROFILE:-}" "smb" && \
+        _run_mod "SMB/NetBIOS"   smb    "$target" && ran_enum=1
     # UPnP/SSDP
     _port_open 1900 && _run_mod "UPnP/SSDP"     upnp   "$target" && ran_enum=1
     # Modbus
-    _port_open 502  && _run_mod "Modbus  :502"  modbus "$target" && ran_enum=1
+    _port_open 502  && ! _auto_profile_skip "${_PROFILE:-}" "modbus" && \
+        _run_mod "Modbus  :502"  modbus "$target" && ran_enum=1
     # BACnet
-    _port_open 47808 && _run_mod "BACnet :47808" bacnet "$target" && ran_enum=1
+    _port_open 47808 && ! _auto_profile_skip "${_PROFILE:-}" "bacnet" && \
+        _run_mod "BACnet :47808" bacnet "$target" && ran_enum=1
     # EtherNet/IP (CIP PLC)
-    _port_open 44818 && _run_mod "EtherNet/IP :44818" enip "$target" && ran_enum=1
+    _port_open 44818 && ! _auto_profile_skip "${_PROFILE:-}" "enip" && \
+        _run_mod "EtherNet/IP :44818" enip "$target" && ran_enum=1
     # CoAP (IoT UDP 5683)
-    _port_open 5683 && _run_mod "CoAP    :5683"  coap   "$target" && ran_enum=1
+    _port_open 5683 && ! _auto_profile_skip "${_PROFILE:-}" "coap" && \
+        _run_mod "CoAP    :5683"  coap   "$target" && ran_enum=1
     # IPMI/BMC
-    _port_open 623  && _run_mod "IPMI/BMC :623"  ipmi   "$target" && ran_enum=1
+    _port_open 623  && ! _auto_profile_skip "${_PROFILE:-}" "ipmi" && \
+        _run_mod "IPMI/BMC :623"  ipmi   "$target" && ran_enum=1
     # Printer JetDirect/IPP/LPD
     { _port_open 9100 || _port_open 631 || _port_open 515; } && \
         _run_mod "Printer :9100/631" printer "$target" && ran_enum=1
@@ -12968,11 +13037,34 @@ except: pass
     echo -e "${BOLD}${GREEN}══════════════════════════════════════════${NC}"
     echo -e "${BOLD}${GREEN}  ASSESSMENT COMPLETATO${NC}"
     echo -e "${BOLD}${GREEN}══════════════════════════════════════════${NC}"
-    printf "  %-20s %s\n" "Target:"       "$target"
-    printf "  %-20s %s\n" "Durata:"       "$_dur_fmt"
-    printf "  %-20s %s\n" "Output dir:"   "$OUTDIR_BASE"
+    printf "  %-20s %s\n" "Target:"          "$target"
+    [[ -n "${_PROFILE:-}" ]] && \
+        printf "  %-20s %s\n" "Profilo:"     "$_PROFILE"
+    printf "  %-20s %s\n" "Durata:"          "$_dur_fmt"
+    printf "  %-20s %s\n" "Output dir:"      "$OUTDIR_BASE"
+    # Mostra symlink latest se disponibile
+    local _latest_link; _latest_link=$(dirname "$OUTDIR_BASE")/latest
+    [[ -L "$_latest_link" ]] && \
+        printf "  %-20s %s\n" "Accesso rapido:"  "$_latest_link → $(readlink "$_latest_link")"
     printf "  %-20s %s\n" "Findings totali:" "$_f4_total (C:$_f4_crit H:$_f4_high M:$_f4_med L:$_f4_low)"
-    printf "  %-20s %s\n" "Credenziali:"  "$_f4_creds trovate"
+    printf "  %-20s %s\n" "Credenziali:"     "$_f4_creds trovate"
+
+    # Elenco findings CRITICAL e HIGH per visibilità immediata
+    if [[ $DRY_RUN -eq 0 && $(( _f4_crit + _f4_high )) -gt 0 ]]; then
+        echo ""
+        echo -e "${BOLD}  Findings da analizzare immediatamente:${NC}"
+        find "$OUTDIR_BASE" -name "findings.txt" -print0 2>/dev/null | \
+        xargs -0 grep -hE '^\[(CRITICAL|HIGH)\]' 2>/dev/null | \
+        sort -u | \
+        while IFS= read -r _fl; do
+            case "$_fl" in
+                \[CRITICAL\]*) echo -e "    \033[1;37;41m▸\033[0m ${_fl#\[CRITICAL\] }" ;;
+                \[HIGH\]*)     echo -e "    \033[1;31m▸\033[0m ${_fl#\[HIGH\] }" ;;
+            esac
+        done
+    fi
+
+    echo ""
     echo -e "${BOLD}${GREEN}══════════════════════════════════════════${NC}"
     echo ""
 }
